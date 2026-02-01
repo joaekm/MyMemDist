@@ -1,0 +1,397 @@
+# DFM Prompt-bibliotek (services_prompts.yaml)
+
+# --- Transformations-agenten (Ljud/Video) ---
+transcriber:
+
+  # PASS 1: Rådatat (Ljud -> Text)
+  pass1_raw: |
+    Din uppgift är att transkribera ljudfilen ordagrant till svenska.
+
+    INSTRUKTIONER:
+    1. Skriv exakt vad som sägs, ord för ord.
+    2. Använd generiska etiketter för talare: "Talare 1:", "Talare 2:", etc.
+    3. Försök INTE gissa vem som är vem baserat på rösten.
+    4. Gör INGA sammanfattningar.
+    5. Utelämna talljud som "mm", "uh", "eh", "öh" och liknande.
+
+  # STEG 4: Berikningsfrågor (transkribering → söktermer)
+  enrichment_queries: |
+    Analysera denna transkribering och extrahera sökbara termer.
+    {calendar_info}
+    TRANSKRIBERING (första {context_limit} tecken):
+    {transcript_text}
+
+    Extrahera:
+    1. person_queries: Namn på personer som nämns eller deltar
+    2. org_queries: Organisationer, företag som nämns
+    3. project_queries: Projekt, produkter, initiativ som nämns
+    4. semantic_queries: Nyckelämnen för semantisk sökning (2-3 ord per fråga)
+
+    Returnera JSON:
+    {{
+      "person_queries": ["Marc Tersmantoll", "Joakim"],
+      "org_queries": ["Digitalist", "Sitevision"],
+      "project_queries": ["Industritorget"],
+      "semantic_queries": ["beläggningsgrad prognos", "kundprojekt status"]
+    }}
+
+    Svara ENDAST med JSON.
+
+  # STEG 5: Kontext-destillering (rådata → ContextPackage)
+  context_distill: |
+    Baserat på denna rådata, skapa en koncis kontextbeskrivning.
+
+    RÅDATA:
+    {raw_data}
+
+    Besvara EXAKT dessa sex frågor:
+    1. NÄR? (datum, tid, duration)
+    2. VILKA? (lista med namn)
+    3. VAR JOBBAR DE? (organisation och roll för varje person)
+    4. VAD? (specifik kontext - vad mötet handlar om, 1 mening)
+    5. KRINGLIGGANDE? (generell kontext - bakgrund, projekt, 1-2 meningar)
+    6. RELATIONS_SUMMARY? (rik beskrivning av HUR personerna relaterar till varandra, 2-3 meningar)
+
+    Returnera JSON:
+    {{
+      "when": "2025-12-11 14:00, duration 28 min",
+      "who": ["Marc Tersmantoll", "Joakim Ekman"],
+      "affiliations": ["Marc: Digitalist, Affärsansvarig", "Joakim: Digitalist, VD"],
+      "topic": "Avstämning om beläggningsgrad och prognos för Q1",
+      "context": "Digitalist arbetar med Sitevision-partnership. Fokus på kundprojekt och resursplanering.",
+      "relations_summary": "Marc Tersmantoll är kundansvarig på Digitalist och rapporterar till Joakim Ekman (VD)."
+    }}
+
+    Svara ENDAST med JSON.
+
+  # STEG 6: Speaker-mapping (per chunk)
+  speaker_mapping: |
+    Identifiera talarna i denna transkribering.
+
+    FÖRESLAGNA DELTAGARE (från kalender):
+    {participants}
+
+    DERAS ROLLER:
+    {affiliations}
+
+    TRANSKRIBERING:
+    {transcript_text}
+
+    REGLER:
+    1. SJÄLVPRESENTATION: Om någon säger "jag heter X" eller "X heter jag" - använd det namnet.
+    2. TILLTAL: Om någon tilltalas vid namn och svarar - notera vem som svarar.
+    3. VALIDERING: Om deltagarlistan INTE matchar innehållet (fel företag, fel kontext,
+       fel roller, fel ämne), returnera tom mapping {{}}.
+    4. ENDAST SÄKRA: Mappa endast om du har tydligt bevis. Gissningar är INTE OK.
+
+    Returnera JSON:
+    {{"Talare 1": "Förnamn Efternamn", "Talare 2": "Förnamn Efternamn"}}
+
+    VIKTIGT: Tom mapping {{}} är bättre än felaktig mapping.
+    Svara ENDAST med JSON.
+
+  # STEG 7: Delstrukturering (chunks → parts med metadata)
+  part_structuring: |
+    Analysera dessa {num_parts} delar av ett möte och ge varje del en titel och ingress.
+
+    KONTEXT:
+    - Deltagare: {participants}
+    - Ämne: {topic}
+
+    DELAR:
+    {parts_json}
+
+    För varje del (id 1-{num_parts}), returnera:
+    - title: Kort beskrivande titel
+    - ingress: 1-2 meningar som sammanfattar
+    - speakers: Vilka som pratar i denna del
+    - topics: Nyckelord för ämnen
+
+    Returnera JSON-array med EXAKT {num_parts} element:
+    [
+      {{
+        "id": 1,
+        "title": "Inledning och agenda",
+        "ingress": "Marc och Joakim inleder mötet...",
+        "speakers": ["Marc Tersmantoll"],
+        "topics": ["agenda"]
+      }}
+    ]
+
+    Svara ENDAST med JSON-array.
+    
+
+  # PASS 2: Berikning & Analys (Text + Kontext -> Insikt)
+  # OBS: Returnerar INTE full transkription (token-limit). Python applicerar speaker_map på raw_transcript.
+  pass2_enriched: |
+    {context_injection}
+
+    Du har fått en rå transkription av ett möte eller en inspelning. Din uppgift är att analysera och extrahera metadata.
+
+    UTFÖR FÖLJANDE STEG:
+
+    STEG 1: KVALITETSKONTROLL
+    Analysera om råtexten är användbar.
+    Returnera quality_status "FAILED" om texten är mestadels gibberish, upprepningar eller tekniska fel.
+
+    STEG 2: TALARIDENTIFIERING (Om quality_status är "OK")
+    Identifiera vilka verkliga personer som motsvarar "Talare 1", "Talare 2" etc.
+    Använd "MÖTESKONTEXT" och "KÄNDA TALARE" från kontexten.
+
+    Skapa en speaker_map som mappar generiska etiketter till riktiga namn:
+    - Nyckeln är EXAKT etiketten från råtranskriptet (t.ex. "Talare 1:")
+    - Värdet är det identifierade namnet (t.ex. "Anna Andersson:")
+    - Om du inte kan identifiera en talare, utelämna den från mappen.
+
+    STEG 3: METADATA EXTRAKTION
+    Sammanfatta innehållet och extrahera metadata.
+
+    - Titel: Om kontext finns (t.ex. "Budgetmöte"), använd den. Annars, skapa en kort, beskrivande titel baserat på innehållet.
+    - Plats: Om kontext/innehåll nämner plats (t.ex. "Teams", "Konferensrummet"), ange det. Annars "Okänd".
+    - Talare: Lista namn, och om möjligt Roll/Titel och Arbetsgivare baserat på kontexten/grafen.
+
+    RETURNERA EXAKT DENNA JSON-STRUKTUR:
+    {
+      "quality_status": "OK" eller "FAILED",
+      "failure_reason": "Endast vid FAILED",
+      "title": "Kort beskrivande titel",
+      "location": "Plats eller Okänd",
+      "speaker_map": {"Talare 1:": "Anna Andersson:", "Talare 2:": "Erik Svensson:"},
+      "summary": "Kortfattad sammanfattning av mötet",
+      "speakers_detailed": [
+        {"name": "Namn Efternamn", "role": "Titel/Roll", "org": "Organisation"}
+      ],
+      "keywords": ["tag1", "tag2"],
+      "entities": ["Personer", "System", "Projekt"]
+    }
+
+# --- Doc Converter (Textfiler/Dokument) ---
+doc_converter:
+  doc_summary_prompt: |
+      Analysera detta dokument och skapa två specifika sammanfattningar på svenska.
+
+      1. context_summary: En kort text som beskriver vad som gör just detta dokument unikt.
+         - Om DOKUMENTÄGARE anges: Skriv ur ägarens perspektiv utan att nämna ägaren i varje mening.
+         - Fokusera på vad som hände och vem andra som var inblandade.
+      2. relations_summary: En kort text som beskriver dokumentets viktigaste kopplingar till personer, projekt eller andra händelser.
+         - Inkludera INTE dokumentägaren som en "relation" - fokusera på andra entiteter.
+         - Exempel: "Möte med Anders Berg om Projekt X, diskuterade resursallokering."
+      3. document_keywords: Generera en lista med nyckelord som kan tjäna som sökord för att maximera träffsäkerheten vid textsökning. Minst 5 max 10 stycken.
+
+      TEXT:
+      {text}
+
+      RETURNERA JSON:
+      {{
+        "context_summary": "...",
+        "relations_summary": "...",
+        "document_keywords": ["nyckelord1", "nyckelord2", "viktigt begrepp"]
+      }}
+
+  strict_entity_extraction: |
+    Du är en expert på Knowledge Graph Extraction. Din uppgift är att strukturera ostrukturerad text till en graf bestående av Noder och Relationer, strikt baserat på det bifogade schemat.
+
+    === DINA INSTRUKTIONER ===
+    1. EXTRAHERA NODER:
+    
+    TILLÅTNA NODTYPER (OCH EGENSKAPER):
+    Här är de enda nodtyper du får skapa. Observera särskilt vilka egenskaper och enum-värden som är tillåtna.
+    {node_types_context}
+
+      - Identifiera entiteter som matchar schemat.
+      - Fyll i så många egenskaper som möjligt om informationen finns i texten.
+      - Om en egenskap har en lista med tillåtna värden [Val1, Val2...], MÅSTE du använda ett av dessa exakt. Hitta inte på egna.
+      - "confidence": Sätts baserat på "Schema-Fit" (0.0 - 1.0).
+        * 0.8-1.0 (Hög): Entiteten uppfyller definitionen tydligt och har unika attribut.
+        * <0.3 (Låg/Brus): Entiteten är generisk eller trivial.
+      - "node_context": En fras eller mening som beskriver vad vi lärt oss om entiteten baserat på texten.
+      - "status": Sätt ALLTID till "PROVISIONAL" (om det inte är ett Ankare som du återanvänder).
+      
+    
+    2. ANKARE (Prioritet 1):
+      - Kontrollera alltid listan "KÄNDA ENTITETER" om sådan finns.
+      - Om texten nämner en entitet som matchar en känd entitet, MÅSTE du återanvända dess UUID exakt.
+    
+    3. SKAPA RELATIONER:
+      - Identifiera kopplingar mellan noderna.
+      - Skapa ENDAST relationstyper som existerar enligt TILLÅTNA RELATIONSTYPER nedan.
+      - Koppla relationer ENDAST på det sätt som explicit framgår som tillåtet (Källa -> Mål).
+      - Om en relationstyp har "properties" med required=true, MÅSTE du inkludera dessa.
+        Exempel: HAS_BUSINESS_RELATION kräver "relation_type" (Kund, Leverantör, Partner, etc.)
+      - VIKTIGT: Abstrakta roller (Kund, Leverantör, Partner) är INTE noder - de är edge properties.
+    
+    TILLÅTNA RELATIONSTYPER (WHITELIST):
+    {edge_types_context}
+
+    === KONTEXT FRÅN KÄLLAN ===
+    {known_entities_context}
+
+    RETURNERA JSON (Exakt format):
+    {{
+      "nodes": [
+        {{
+          "name": "Namn",
+          "type": "Nodtyp",
+          "org_type": "Bolag",
+          "node_context": "Beskrivande mening om entitetens roll i dokumentet.",
+          "status": "PROVISIONAL",
+          "confidence": 0.85
+        }}
+      ],
+      "edges": [
+        {{ "source": "Namn", "target": "Namn", "type": "RELATIONSTYP", "confidence": 0.9 }}
+      ]
+    }}
+
+    TEXT ATT ANALYSERA:
+    "{text_chunk}"
+
+  entity_critic: |
+    Du är en strikt kvalitetsgranskare för Knowledge Graph-entiteter.
+
+    Granska listan nedan och FILTRERA BORT entiteter som är:
+    1. **Brus** - Generiska termer, verb, adjektiv, systemtermer
+    2. **Felkategoriserade** - Typ matchar inte definitionen nedan
+    3. **Dubbletter** - Varianter av samma entitet
+
+    === TYPDEFINITIONER (från schema) ===
+    {type_definitions}
+
+    === ENTITETER ATT GRANSKA ===
+    {entities_json}
+
+    Returnera JSON:
+    {{
+      "approved": [{{"name": "...", "type": "...", "reason": "kort motivering"}}],
+      "rejected": [{{"name": "...", "type": "...", "reason": "varför avvisad"}}]
+    }}
+
+# --- Dreamer (Taxonomi-konsolidering) ---
+dreamer:
+  consolidation_prompt: |
+    Du är en taxonomi-expert. Din uppgift är att kategorisera NYA noder under rätt masternode.
+    
+    BEFINTLIGA MASTERNODER (med beskrivningar):
+    {master_nodes}
+    
+    NYA KONCEPT (okategoriserade):
+    {new_concepts}
+    
+    NYA ENTITETER (per typ):
+    {new_entities}
+    
+    INSTRUKTIONER:
+    1. Placera varje nytt koncept under den MEST passande masternoden
+    2. Använd EXAKT nodnamn från BEFINTLIGA MASTERNODER ovan som nycklar
+    3. Om ett koncept är ett ALIAS för något som redan finns, lägg det i aliases_detected
+    4. Var konsekvent - liknande koncept ska hamna under samma masternode
+    5. VARJE koncept MÅSTE placeras under en masternode - ingen får utelämnas
+    
+    RETURNERA ENDAST GILTIG JSON. Exempel på korrekt format:
+    {"Händelser": ["Sprint review", "Standup"], "Teknologier": ["Kubernetes"], "Person": ["Anna"], "aliases_detected": [{"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}]}
+    
+    Nycklar MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER. Inkludera INTE noder utan nya koncept.
+
+  structural_analysis: |
+    ANALYSERA om denna nod bör delas (SPLIT), döpas om (RENAME), kategoriseras om (RE-CATEGORIZE) eller raderas (DELETE).
+
+    NOD: {id} ({type})
+
+    SCHEMA-REGEL FÖR "{type}":
+    {node_type_description}
+
+    KONTEXT (node_context med spårbarhet):
+    {context_list}
+
+    TILLÅTNA TYPER (från taxonomi):
+    {taxonomy_nodes}
+
+    KRITERIER:
+    - SPLIT: Om kontexten innehåller distinkt olika kluster (t.ex. olika personer med samma namn, eller ett ord som betyder två helt olika saker).
+    - RENAME: Om ID:t är svagt (UUID, "Talare 1", "Fil_X") men kontexten innehåller ett tydligt egennamn.
+    - RE-CATEGORIZE: Om kontexten BRYTER mot SCHEMA-REGELN ovan (t.ex. tekniska moduler som felaktigt klassats som "Project").
+    - DELETE: Om noden är brus (stoppord, verb, meningslös text), saknar substans, eller bryter mot schema-regeln utan möjlig omkategorisering.
+    - KEEP: Om noden är stabil och korrekt enligt schema-regeln.
+    
+    BEDÖMNING:
+    Ange 'confidence' (0.0 - 1.0). Var konservativ. 1.0 = Helt säker. 0.5 = Gissning.
+    
+    JSON:
+    {{
+      "action": "SPLIT" | "RENAME" | "RE-CATEGORIZE" | "DELETE" | "KEEP",
+      "confidence": 0.0,
+      "reason": "Motivering",
+      "new_name": "Sträng" (vid RENAME),
+      "new_type": "Sträng" (vid RE-CATEGORIZE),
+      "split_clusters": [ {{"name": "Namn", "context_indices": [0, 2]}} ] (vid SPLIT)
+    }}
+
+  semantic_update: |
+    Din uppgift är att FÖRÄDLA metadata för dokumentet "{filename}".
+    Du ska kombinera dokumentets befintliga sammanfattning med ny, djupare insikt från kunskapsgrafen.
+
+    === NUVARANDE METADATA (Baserat på dokumentets innehåll) ===
+    Context: {current_context}
+    Relations: {current_relations}
+    Keywords: {current_keywords}
+
+    === NY GRAF-INSIKT (Aggregerad kunskap om entiteter i dokumentet) ===
+    {node_context}
+
+    === INSTRUKTION ===
+    1. Behåll kärnan i "NUVARANDE METADATA" (det speglar innehållet i dokumentet).
+    2. Injicera detaljer från "NY GRAF-INSIKT" där det förtydligar (t.ex. byt ut "ett projekt" mot "Adda PoC" om grafen bekräftar det).
+    3. Uppdatera keywords: Behåll relevanta gamla, lägg till nya precisa termer från grafen.
+    4. context_summary ska vara en syntes av innehåll + kontext.
+    5. Om DOKUMENTÄGARE anges i graf-insikten:
+       - Skriv ur ägarens perspektiv utan att upprepa ägarens namn.
+       - Fokusera på VAD som hände och VEM ANDRA som var inblandade.
+
+    JSON:
+    {{
+      "context_summary": "...",
+      "relations_summary": "...",
+      "document_keywords": ["ord1", "ord2"]
+    }}
+
+# --- Entity Resolver (Dreamer: Dubblett-jakt) ---
+entity_resolver:
+  entity_resolution_prompt: |
+    Du är en expert på Identity Resolution. Din uppgift är att avgöra om två noder (Node A och Node B) representerar SAMMA verkliga entitet.
+
+    NODE A (Kandidat):
+    {node_a_json}
+
+    NODE B (Matchningsobjekt):
+    {node_b_json}
+
+    INSTRUKTIONER:
+    1. Jämför namn, alias, typ och kontext.
+    2. Ta hänsyn till stavfel, smeknamn (Jocke/Joakim) och namnvariationer (AB/Aktiebolag).
+    3. Titta noga på 'context_keywords' om de finns - pekar de på samma roll/område?
+    4. Om namnen är lika men kontexten är helt olika (t.ex. Jocke på IT vs Jocke på Sälj), är det INTE en match.
+    
+    BEDÖMNING:
+    Returnera en JSON med:
+    - "decision": "MERGE" (om det är samma entitet), "IGNORE" (om olika eller osäkert).
+    - "confidence": 0.0 - 1.0 (för MERGE, måste vara >= 0.9 för att godkännas)
+    - "reason": Kort förklaring.
+
+    RETURNERA ENDAST JSON:
+    {{
+      "decision": "MERGE",
+      "confidence": 0.95,
+      "reason": "Namnen är identiska och båda har kontexten 'IT-chef'."
+    }}
+
+  context_pruning_prompt: |
+    Du ska städa upp en lista med nyckelord för en entitet.
+    Ta bort dubbletter, synonymer och irrelevanta ord. Behåll de mest beskrivande.
+    
+    LISTA:
+    {keywords}
+    
+    RETURNERA JSON:
+    {{
+      "pruned_keywords": ["ord1", "ord2"]
+    }}

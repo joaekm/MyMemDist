@@ -1,0 +1,165 @@
+{
+  "meta": {
+    "version": "1.1",
+    "description": "SSOT för Lake-filernas YAML frontmatter. Används av property chain validator för att upptäcka läckor."
+  },
+  "base_properties": {
+    "description": "Obligatoriska fält som alla Lake-filer måste ha.",
+    "properties": {
+      "unit_id": {
+        "type": "uuid",
+        "required": true,
+        "include_in_vector": true,
+        "description": "Unik identifierare (UUID) som länkar till Assets och Index"
+      },
+      "source_ref": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": false,
+        "description": "Absolut sökväg till Lake-filen själv"
+      },
+      "original_filename": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": true,
+        "vector_key": "filename",
+        "description": "Originalfilnamnet från Assets (med UUID-suffix)"
+      },
+      "timestamp_ingestion": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": true,
+        "vector_key": "timestamp",
+        "description": "När filen skapades i Lake (ISO 8601)"
+      },
+      "timestamp_content": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": true,
+        "description": "När innehållet hände (ISO 8601 eller 'UNKNOWN')"
+      },
+      "timestamp_updated": {
+        "type": "timestamp",
+        "required": false,
+        "default": null,
+        "include_in_vector": false,
+        "description": "Sätts av Dreamer vid semantisk förädling"
+      },
+      "source_type": {
+        "type": "enum",
+        "required": true,
+        "include_in_vector": true,
+        "values": ["Document", "Slack Log", "Email Thread", "Calendar Event", "Transcript"],
+        "description": "Typ av källa som genererade dokumentet"
+      },
+      "access_level": {
+        "type": "integer",
+        "required": true,
+        "default": 5,
+        "include_in_vector": true,
+        "min": 1,
+        "max": 5,
+        "description": "Säkerhetsnivå (5=PRIVATE, 4=RESTRICTED, 3=INTERNAL, 2=PARTNER, 1=PUBLIC). Default 5 vid ingestion."
+      },
+      "owner": {
+        "type": "string",
+        "required": true,
+        "default_from": "user_profile.identity.name",
+        "include_in_vector": true,
+        "description": "Dokumentets ägare (hämtas från user_profile.yaml). Används för att skriva sammanfattningar ur rätt perspektiv."
+      }
+    }
+  },
+  "semantic_properties": {
+    "description": "AI-genererade semantiska fält. Skapas av DocConverter/Transcriber.",
+    "properties": {
+      "context_summary": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": false,
+        "description": "AI-genererad sammanfattning av dokumentets kontext och syfte"
+      },
+      "relations_summary": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": false,
+        "description": "AI-genererad sammanfattning av relationer och referenser i dokumentet"
+      },
+      "document_keywords": {
+        "type": "list",
+        "required": false,
+        "include_in_vector": false,
+        "description": "AI-extraherade nyckelord för sökbarhet"
+      },
+      "ai_model": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": false,
+        "description": "Vilken AI-modell som genererade semantic properties"
+      }
+    }
+  },
+  "transcript_properties": {
+    "description": "Extra fält för transkript (source_type=Transcript). Används av Ingestion Engine vid import från Assets/Transcripts.",
+    "properties": {
+      "duration": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": true,
+        "description": "Ljudfilens längd i format HH:MM:SS"
+      },
+      "meeting_title": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": true,
+        "description": "Mötets titel (från kalender eller AI-genererad)"
+      },
+      "participants": {
+        "type": "list",
+        "required": false,
+        "include_in_vector": true,
+        "description": "Lista med identifierade mötesdeltagare"
+      },
+      "parts": {
+        "type": "list",
+        "required": false,
+        "include_in_vector": false,
+        "description": "Lista med delstruktur för transkriptet",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {"type": "integer", "description": "Del-nummer (1-indexed)"},
+            "title": {"type": "string", "description": "Rubrik för delen"},
+            "timestamp_start": {"type": "string", "description": "Starttid HH:MM:SS"},
+            "timestamp_end": {"type": "string", "description": "Sluttid HH:MM:SS"},
+            "speakers": {"type": "list", "description": "Talare i denna del"},
+            "topics": {"type": "list", "description": "Nyckelämnen i denna del"}
+          }
+        }
+      }
+    }
+  },
+  "deprecated_properties": {
+    "description": "Fält som inte längre ska användas. Validatorn varnar om de hittas.",
+    "properties": {
+      "keywords": {
+        "reason": "Ersatt av 'document_keywords'",
+        "replacement": "document_keywords"
+      },
+      "summary": {
+        "reason": "Ersatt av 'context_summary'",
+        "replacement": "context_summary"
+      },
+      "node_context": {
+        "reason": "Flyttat till graf-noder, inte Lake-filer",
+        "replacement": null
+      }
+    }
+  },
+  "validation_rules": {
+    "strict_mode": true,
+    "fail_on_unknown_property": true,
+    "fail_on_deprecated_property": true,
+    "description": "Om strict_mode är true, HARDFAIL:ar validatorn på okända eller deprecated fält"
+  }
+}

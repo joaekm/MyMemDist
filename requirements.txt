@@ -1,0 +1,43 @@
+# Kravfil för DFM-projektet (Digitalist Företagsminne)
+
+# Filbevakning
+watchdog
+
+# Config & Metadata
+pyyaml
+
+# Text-extrahering (Dokument)
+pymupdf
+python-docx
+
+# Dataanalys & Tabellhantering (Nytt för v4.2)
+pandas              # För att läsa CSV/Excel strukturerat
+openpyxl            # Motor för att läsa .xlsx-filer
+tabulate            # Krävs för df.to_markdown()
+
+# Validering & Schema
+pydantic>=2.0       # Datavalidering och scheman (v2 för prestanda)
+
+# AI & API
+google-genai
+anthropic
+
+# Google OAuth (Gmail & Calendar)
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+
+# --- DATABASER ---
+duckdb              # SQL-databas för graf (ersätter kuzu)
+chromadb            # Vektordatabas (Inbäddad)
+sentence-transformers # För att skapa embeddings lokalt (sparar pengar/tid)
+
+# Slack-agent
+slack_sdk
+
+# Terminalformatering
+rich
+
+# MCP
+fastmcp
+uvicorn
