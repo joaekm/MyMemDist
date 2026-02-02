@@ -733,6 +733,7 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List) -> tuple:
                     target_type=entity.get("target_type", "?")
                 )
 
+    graph.close()
     LOGGER.info(f"Graph: {filename} -> {nodes_written} nodes, {edges_written} edges")
     return nodes_written, edges_written
 

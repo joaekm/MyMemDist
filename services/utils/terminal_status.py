@@ -39,6 +39,7 @@ PROCESS_CONFIG = {
     "gmail":          {"emoji": "📧", "color": "magenta"},
     "calendar":       {"emoji": "📅", "color": "magenta"},
     "retriever":      {"emoji": "📥", "color": "yellow"},
+    "rode":           {"emoji": "🎙️", "color": "cyan"},
     "rebuild":        {"emoji": "🔄", "color": "white"},
     "dreamer":        {"emoji": "💭", "color": "cyan"},
     "service":        {"emoji": "⚙️", "color": "white"},

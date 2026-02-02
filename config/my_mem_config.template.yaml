@@ -155,6 +155,12 @@ collectors:
   slack:
     page_size: 200
 
+  rode:
+    volume_prefix: "WirelessPRO"           # Volymnamn-prefix i /Volumes/
+    poll_interval_seconds: 30              # Sekunder mellan pollar
+    ffmpeg_bitrate: "128k"                 # AAC bitrate för m4a-konvertering
+    state_dir: "~/MyMemory/Assets/.rode_state"  # Spårfiler per enhet
+
 # Validation
 validation:
   min_year: 2015

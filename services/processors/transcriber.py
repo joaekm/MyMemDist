@@ -359,13 +359,14 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
     if not model:
         raise ValueError("HARDFAIL: 'model_transcribe' saknas i config")
 
-    # Beräkna chunks
+    # Beräkna chunks - behåll källfilens format
+    source_ext = os.path.splitext(audio_metadata.filepath)[1].lstrip('.').lower() or "m4a"
     audio_info = AudioInfo(
         filepath=audio_metadata.filepath,
         duration_seconds=audio_metadata.duration_seconds,
         total_bytes=audio_metadata.total_bytes,
         bytes_per_second=audio_metadata.bytes_per_second,
-        format="m4a"
+        format=source_ext
     )
     chunk_infos = calculate_chunks(audio_info, chunk_size_bytes=CHUNK_SIZE_BYTES)
 
@@ -375,7 +376,7 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
         # Fas 1: Extrahera chunks med ffmpeg
         chunk_paths = []
         for chunk_info in chunk_infos:
-            chunk_filename = f"chunk_{chunk_info.chunk_index}.m4a"
+            chunk_filename = f"chunk_{chunk_info.chunk_index}.{source_ext}"
             chunk_path = os.path.join(temp_dir, chunk_filename)
 
             extract_audio_segment(
@@ -391,7 +392,7 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
         # Fas 2: Ladda upp alla filer till Gemini parallellt (med throttling)
         def upload_chunk(chunk_data):
             chunk_info, chunk_path = chunk_data
-            chunk_filename = f"chunk_{chunk_info.chunk_index}.m4a"
+            chunk_filename = f"chunk_{chunk_info.chunk_index}.{source_ext}"
 
             # Throttle upload-anrop
             GEMINI_THROTTLER.wait()

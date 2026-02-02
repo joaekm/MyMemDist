@@ -138,33 +138,54 @@ def validera_chroma(expected_lake_count, lake_ids):
         # Hämta alla vektorer med metadata
         all_vectors = coll.get(include=['metadatas'])
 
-        # Separera dokument-vektorer och graf-noder
-        doc_vectors = {}  # id -> metadata
-        graph_vectors = {}  # id -> metadata
+        # Separera tre kategorier: dokument, chunks (part_N), graf-noder
+        # Chunk-ID format från OBJEKT-89: "uuid__part_N" (dubbelt understreck)
+        doc_vectors = {}    # id -> metadata (bas-dokument)
+        chunk_vectors = {}  # id -> metadata (transkript-delar)
+        graph_vectors = {}  # id -> metadata (graf-noder)
+
+        chunk_id_pattern = re.compile(
+            r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})__part_\d+$'
+        )
 
         for vid, meta in zip(all_vectors['ids'], all_vectors['metadatas']):
             if meta.get('source') == 'graph_node':
                 graph_vectors[vid] = meta
+            elif chunk_id_pattern.match(vid):
+                chunk_vectors[vid] = meta
             else:
                 doc_vectors[vid] = meta
 
+        # Räkna unika parent-dokument bland chunks
+        chunk_parents = set()
+        for vid in chunk_vectors:
+            parent_id = vid.split('__part_')[0]
+            chunk_parents.add(parent_id)
+
         print(f"🧠 Vektorer totalt: {total_count} st")
         print(f"   - Dokument: {len(doc_vectors)} st")
+        print(f"   - Chunks: {len(chunk_vectors)} st ({len(chunk_parents)} dokument)")
         print(f"   - Graf-noder: {len(graph_vectors)} st")
 
         # 2a. Validera dokument mot Lake
+        # Ett Lake-dokument kan representeras ANTINGEN som bas-dokument ELLER som chunks
         lake_id_set = set(lake_ids.keys())
         doc_id_set = set(doc_vectors.keys())
 
-        missing_in_vector = lake_id_set - doc_id_set
+        # Dokument som finns i Vector (direkt eller via chunks)
+        covered_in_vector = doc_id_set | chunk_parents
+        missing_in_vector = lake_id_set - covered_in_vector
         orphan_docs = doc_id_set - lake_id_set
+        orphan_chunks = chunk_parents - lake_id_set
 
-        if len(doc_vectors) == expected_lake_count and not missing_in_vector:
-            print(f"\n✅ DOKUMENT SYNKADE: {len(doc_vectors)} vektorer matchar {expected_lake_count} Lake-filer")
+        if not missing_in_vector and not orphan_docs and not orphan_chunks:
+            print(f"\n✅ DOKUMENT SYNKADE: {len(covered_in_vector)} dokument i Vector matchar {expected_lake_count} Lake-filer")
+            if chunk_parents:
+                print(f"   ({len(doc_id_set)} hela + {len(chunk_parents)} chunk-indexerade)")
         else:
             if missing_in_vector:
                 print(f"\n❌ Saknas i Vector ({len(missing_in_vector)} st):")
-                for uid in list(missing_in_vector)[:5]:
+                for uid in sorted(missing_in_vector)[:5]:
                     filename = lake_ids.get(uid, uid)
                     display_name = filename.rsplit('_', 1)[0] if '_' in filename else filename
                     print(f"   - {display_name}")
@@ -173,6 +194,9 @@ def validera_chroma(expected_lake_count, lake_ids):
 
             if orphan_docs:
                 print(f"\n⚠️ Föräldralösa dokument ({len(orphan_docs)} st) - finns ej i Lake")
+
+            if orphan_chunks:
+                print(f"\n⚠️ Föräldralösa chunks ({len(orphan_chunks)} parent-dokument) - finns ej i Lake")
 
         # 2b. Validera graf-noder mot GraphDB
         if os.path.exists(GRAPH_DB_PATH):
@@ -183,10 +207,13 @@ def validera_chroma(expected_lake_count, lake_ids):
             if len(graph_vectors) == graph_node_count:
                 print(f"✅ GRAF-NODER SYNKADE: {len(graph_vectors)} vektorer matchar {graph_node_count} graf-noder")
             else:
-                diff = abs(len(graph_vectors) - graph_node_count)
-                print(f"⚠️ GRAF-NODER DIFF: {len(graph_vectors)} vektorer vs {graph_node_count} graf-noder (diff: {diff})")
+                diff = len(graph_vectors) - graph_node_count
+                if diff > 0:
+                    print(f"⚠️ GRAF-NODER DRIFT: {len(graph_vectors)} vektorer vs {graph_node_count} graf-noder (+{diff} stale i Vector)")
+                else:
+                    print(f"⚠️ GRAF-NODER DRIFT: {len(graph_vectors)} vektorer vs {graph_node_count} graf-noder ({diff} saknas i Vector)")
 
-    except Exception as e:
+    except (OSError, RuntimeError) as e:
         LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
         print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
 
@@ -238,7 +265,7 @@ def rensa_gammal_logg():
         else:
             print(f"✅ Ingen rensning behövdes ({original_count} rader, alla inom 24h)")
             
-    except Exception as e:
+    except (OSError, ValueError) as e:
         LOGGER.error(f"Fel vid loggrensning: {e}")
         print(f"❌ Fel vid loggrensning: {e}")
 
@@ -261,7 +288,7 @@ def run_startup_checks():
             vector_service = get_vector_service("knowledge_base")
             vector_count = vector_service.count()
             validera_chroma(lake_c, lake_ids)
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
             print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
     else:

@@ -56,6 +56,7 @@ SERVICES = [
     {"module": "services.collectors.collector_daemon", "name": "Collector Daemon"},
     {"module": "services.engines.ingestion_engine", "name": "Ingestion Engine"},
     {"module": "services.processors.transcriber", "name": "Transcriber"},
+    {"module": "services.collectors.rode_collector", "name": "Røde Collector"},
     {"module": "services.engines.dreamer_daemon", "name": "Dreamer Daemon"},
 ]
 

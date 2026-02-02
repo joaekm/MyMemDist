@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+    MyMemory Dreamer Daemon (OBJEKT-76)
+
+    Threshold-based trigger for Dreamer entity resolution.
+    Polls state file and runs Dreamer when node threshold reached.
+
+    Install: launchctl load ~/Library/LaunchAgents/com.mymemory.dreamer.plist
+    Uninstall: launchctl unload ~/Library/LaunchAgents/com.mymemory.dreamer.plist
+    Status: launchctl list | grep mymemory
+    -->
+
+    <key>Label</key>
+    <string>com.mymemory.dreamer</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/jekman/Projects/MyMemory/services/engines/dreamer_daemon.py</string>
+    </array>
+
+    <!-- Run at login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Keep alive - restart if it crashes -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Users/jekman/Projects/MyMemory</string>
+
+    <!-- Logging -->
+    <key>StandardOutPath</key>
+    <string>/Users/jekman/MyMemory/Logs/dreamer_daemon.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/jekman/MyMemory/Logs/dreamer_daemon.stderr.log</string>
+
+    <!-- Environment -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/jekman/Projects/MyMemory</string>
+    </dict>
+
+    <!-- Resource limits -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
