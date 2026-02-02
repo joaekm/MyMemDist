@@ -9,12 +9,15 @@ Användning:
     curl -sL https://raw.githubusercontent.com/joaekm/MyMemDist/main/setup_mymemory.py -o setup_mymemory.py
     python3 setup_mymemory.py
 
-Kräver: Python 3.12+, internetåtkomst
+Kräver: Python 3.6+ (för att köra scriptet), internetåtkomst
+Python 3.12 laddas ner automatiskt och installeras lokalt.
 Dependencies: Inga (använder enbart Python stdlib)
 """
 
 import os
 import sys
+import platform
+import hashlib
 import shutil
 import subprocess
 import tarfile
@@ -28,13 +31,14 @@ from urllib.error import URLError, HTTPError
 # --- CONSTANTS ---
 
 # GitHub-repo för distribution (publikt).
-# Ändra REPO_OWNER/REPO_NAME om repot byter namn.
 REPO_OWNER = "joaekm"
 REPO_NAME = "MyMemDist"
 GITHUB_TARBALL_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/archive/refs/heads/main.tar.gz"
 TARBALL_PREFIX = f"{REPO_NAME}-main/"  # GitHub prepends this to all paths in the archive
 
 MYMEMORY_DATA = Path.home() / "MyMemory"
+
+TOTAL_STEPS = 10
 
 DATA_DIRECTORIES = [
     MYMEMORY_DATA / "Assets" / "Documents",
@@ -55,7 +59,6 @@ DATA_DIRECTORIES = [
 ]
 
 # Vilka toppnivå-filer och kataloger som ska extraheras.
-# Allt under services/ inkluderas automatiskt.
 RUNTIME_TOP_FILES = {
     "start_services.py",
     "requirements.txt",
@@ -65,6 +68,25 @@ RUNTIME_DIRS = {
     "config/",       # Alla config-filer
     "services/",     # All runtime-kod
 }
+
+# --- EMBEDDED PYTHON 3.12 (python-build-standalone) ---
+# Källa: https://github.com/astral-sh/python-build-standalone
+# Variant: install_only (~19.5 MB) — minimal, relocatable build.
+# Uppdatera dessa konstanter för att byta Python-version.
+
+PYTHON_VERSION = "3.12.12"
+PYTHON_BUILD_TAG = "20260127"
+PYTHON_BUILDS = {
+    "arm64": {  # platform.machine() på Apple Silicon Mac
+        "filename": "cpython-{version}+{tag}-aarch64-apple-darwin-install_only.tar.gz",
+        "sha256": "95d7666718239b7b2fc94937453ff6689dc4db0daf42263c21ec1f9f41eefb31",
+    },
+    "x86_64": {  # platform.machine() på Intel Mac
+        "filename": "cpython-{version}+{tag}-x86_64-apple-darwin-install_only.tar.gz",
+        "sha256": "7a453d2773d0ffbc8f8ca45bb20fa305815aff60b8072361451c3674c17ff5ef",
+    },
+}
+PYTHON_DOWNLOAD_BASE = "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}"
 
 
 # --- UTILITIES ---
@@ -110,15 +132,20 @@ def fail(text):
 # --- STEP 0: System Check ---
 
 def check_system():
-    print_step(0, 9, "Systemkontroll")
+    print_step(0, TOTAL_STEPS, "Systemkontroll")
 
-    # Python version
-    major, minor = sys.version_info[:2]
-    if major < 3 or (major == 3 and minor < 12):
-        fail(f"Python {major}.{minor} — kräver 3.12+")
-        print("    Installera Python 3.12: https://www.python.org/downloads/")
+    # Arkitektur
+    arch = platform.machine()
+    if arch not in PYTHON_BUILDS:
+        fail(f"Arkitektur '{arch}' stöds inte (kräver arm64 eller x86_64)")
         sys.exit(1)
-    success(f"Python {major}.{minor}")
+    success(f"Arkitektur: {arch}")
+
+    # macOS (krävs just nu — kan utökas med Linux senare)
+    if sys.platform != "darwin":
+        fail(f"Plattform '{sys.platform}' stöds inte ännu (kräver macOS)")
+        sys.exit(1)
+    success(f"Plattform: macOS")
 
     # ffmpeg (optional)
     ffmpeg_path = shutil.which("ffmpeg")
@@ -127,7 +154,6 @@ def check_system():
     else:
         warn("ffmpeg saknas — transkribering av ljudfiler fungerar inte")
         print("    macOS: brew install ffmpeg")
-        print("    Linux: sudo apt-get install ffmpeg")
 
 
 # --- STEP 1: Download Code ---
@@ -140,7 +166,7 @@ def choose_install_dir():
 
 
 def download_and_extract(install_dir):
-    print_step(1, 9, "Ladda ner kod")
+    print_step(1, TOTAL_STEPS, "Ladda ner kod")
 
     if install_dir.exists() and any(install_dir.iterdir()):
         if not ask_yes_no(f"  {install_dir} finns redan. Skriva över kod-filer?", default=False):
@@ -237,10 +263,116 @@ def _should_include(relative_path):
     return False
 
 
-# --- STEP 2: Virtual Environment ---
+# --- STEP 2: Download Python 3.12 ---
 
-def setup_venv(install_dir):
-    print_step(2, 9, "Virtual Environment")
+def download_python(install_dir):
+    print_step(2, TOTAL_STEPS, f"Ladda ner Python {PYTHON_VERSION}")
+
+    python_dir = install_dir / ".python"
+    python_bin = python_dir / "python" / "bin" / "python3"
+
+    # Redan nedladdad?
+    if python_bin.exists():
+        result = subprocess.run(
+            [str(python_bin), "--version"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and PYTHON_VERSION in result.stdout:
+            success(f"Python {PYTHON_VERSION} redan installerad")
+            return str(python_bin)
+
+    # Bestäm arkitektur och URL
+    arch = platform.machine()
+    build_info = PYTHON_BUILDS[arch]
+    filename = build_info["filename"].format(version=PYTHON_VERSION, tag=PYTHON_BUILD_TAG)
+    expected_sha256 = build_info["sha256"]
+    url = PYTHON_DOWNLOAD_BASE.format(tag=PYTHON_BUILD_TAG) + "/" + filename
+
+    print(f"  Arkitektur: {arch}")
+    print(f"  Version: CPython {PYTHON_VERSION}")
+    print(f"  Laddar ner {filename}...")
+
+    # Ladda ner till temp-fil
+    tmp_file = None
+    try:
+        req = Request(url, headers={"User-Agent": "MyMemory-Setup/1.0"})
+        response = urlopen(req, timeout=120)
+        tmp_fd, tmp_file = tempfile.mkstemp(suffix=".tar.gz")
+        with os.fdopen(tmp_fd, 'wb') as f:
+            total = 0
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                total += len(chunk)
+        success(f"Nedladdat ({total // (1024 * 1024)} MB)")
+    except (URLError, HTTPError) as e:
+        fail(f"Kunde inte ladda ner Python: {e}")
+        if tmp_file and os.path.exists(tmp_file):
+            os.unlink(tmp_file)
+        sys.exit(1)
+
+    # Verifiera SHA256
+    print("  Verifierar checksum...")
+    sha256 = hashlib.sha256()
+    with open(tmp_file, 'rb') as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            sha256.update(chunk)
+
+    actual_sha256 = sha256.hexdigest()
+    if actual_sha256 != expected_sha256:
+        fail(f"SHA256 matchar inte!")
+        print(f"    Förväntat: {expected_sha256}")
+        print(f"    Faktiskt:  {actual_sha256}")
+        os.unlink(tmp_file)
+        sys.exit(1)
+    success("SHA256 verifierad")
+
+    # Packa upp
+    print("  Packar upp...")
+    if python_dir.exists():
+        shutil.rmtree(python_dir)
+    python_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with tarfile.open(tmp_file, "r:gz") as tar:
+            tar.extractall(path=str(python_dir))
+    except tarfile.TarError as e:
+        fail(f"Kunde inte packa upp: {e}")
+        sys.exit(1)
+    finally:
+        os.unlink(tmp_file)
+
+    # Verifiera att binären finns och fungerar
+    if not python_bin.exists():
+        fail(f"Python-binär saknas efter uppackning: {python_bin}")
+        sys.exit(1)
+
+    # Gör binären exekverbar
+    os.chmod(str(python_bin), 0o755)
+
+    result = subprocess.run(
+        [str(python_bin), "--version"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        fail(f"Python-binär fungerar inte: {result.stderr}")
+        sys.exit(1)
+
+    version_str = result.stdout.strip()
+    success(f"{version_str} installerad lokalt")
+
+    return str(python_bin)
+
+
+# --- STEP 3: Virtual Environment ---
+
+def setup_venv(install_dir, standalone_python):
+    print_step(3, TOTAL_STEPS, "Virtual Environment")
 
     venv_path = install_dir / "venv"
     requirements_path = install_dir / "requirements.txt"
@@ -250,19 +382,32 @@ def setup_venv(install_dir):
         sys.exit(1)
 
     if venv_path.exists():
-        success(f"venv finns redan: {venv_path}")
+        # Kolla om befintlig venv har rätt Python-version
+        venv_python = venv_path / "bin" / "python"
+        if venv_python.exists():
+            result = subprocess.run(
+                [str(venv_python), "--version"],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0 and PYTHON_VERSION in result.stdout:
+                success(f"venv finns redan med rätt Python-version")
+            else:
+                print(f"  Befintlig venv har fel Python-version, återskapar...")
+                shutil.rmtree(venv_path)
+                subprocess.run([standalone_python, "-m", "venv", str(venv_path)], check=True)
+                success("venv återskapad")
+        else:
+            shutil.rmtree(venv_path)
+            subprocess.run([standalone_python, "-m", "venv", str(venv_path)], check=True)
+            success("venv återskapad")
     else:
-        print(f"  Skapar venv i {venv_path}...")
-        subprocess.run([sys.executable, "-m", "venv", str(venv_path)], check=True)
+        print(f"  Skapar venv med Python {PYTHON_VERSION}...")
+        subprocess.run([standalone_python, "-m", "venv", str(venv_path)], check=True)
         success("venv skapad")
 
     # Determine pip/python paths
-    if sys.platform == "win32":
-        pip_path = venv_path / "Scripts" / "pip"
-        python_path = venv_path / "Scripts" / "python"
-    else:
-        pip_path = venv_path / "bin" / "pip"
-        python_path = venv_path / "bin" / "python"
+    pip_path = venv_path / "bin" / "pip"
+    python_path = venv_path / "bin" / "python"
 
     # Install requirements
     print("  Installerar dependencies (kan ta ett par minuter)...")
@@ -290,10 +435,10 @@ def setup_venv(install_dir):
     return str(python_path)
 
 
-# --- STEP 3: Data Directory Structure ---
+# --- STEP 4: Data Directory Structure ---
 
 def create_directories():
-    print_step(3, 9, "Datamappar")
+    print_step(4, TOTAL_STEPS, "Datamappar")
 
     created = 0
     for d in DATA_DIRECTORIES:
@@ -308,10 +453,10 @@ def create_directories():
         success(f"Alla mappar finns redan under {MYMEMORY_DATA}")
 
 
-# --- STEP 4: Owner Profile ---
+# --- STEP 5: Owner Profile ---
 
 def get_owner_profile():
-    print_step(4, 9, "Ägarprofil")
+    print_step(5, TOTAL_STEPS, "Ägarprofil")
     print("  Denna information hjälper AI:n att förstå kontext.\n")
 
     name = ask("  Ditt namn", "")
@@ -333,10 +478,10 @@ def get_owner_profile():
     }
 
 
-# --- STEP 5: API Keys ---
+# --- STEP 6: API Keys ---
 
 def get_api_keys(python_path):
-    print_step(5, 9, "API-nycklar (obligatoriska)")
+    print_step(6, TOTAL_STEPS, "API-nycklar (obligatoriska)")
 
     replacements = {}
 
@@ -400,10 +545,10 @@ def _validate_key_via_venv(python_path, provider, key):
         return False
 
 
-# --- STEP 6: Optional Integrations ---
+# --- STEP 7: Optional Integrations ---
 
 def get_optional_integrations(python_path):
-    print_step(6, 9, "Valfria integrationer")
+    print_step(7, TOTAL_STEPS, "Valfria integrationer")
 
     replacements = {}
 
@@ -498,10 +643,10 @@ def _setup_google():
     return replacements
 
 
-# --- STEP 7: Generate Config ---
+# --- STEP 8: Generate Config ---
 
 def generate_config(install_dir, replacements):
-    print_step(7, 9, "Generera konfiguration")
+    print_step(8, TOTAL_STEPS, "Generera konfiguration")
 
     template_path = install_dir / "config" / "my_mem_config.template.yaml"
     config_path = install_dir / "config" / "my_mem_config.yaml"
@@ -533,10 +678,10 @@ def generate_config(install_dir, replacements):
     print(f"    Google:    {'Konfigurerad' if google_creds else 'Inaktiv'}")
 
 
-# --- STEP 8: Claude Desktop MCP ---
+# --- STEP 9: Claude Desktop MCP ---
 
 def setup_claude_desktop(install_dir):
-    print_step(8, 9, "Claude Desktop MCP (valfritt)")
+    print_step(9, TOTAL_STEPS, "Claude Desktop MCP (valfritt)")
 
     if not ask_yes_no("  Konfigurera Claude Desktop MCP-integration?", default=True):
         return
@@ -544,10 +689,7 @@ def setup_claude_desktop(install_dir):
     mcp_script = install_dir / "services" / "agents" / "mymem_mcp.py"
 
     # Use venv python
-    if sys.platform == "win32":
-        python_path = str(install_dir / "venv" / "Scripts" / "python")
-    else:
-        python_path = str(install_dir / "venv" / "bin" / "python")
+    python_path = str(install_dir / "venv" / "bin" / "python")
 
     config_entry = {
         "mcpServers": {
@@ -579,15 +721,15 @@ def setup_claude_desktop(install_dir):
                 claude_config_path.write_text(json.dumps(existing, indent=2))
                 success("Claude Desktop config uppdaterad")
                 print("    Starta om Claude Desktop för att aktivera.")
-            except Exception as e:
+            except (OSError, json.JSONDecodeError, KeyError) as e:
                 fail(f"Kunde inte skriva: {e}")
                 print("    Kopiera JSON-snippeten ovan manuellt.")
 
 
-# --- STEP 9: Validation ---
+# --- STEP 10: Validation ---
 
 def validate_setup(install_dir):
-    print_step(9, 9, "Validering")
+    print_step(10, TOTAL_STEPS, "Validering")
 
     # Check critical files
     critical = [
@@ -626,6 +768,16 @@ def validate_setup(install_dir):
     else:
         fail("Config-fil saknas!")
 
+    # Check Python version in venv
+    venv_python = install_dir / "venv" / "bin" / "python"
+    if venv_python.exists():
+        result = subprocess.run(
+            [str(venv_python), "--version"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            success(f"venv Python: {result.stdout.strip()}")
+
     # Next steps
     print("\n" + "=" * 60)
     print("  Setup klar!")
@@ -651,7 +803,7 @@ def validate_setup(install_dir):
 def main():
     print_header("MyMemory Setup")
     print("  Välkommen! Detta script installerar och konfigurerar MyMemory.")
-    print("  Laddar ner enbart de filer som behövs för att köra systemet.\n")
+    print("  Laddar ner kod och Python-runtime automatiskt.\n")
 
     # Step 0: System check
     check_system()
@@ -659,28 +811,31 @@ def main():
     # Choose install directory
     install_dir = choose_install_dir()
 
-    # Step 1: Download
+    # Step 1: Download code
     download_and_extract(install_dir)
 
-    # Step 2: Virtual environment
-    python_path = setup_venv(install_dir)
+    # Step 2: Download Python 3.12
+    standalone_python = download_python(install_dir)
 
-    # Step 3: Data directories
+    # Step 3: Virtual environment (using downloaded Python)
+    python_path = setup_venv(install_dir, standalone_python)
+
+    # Step 4: Data directories
     create_directories()
 
-    # Step 4-6: Configuration
+    # Step 5-7: Configuration
     replacements = {}
     replacements.update(get_owner_profile())
     replacements.update(get_api_keys(python_path))
     replacements.update(get_optional_integrations(python_path))
 
-    # Step 7: Generate config
+    # Step 8: Generate config
     generate_config(install_dir, replacements)
 
-    # Step 8: Claude Desktop
+    # Step 9: Claude Desktop
     setup_claude_desktop(install_dir)
 
-    # Step 9: Validate
+    # Step 10: Validate
     validate_setup(install_dir)
 
 
