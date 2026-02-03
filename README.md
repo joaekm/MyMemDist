@@ -1,44 +1,44 @@
-# MyMemDist
+# MyMemory Distribution
 
-Distribution repo for **MyMemory** - a personal AI-powered knowledge management system.
+Ditt personliga AI-minne - samlar in, organiserar och gör all din information sökbar.
 
-This repo contains the runtime files needed to run MyMemory. Development tools, documentation, and tests are in the private main repo.
+## Installation
 
-## Quick Install
+1. **Ladda ner:** [MyMemory-Installer.dmg](apps/MyMemory-Installer.dmg)
+2. **Öppna DMG:en** och dra `MyMemory.app` till Applications
+3. **Starta appen** - högerklicka → "Öppna" (första gången)
+4. **Setup Wizard** guidar dig genom resten
 
-```bash
-curl -sL https://raw.githubusercontent.com/joaekm/MyMemDist/main/setup_mymemory.py -o setup_mymemory.py
-python3 setup_mymemory.py
-```
+### Du behöver
 
-The setup script will:
-1. Download the runtime files from this repo
-2. Create a Python virtual environment and install dependencies
-3. Set up the data directory structure (`~/MyMemory/`)
-4. Guide you through API key configuration (Anthropic + Google Gemini)
-5. Optionally configure Slack, Gmail, and Calendar integrations
-6. Generate your config file and Claude Desktop MCP snippet
+- **Anthropic API-nyckel:** https://console.anthropic.com/settings/keys
+- **Google Gemini API-nyckel:** https://aistudio.google.com/apikey
 
-## Requirements
+## Vad händer vid installation?
 
-- Python 3.12+
-- macOS or Linux
-- API keys: Anthropic (required), Google Gemini (required)
-- Optional: ffmpeg (for audio transcription)
+Setup Wizard i appen:
+- Laddar ner backend-kod automatiskt
+- Installerar Python 3.12 (lokalt, påverkar inte ditt system)
+- Skapar virtual environment med dependencies
+- Konfigurerar Claude Desktop MCP-integration
+- Kopierar användarmanual för indexering
 
-## After Installation
+## Efter installation
 
-Start the system:
-```bash
-cd <install-dir>
-source venv/bin/activate
-python start_services.py
-```
+- **Statusikon** visas i menyraden
+- **Droppa filer** i `~/MyMemory/MemoryDrop/` för indexering
+- **Fråga Claude** om din data via Claude Desktop
 
-## What is MyMemory?
+## Dokumentation
 
-MyMemory is a personal knowledge management system that:
-- Collects data from documents, Slack, email, calendar, and audio recordings
-- Processes and indexes content using AI (entity extraction, semantic search)
-- Stores knowledge in a graph database (DuckDB) and vector database (ChromaDB)
-- Exposes everything via MCP (Model Context Protocol) for use with Claude Desktop, Cursor, and other AI tools
+- [Användarmanual](docs/MyMemory_Användarmanual.md)
+
+## Systemkrav
+
+- macOS 14.0 eller senare
+- Internetanslutning (för API-anrop)
+- ~500 MB diskutrymme
+
+---
+
+*MyMemory - Ditt personliga AI-minne*
