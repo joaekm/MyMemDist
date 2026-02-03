@@ -38,7 +38,7 @@ TARBALL_PREFIX = f"{REPO_NAME}-main/"  # GitHub prepends this to all paths in th
 
 MYMEMORY_DATA = Path.home() / "MyMemory"
 
-TOTAL_STEPS = 10
+TOTAL_STEPS = 11
 
 DATA_DIRECTORIES = [
     MYMEMORY_DATA / "Assets" / "Documents",
@@ -67,6 +67,7 @@ RUNTIME_TOP_FILES = {
 RUNTIME_DIRS = {
     "config/",       # Alla config-filer
     "services/",     # All runtime-kod
+    "apps/",         # Menubar-app (.app bundle)
 }
 
 # --- EMBEDDED PYTHON 3.12 (python-build-standalone) ---
@@ -726,10 +727,91 @@ def setup_claude_desktop(install_dir):
                 print("    Kopiera JSON-snippeten ovan manuellt.")
 
 
-# --- STEP 10: Validation ---
+# --- STEP 10: Menubar App ---
+
+def install_menubar_app(install_dir):
+    print_step(10, TOTAL_STEPS, "Menubar App (valfritt)")
+
+    app_source = install_dir / "apps" / "MyMemory.app"
+    app_dest = Path("/Applications/MyMemory.app")
+
+    # Kolla om appen finns i distributionen
+    if not app_source.exists():
+        warn("Menubar-app saknas i distributionen")
+        print("    Appen kan byggas manuellt med Xcode.")
+        print("    Se: https://github.com/joaekm/MyMemDist#menubar-app")
+        return
+
+    print("  MyMemory Menubar-app ger dig:")
+    print("    - Status-ikon i menyraden (grön/gul/röd)")
+    print("    - Snabbinställningar utan att redigera YAML")
+    print("    - Visa progress under rebuild")
+    print("")
+
+    if not ask_yes_no("  Installera Menubar-app i /Applications?", default=True):
+        success("Hoppar över app-installation")
+        return
+
+    # Kolla om det redan finns en version
+    if app_dest.exists():
+        if not ask_yes_no(f"  {app_dest} finns redan. Ersätta?", default=True):
+            success("Behåller befintlig app")
+            return
+        try:
+            shutil.rmtree(app_dest)
+        except OSError as e:
+            fail(f"Kunde inte ta bort befintlig app: {e}")
+            return
+
+    # Kopiera app
+    try:
+        shutil.copytree(app_source, app_dest)
+        success(f"Installerad: {app_dest}")
+    except OSError as e:
+        fail(f"Kunde inte kopiera app: {e}")
+        print("    Försök köra med sudo eller kopiera manuellt:")
+        print(f"    cp -R '{app_source}' /Applications/")
+        return
+
+    # Fråga om autostart
+    if ask_yes_no("  Starta appen automatiskt vid inloggning?", default=True):
+        _add_to_login_items(app_dest)
+
+    # Starta appen nu
+    if ask_yes_no("  Starta appen nu?", default=True):
+        try:
+            subprocess.run(["open", str(app_dest)], check=True)
+            success("Appen startad - kolla menyraden!")
+        except subprocess.CalledProcessError:
+            warn("Kunde inte starta appen automatiskt")
+            print(f"    Öppna manuellt: open {app_dest}")
+
+
+def _add_to_login_items(app_path):
+    """Lägg till appen i Login Items via osascript."""
+    script = f'''
+    tell application "System Events"
+        make login item at end with properties {{path:"{app_path}", hidden:false}}
+    end tell
+    '''
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            success("Tillagd i Login Items")
+        else:
+            warn("Kunde inte lägga till i Login Items")
+            print("    Lägg till manuellt: Systeminställningar → Allmänt → Startobjekt")
+    except Exception:
+        warn("Kunde inte lägga till i Login Items")
+
+
+# --- STEP 11: Validation ---
 
 def validate_setup(install_dir):
-    print_step(10, TOTAL_STEPS, "Validering")
+    print_step(11, TOTAL_STEPS, "Validering")
 
     # Check critical files
     critical = [
@@ -778,11 +860,36 @@ def validate_setup(install_dir):
         if result.returncode == 0:
             success(f"venv Python: {result.stdout.strip()}")
 
+    # Check menubar app
+    app_installed = Path("/Applications/MyMemory.app").exists()
+    if app_installed:
+        success("Menubar-app installerad")
+    else:
+        warn("Menubar-app ej installerad (valfritt)")
+
     # Next steps
     print("\n" + "=" * 60)
     print("  Setup klar!")
     print("=" * 60)
-    print(f"""
+
+    if app_installed:
+        print(f"""
+  Nästa steg:
+
+  1. MyMemory Menubar-app körs redan (kolla menyraden!)
+     - Klicka på hjärn-ikonen för status och inställningar
+
+  2. Starta bakgrundstjänster (terminal):
+     cd {install_dir}
+     source venv/bin/activate
+     python start_services.py
+
+  3. Droppa filer i ~/MyMemory/MemoryDrop/ för ingestion
+
+  4. Använd Claude Desktop med MCP för att söka i ditt minne
+""")
+    else:
+        print(f"""
   Nästa steg:
 
   1. Aktivera din venv:
@@ -835,7 +942,10 @@ def main():
     # Step 9: Claude Desktop
     setup_claude_desktop(install_dir)
 
-    # Step 10: Validate
+    # Step 10: Menubar App
+    install_menubar_app(install_dir)
+
+    # Step 11: Validate
     validate_setup(install_dir)
 
 
