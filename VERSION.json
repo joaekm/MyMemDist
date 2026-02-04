@@ -1,0 +1,6 @@
+{
+  "version": "0.1.0",
+  "date": "2026-02-04",
+  "description": "# Release Notes Första release med menubar-app och uppdateringskontroll. **Nytt:** - Native macOS menubar-app (SwiftUI) med status och inställningar - Automatisk uppdateringskontroll mot GitHub - Setup Wizard för förstagångsanvändare - DMG-installer med drag-and-drop **Förbättringar:** - Striktare felhantering enligt HARDFAIL-principen - Utökad validering i validate_rules.py - Förbättrad property chain (Schema -> Lake -> Vector -> Graf) ",
+  "min_macos": "14.0"
+}
