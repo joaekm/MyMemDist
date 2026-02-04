@@ -1,7 +1,7 @@
 {
-  "version": "0.2.2",
+  "version": "0.2.3",
   "date": "2026-02-04",
-  "description": "Fix: Menubar-app kan nu starta tjänster och visar korrekt version - Fixade sökvägslogik som gjorde att appen inte kunde starta backend-tjänster - Version läses nu från config-fil istället för hårdkodad Xcode-version ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.2.2/MyMemory-Installer.dmg",
+  "description": "Fix: Menubar-app kan nu starta backend-tjänster automatiskt - Fixade Python-prioritering så att venv (med installerade paket) används före embedded Python ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.2.3/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
