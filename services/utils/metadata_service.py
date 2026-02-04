@@ -53,28 +53,12 @@ def _load_config() -> tuple:
     """Load config and prompts."""
     global _CONFIG, _PROMPTS
     if _CONFIG is None:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        config_paths = [
-            os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
-            os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
-        ]
-        for p in config_paths:
-            if os.path.exists(p):
-                with open(p, 'r') as f:
-                    _CONFIG = yaml.safe_load(f)
-                for k, v in _CONFIG.get('paths', {}).items():
-                    _CONFIG['paths'][k] = os.path.expanduser(v)
+        from services.utils.config_loader import get_config, get_prompts, get_expanded_paths
 
-                # Load prompts
-                config_dir = os.path.dirname(p)
-                prompts_path = os.path.join(config_dir, 'services_prompts.yaml')
-                if os.path.exists(prompts_path):
-                    with open(prompts_path, 'r') as f:
-                        _PROMPTS = yaml.safe_load(f)
-                break
-
-        if _CONFIG is None:
-            raise FileNotFoundError("HARDFAIL: Config missing")
+        raw_config = get_config()
+        _CONFIG = dict(raw_config)
+        _CONFIG['paths'] = get_expanded_paths()
+        _PROMPTS = get_prompts()
 
     return _CONFIG, _PROMPTS
 
@@ -301,6 +285,9 @@ def _enrich_entities_from_graph(
             enriched[uuid] = entity_data
 
         graph.close()
+    except (OSError, IOError) as e:
+        # Graf-fil kan saknas eller vara låst - returnera tom dict
+        LOGGER.warning(f"Could not enrich entities (graph unavailable): {e}")
 
     return enriched
 

@@ -82,36 +82,13 @@ for _name in ['httpx', 'httpcore', 'mcp', 'google', 'google_genai', 'anyio', 'wa
 
 
 # --- CONFIG LOADER ---
-def _load_config():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    paths = [
-        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
-        os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
-        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
-    ]
-    main_conf = {}
-    for p in paths:
-        if os.path.exists(p):
-            with open(p, 'r') as f:
-                main_conf = yaml.safe_load(f)
-            for k, v in main_conf.get('paths', {}).items():
-                main_conf['paths'][k] = os.path.expanduser(v)
+from services.utils.config_loader import get_config, get_prompts, get_expanded_paths
 
-            config_dir = os.path.dirname(p)
-            prompts_conf = {}
-            for name in ['services_prompts.yaml', 'service_prompts.yaml']:
-                pp = os.path.join(config_dir, name)
-                if os.path.exists(pp):
-                    with open(pp, 'r') as f:
-                        prompts_conf = yaml.safe_load(f)
-                    break
-
-            return main_conf, prompts_conf
-
-    raise FileNotFoundError("HARDFAIL: Config missing")
-
-
-CONFIG, PROMPTS_RAW = _load_config()
+_raw_config = get_config()
+# Expandera paths
+CONFIG = dict(_raw_config)
+CONFIG['paths'] = get_expanded_paths()
+PROMPTS_RAW = get_prompts()
 
 
 def get_prompt(agent: str, key: str) -> str:

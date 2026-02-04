@@ -8,23 +8,14 @@ import duckdb
 import json
 
 from services.utils.vector_service import get_vector_service
+from services.utils.config_loader import get_config
 
 # Enkel loggning för CLI-verktyg
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')
 LOGGER = logging.getLogger('SystemValidator')
 
-# --- CONFIG LOADER ---
-def load_yaml(filnamn):
-    # Nu i services/utils/ - config ligger i ../../config/
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, '..', '..', 'config', filnamn)
-    if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    print(f"[FEL] Saknar {filnamn}")
-    exit(1)
-
-CONFIG = load_yaml('my_mem_config.yaml')
+# --- CONFIG ---
+CONFIG = get_config()
 
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])

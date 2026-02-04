@@ -47,17 +47,13 @@ for _name in ['httpx', 'httpcore', 'mcp', 'google', 'google_genai', 'anyio']:
 mcp = FastMCP("DigitalistValidator")
 validator = SchemaValidator()
 
-# Load config for validation settings
-def _load_config():
-    config_path = os.path.join(project_root, 'config', 'my_mem_config.yaml')
-    try:
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        logging.warning(f"Could not load config: {e}")
-        return {}
-
-_CONFIG = _load_config()
+# Load config via central loader
+from services.utils.config_loader import get_config
+try:
+    _CONFIG = get_config()
+except FileNotFoundError as e:
+    logging.warning(f"Could not load config: {e}")
+    _CONFIG = {}
 
 # Centralized LLM access via LLMService
 _llm_service = None

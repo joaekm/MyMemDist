@@ -30,15 +30,11 @@ from services.utils.shared_lock import resource_lock
 from services.engines.dreamer import Dreamer
 
 # Load config for logging
-def _load_logging_config():
-    config_path = PROJECT_ROOT / "config" / "my_mem_config.yaml"
-    try:
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    except Exception:
-        return {}
-
-_LOGGING_CONFIG = _load_logging_config()
+from services.utils.config_loader import get_config
+try:
+    _LOGGING_CONFIG = get_config()
+except FileNotFoundError:
+    _LOGGING_CONFIG = {}
 LOG_FILE = os.path.expanduser(_LOGGING_CONFIG.get('logging', {}).get('system_log', '~/MyMemory/Logs/my_mem_system.log'))
 
 log_dir = os.path.dirname(LOG_FILE)
@@ -65,11 +61,8 @@ from services.utils.terminal_status import status as terminal_status, service_st
 
 def _load_config() -> dict:
     """Load daemon config from my_mem_config.yaml."""
-    config_path = PROJECT_ROOT / "config" / "my_mem_config.yaml"
     try:
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        return config
+        return get_config()
     except Exception as e:
         LOGGER.error(f"Failed to load config: {e}")
         return {}

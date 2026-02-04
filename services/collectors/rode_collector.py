@@ -28,20 +28,9 @@ import datetime
 import yaml
 
 # --- CONFIG ---
-def load_yaml(filnamn):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    paths = [
-        os.path.join(script_dir, '..', '..', 'config', filnamn),
-        os.path.join(script_dir, '..', 'config', filnamn),
-        os.path.join(script_dir, 'config', filnamn),
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            with open(p, 'r') as f:
-                return yaml.safe_load(f)
-    sys.exit(1)
+from services.utils.config_loader import get_config
 
-CONFIG = load_yaml('my_mem_config.yaml')
+CONFIG = get_config()
 RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
 LOG_FILE = os.path.expanduser(CONFIG['logging'].get('system_log', '~/MyMemory/Logs/system.log'))
 

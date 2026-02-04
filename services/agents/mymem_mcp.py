@@ -48,16 +48,13 @@ for _name in ['httpx', 'httpcore', 'mcp', 'anyio']:
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 # --- CONFIG LOADING ---
-def _load_config():
-    config_path = os.path.join(project_root, "config", "my_mem_config.yaml")
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        logging.error(f"Config load failed: {e}")
-        return {}
+from services.utils.config_loader import get_config
 
-CONFIG = _load_config()
+try:
+    CONFIG = get_config()
+except FileNotFoundError as e:
+    logging.error(f"Config load failed: {e}")
+    CONFIG = {}
 PATHS = CONFIG.get('paths', {})
 SEARCH_CONFIG = CONFIG.get('search', {})
 

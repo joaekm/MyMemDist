@@ -177,19 +177,13 @@ class LLMService:
         LOGGER.info(f"LLMService initialized - default: {self.default_provider}, transcription: {self.transcription_provider}")
 
     def _load_config(self) -> dict:
-        """Ladda konfiguration."""
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        config_path = os.path.join(base_dir, "config", "my_mem_config.yaml")
-
+        """Ladda konfiguration via central config loader."""
+        from services.utils.config_loader import get_config
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f)
+            return get_config()
         except FileNotFoundError as e:
-            LOGGER.error(f"Config-fil saknas: {config_path}")
-            raise RuntimeError(f"HARDFAIL: Config saknas: {config_path}") from e
-        except yaml.YAMLError as e:
-            LOGGER.error(f"Ogiltig YAML i config: {e}")
-            raise RuntimeError(f"HARDFAIL: Ogiltig config YAML") from e
+            LOGGER.error(f"Config-fil saknas: {e}")
+            raise RuntimeError(f"HARDFAIL: Config saknas") from e
 
     def _init_providers(self):
         """Initiera LLM providers (OBJEKT-85)."""

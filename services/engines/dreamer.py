@@ -27,15 +27,11 @@ from services.utils.schema_validator import SchemaValidator
 from services.utils.metadata_service import generate_semantic_metadata
 
 # Load config for logging
-def _load_config():
-    config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'my_mem_config.yaml')
-    try:
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    except Exception:
-        return {}
-
-_CONFIG = _load_config()
+from services.utils.config_loader import get_config
+try:
+    _CONFIG = get_config()
+except FileNotFoundError:
+    _CONFIG = {}
 LOG_FILE = os.path.expanduser(_CONFIG.get('logging', {}).get('system_log', '~/MyMemory/Logs/my_mem_system.log'))
 
 log_dir = os.path.dirname(LOG_FILE)
@@ -748,11 +744,7 @@ class Dreamer:
     def _get_lake_path(self) -> str:
         """Get Lake path from config."""
         try:
-            config_path = os.path.join(
-                os.path.dirname(__file__), '..', '..', 'config', 'my_mem_config.yaml'
-            )
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
+            config = get_config()
             return os.path.expanduser(config['paths']['lake_store'])
         except Exception as e:
             LOGGER.error(f"Could not read config: {e}")

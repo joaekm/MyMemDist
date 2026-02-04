@@ -9,19 +9,9 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # --- CONFIG ---
-def load_yaml(filnamn):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    paths = [
-        os.path.join(script_dir, '..', '..', 'config', filnamn),
-        os.path.join(script_dir, '..', 'config', filnamn),
-        os.path.join(script_dir, 'config', filnamn),
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            with open(p, 'r') as f: return yaml.safe_load(f)
-    exit(1)
+from services.utils.config_loader import get_config
 
-CONFIG = load_yaml('my_mem_config.yaml')
+CONFIG = get_config()
 DROP_FOLDER = os.path.expanduser(CONFIG['paths']['drop_folder'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
 LOG_FILE = os.path.expanduser(CONFIG['logging'].get('system_log', '~/MyMemory/Logs/system.log'))

@@ -25,20 +25,12 @@ from google.genai import types
 
 
 # --- CONFIG ---
-def _load_config() -> dict:
-    """Ladda konfiguration från my_mem_config.yaml."""
-    script_dir = Path(__file__).parent
-    config_path = script_dir.parent.parent / "config" / "my_mem_config.yaml"
+# Lägg till project root till path för imports
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from services.utils.config_loader import get_config
 
-    if not config_path.exists():
-        print(f"ERROR: Config-fil saknas: {config_path}", file=sys.stderr)
-        sys.exit(1)
-
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
-
-
-CONFIG = _load_config()
+CONFIG = get_config()
 MEETING_CONFIG = CONFIG.get('meeting_transcriber', {})
 
 # Paths

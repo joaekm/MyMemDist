@@ -35,15 +35,11 @@ signal.signal(signal.SIGTERM, _handle_sigterm)
 signal.signal(signal.SIGINT, _handle_sigterm)
 
 # --- CONFIG ---
-def _load_config():
-    config_path = PROJECT_ROOT / "config" / "my_mem_config.yaml"
-    try:
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    except Exception:
-        return {}
-
-CONFIG = _load_config()
+from services.utils.config_loader import get_config
+try:
+    CONFIG = get_config()
+except FileNotFoundError:
+    CONFIG = {}
 
 # --- LOGGING ---
 LOG_FILE = os.path.expanduser(CONFIG.get('logging', {}).get('system_log', '~/MyMemory/Logs/system.log'))

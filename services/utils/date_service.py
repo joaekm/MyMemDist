@@ -27,21 +27,16 @@ from typing import Optional
 LOGGER = logging.getLogger('DateService')
 
 # Ladda config för MIN_YEAR
+from services.utils.config_loader import get_config
+
 def _load_validation_config() -> dict:
     """Ladda validation-config."""
-    config_path = os.path.join(
-        os.path.dirname(__file__), '..', '..', 'config', 'my_mem_config.yaml'
-    )
     try:
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
+        config = get_config()
         return config.get('validation', {})
     except FileNotFoundError:
-        LOGGER.warning(f"Config saknas: {config_path}, använder defaults")
+        LOGGER.warning("Config saknas, använder defaults")
         return {}
-    except yaml.YAMLError as e:
-        LOGGER.error(f"Ogiltig YAML i config: {e}")
-        raise RuntimeError(f"HARDFAIL: Ogiltig config YAML") from e
 
 VALIDATION_CONFIG = _load_validation_config()
 DATE_MIN_YEAR = VALIDATION_CONFIG.get('min_year', 2015)
@@ -344,20 +339,15 @@ if __name__ == "__main__":
     
     # Ladda sökvägar från config
     def _load_test_paths():
-        config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'my_mem_config.yaml')
         try:
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
+            config = get_config()
             return [
                 os.path.expanduser(config['paths']['lake_store']),
                 os.path.expanduser(config['paths']['asset_documents']),
             ]
-        except FileNotFoundError:
-            print(f"Config saknas: {config_path}")
+        except FileNotFoundError as e:
+            print(f"Config saknas: {e}")
             return []
-        except yaml.YAMLError as e:
-            print(f"Ogiltig YAML: {e}")
-            raise
     
     if len(sys.argv) < 2:
         print("Användning: python date_service.py <filepath> [filepath2] ...")

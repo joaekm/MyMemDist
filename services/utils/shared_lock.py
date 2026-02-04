@@ -41,14 +41,8 @@ def _get_lock_dir() -> str:
     if _lock_dir is not None:
         return _lock_dir
 
-    # Find config relative to this file
-    config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'my_mem_config.yaml')
-
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"HARDFAIL: Config not found at {config_path}")
-
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    from services.utils.config_loader import get_config
+    config = get_config()
 
     # Get lock_dir from config, or derive from index path
     lock_dir = config.get('paths', {}).get('lock_dir')

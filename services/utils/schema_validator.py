@@ -87,28 +87,23 @@ class SchemaValidator:
         LOGGER.info(f"SchemaValidator loaded from {self.schema_path}")
 
     def _resolve_schema_path_from_config(self) -> str:
-        """Läser config/my_mem_config.yaml för att hitta rätt schema-fil."""
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__))) # Root: MyMemory/
-        config_path = os.path.join(base_dir, "config", "my_mem_config.yaml")
-        
-        default_template = os.path.join(base_dir, "config", "graph_schema_template.json")
+        """Läser config för att hitta rätt schema-fil."""
+        from services.utils.config_loader import get_config, get_config_path
+        from pathlib import Path
 
-        if not os.path.exists(config_path):
-            LOGGER.warning(f"Config file not found at {config_path}. Using default: {default_template}")
-            return default_template
+        # Schema ligger i samma katalog som config
+        config_dir = Path(get_config_path()).parent
+        default_template = config_dir / "graph_schema_template.json"
 
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-                relative_path = config.get("graph_schema")
+            config = get_config()
+            relative_path = config.get("graph_schema")
+            if relative_path:
+                return str(config_dir / relative_path)
+        except (FileNotFoundError, KeyError) as e:
+            LOGGER.warning(f"Failed to read config: {e}. Using default: {default_template}")
 
-                if relative_path:
-                    return os.path.join(base_dir, relative_path)
-
-        except (OSError, yaml.YAMLError) as e:
-            LOGGER.warning(f"Failed to read config file: {e}. Using default: {default_template}")
-
-        return default_template
+        return str(default_template)
 
     def _load_and_merge_schema(self) -> Dict[str, Any]:
         """Laddar JSON-filen och slår ihop 'base_properties' med noder."""

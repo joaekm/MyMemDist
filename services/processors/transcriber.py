@@ -66,25 +66,12 @@ from services.utils.terminal_status import status as terminal_status, service_st
 # CONFIG
 # =============================================================================
 
-def load_yaml(filnamn, strict=True):
-    """Ladda YAML-fil från config-mappen."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    paths = [
-        os.path.join(script_dir, '..', '..', 'config', filnamn),
-        os.path.join(script_dir, '..', 'config', filnamn),
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            with open(p, 'r') as f:
-                return yaml.safe_load(f)
-    if strict:
-        print(f"[CRITICAL] HARDFAIL: Kunde inte hitta: {filnamn}")
-        exit(1)
-    return {}
+from services.utils.config_loader import get_config, get_prompts, get_expanded_paths
 
-
-CONFIG = load_yaml('my_mem_config.yaml', strict=True)
-PROMPTS = load_yaml('services_prompts.yaml', strict=True)
+_raw_config = get_config()
+CONFIG = dict(_raw_config)
+CONFIG['paths'] = get_expanded_paths()
+PROMPTS = get_prompts()
 
 # Expandera sökvägar
 for k, v in CONFIG.get('paths', {}).items():
@@ -201,7 +188,7 @@ def _get_gemini_client():
     """Hämta Gemini SDK-klient för transkribering."""
     global _gemini_provider
     if _gemini_provider is None:
-        config = load_yaml('my_mem_config.yaml')
+        config = get_config()
         api_key = config.get('ai_engine', {}).get('gemini', {}).get('api_key')
         if not api_key:
             raise RuntimeError("HARDFAIL: Gemini API-nyckel saknas i config")
@@ -354,7 +341,7 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
     if not prompt:
         raise ValueError("HARDFAIL: 'pass1_raw' prompt saknas")
 
-    config = load_yaml('my_mem_config.yaml')
+    config = get_config()
     model = config.get('ai_engine', {}).get('models', {}).get('model_transcribe')
     if not model:
         raise ValueError("HARDFAIL: 'model_transcribe' saknas i config")

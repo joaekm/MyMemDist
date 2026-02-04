@@ -77,23 +77,9 @@ class VectorService:
             raise RuntimeError(f"ChromaDB-fel: {e}") from e
 
     def _load_config(self, path: str = None) -> dict:
-        if not path:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            paths = [
-                os.path.join(base_dir, '..', '..', 'config', 'my_mem_config.yaml'),
-                os.path.join(base_dir, '..', 'config', 'my_mem_config.yaml'),
-                os.path.join(base_dir, 'config', 'my_mem_config.yaml'),
-            ]
-            for p in paths:
-                if os.path.exists(p):
-                    path = p
-                    break
-        
-        if not path or not os.path.exists(path):
-            raise FileNotFoundError("HARDFAIL: Config not found")
-
-        with open(path, "r") as f:
-            return yaml.safe_load(f)
+        """Ladda konfiguration via central config loader."""
+        from services.utils.config_loader import get_config
+        return get_config()
 
     def upsert(self, id: str, text: str, metadata: Dict[str, Any] = None):
         if not text: return
