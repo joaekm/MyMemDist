@@ -1,6 +1,7 @@
 {
-  "version": "0.1.0",
+  "version": "0.1.1",
   "date": "2026-02-04",
-  "description": "# Release Notes Första release med menubar-app och uppdateringskontroll. **Nytt:** - Native macOS menubar-app (SwiftUI) med status och inställningar - Automatisk uppdateringskontroll mot GitHub - Setup Wizard för förstagångsanvändare - DMG-installer med drag-and-drop **Förbättringar:** - Striktare felhantering enligt HARDFAIL-principen - Utökad validering i validate_rules.py - Förbättrad property chain (Schema -> Lake -> Vector -> Graf) ",
+  "description": "Förbättrat release-flöde med GitHub Releases. **Förbättringar:** - DMG-installer nu tillgänglig via GitHub Releases - Semi-automatisk uppdateringscheck - appen meddelar när ny version finns - VERSION.json innehåller nu download_url för direkt nedladdning - Fixad version-parsning i config ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.1.1/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
