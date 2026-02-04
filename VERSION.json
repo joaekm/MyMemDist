@@ -1,7 +1,7 @@
 {
-  "version": "0.1.1",
+  "version": "0.1.2",
   "date": "2026-02-04",
-  "description": "Förbättrat release-flöde med GitHub Releases. **Förbättringar:** - DMG-installer nu tillgänglig via GitHub Releases - Semi-automatisk uppdateringscheck - appen meddelar när ny version finns - VERSION.json innehåller nu download_url för direkt nedladdning - Fixad version-parsning i config ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.1.1/MyMemory-Installer.dmg",
+  "description": "Fixad Setup Wizard som inte visades för nya användare. **Buggfix:** - Borttagen felaktig dev-mode detektion som hoppade över Setup Wizard - Appen kollar nu endast produktions-runtime, inte utvecklingsmiljöer ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.1.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
