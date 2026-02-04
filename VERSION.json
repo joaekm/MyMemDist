@@ -1,7 +1,7 @@
 {
-  "version": "0.2.1",
+  "version": "0.2.2",
   "date": "2026-02-04",
-  "description": "Fix: Setup Wizard upgrade-läge fungerar nu korrekt - Ny \"Uppgradera\"-knapp visas i upgrade-läge istället för inaktiv \"Nästa\"-knapp - Tydligare instruktionstext innan uppgradering startas ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.2.1/MyMemory-Installer.dmg",
+  "description": "Fix: Menubar-app kan nu starta tjänster och visar korrekt version - Fixade sökvägslogik som gjorde att appen inte kunde starta backend-tjänster - Version läses nu från config-fil istället för hårdkodad Xcode-version ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.2.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
