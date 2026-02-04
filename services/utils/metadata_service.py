@@ -44,12 +44,8 @@ def _get_schema() -> dict:
     """Get or load schema from graph_schema_template.json."""
     global _SCHEMA
     if _SCHEMA is None:
-        try:
-            validator = SchemaValidator()
-            _SCHEMA = validator.schema
-        except Exception as e:
-            LOGGER.error(f"Could not load schema: {e}")
-            _SCHEMA = {"edges": {}, "nodes": {}}
+        validator = SchemaValidator()
+        _SCHEMA = validator.schema
     return _SCHEMA
 
 
@@ -113,10 +109,9 @@ def _get_user_profile() -> Dict[str, Any]:
 
     # user_profile.yaml ligger i Index-mappen (härleds från graph_db)
     graph_db = config['paths'].get('graph_db', '')
-    if graph_db:
-        index_path = os.path.dirname(os.path.expanduser(graph_db))
-    else:
-        index_path = os.path.expanduser('~/MyMemory/Index')
+    if not graph_db:
+        raise RuntimeError("HARDFAIL: graph_db path saknas i config")
+    index_path = os.path.dirname(os.path.expanduser(graph_db))
 
     profile_path = os.path.join(index_path, 'user_profile.yaml')
 
@@ -125,21 +120,17 @@ def _get_user_profile() -> Dict[str, Any]:
         _USER_PROFILE = {}
         return _USER_PROFILE
 
-    try:
-        with open(profile_path, 'r') as f:
-            profile = yaml.safe_load(f)
+    with open(profile_path, 'r') as f:
+        profile = yaml.safe_load(f)
 
-        identity = profile.get('identity', {})
-        _USER_PROFILE = {
-            "name": identity.get('name', ''),
-            "id": identity.get('id', ''),
-            "role": identity.get('role', ''),
-            "company": identity.get('company', '')
-        }
-        LOGGER.debug(f"Loaded user profile: {_USER_PROFILE.get('name')}")
-    except Exception as e:
-        LOGGER.error(f"Failed to load user_profile.yaml: {e}")
-        _USER_PROFILE = {}
+    identity = profile.get('identity', {})
+    _USER_PROFILE = {
+        "name": identity.get('name', ''),
+        "id": identity.get('id', ''),
+        "role": identity.get('role', ''),
+        "company": identity.get('company', '')
+    }
+    LOGGER.debug(f"Loaded user profile: {_USER_PROFILE.get('name')}")
 
     return _USER_PROFILE
 
@@ -310,10 +301,6 @@ def _enrich_entities_from_graph(
             enriched[uuid] = entity_data
 
         graph.close()
-
-    except Exception as e:
-        LOGGER.warning(f"Graph enrichment failed: {e}")
-        return {}
 
     return enriched
 

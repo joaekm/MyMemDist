@@ -450,13 +450,11 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
                     GEMINI_THROTTLER.report_error()
                     LOGGER.warning(f"Chunk {chunk_info.chunk_index}: response.text=None, retry {attempt + 1}/{MAX_RETRIES}")
 
-                except Exception as e:
-                    if "rate" in str(e).lower() or "429" in str(e) or "quota" in str(e).lower():
-                        GEMINI_THROTTLER.report_rate_limit()
-                        LOGGER.warning(f"Chunk {chunk_info.chunk_index}: Rate limit, backing off...")
-                    else:
-                        GEMINI_THROTTLER.report_error()
-                        LOGGER.warning(f"Chunk {chunk_info.chunk_index}: Error {e}, retry {attempt + 1}/{MAX_RETRIES}")
+                except (ConnectionError, TimeoutError) as e:
+                    GEMINI_THROTTLER.report_error()
+                    LOGGER.warning(f"Chunk {chunk_info.chunk_index}: Network error {e}, retry {attempt + 1}/{MAX_RETRIES}")
+                    time.sleep(RETRY_DELAY * (attempt + 1))
+                    continue
 
                 time.sleep(RETRY_DELAY * (attempt + 1))
 

@@ -184,9 +184,12 @@ class LLMService:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f)
-        except Exception as e:
-            LOGGER.error(f"Kunde inte ladda config: {e}")
-            return {}
+        except FileNotFoundError as e:
+            LOGGER.error(f"Config-fil saknas: {config_path}")
+            raise RuntimeError(f"HARDFAIL: Config saknas: {config_path}") from e
+        except yaml.YAMLError as e:
+            LOGGER.error(f"Ogiltig YAML i config: {e}")
+            raise RuntimeError(f"HARDFAIL: Ogiltig config YAML") from e
 
     def _init_providers(self):
         """Initiera LLM providers (OBJEKT-85)."""
@@ -195,20 +198,14 @@ class LLMService:
         # Anthropic (default för text-prompts)
         anthropic_key = ai_config.get('anthropic', {}).get('api_key')
         if anthropic_key:
-            try:
-                self.providers['anthropic'] = AnthropicProvider(api_key=anthropic_key)
-                LOGGER.info("AnthropicProvider initialized")
-            except Exception as e:
-                LOGGER.warning(f"Kunde inte initiera AnthropicProvider: {e}")
+            self.providers['anthropic'] = AnthropicProvider(api_key=anthropic_key)
+            LOGGER.info("AnthropicProvider initialized")
 
         # Gemini (för transkribering)
         gemini_key = ai_config.get('gemini', {}).get('api_key')
         if gemini_key:
-            try:
-                self.providers['gemini'] = GeminiProvider(api_key=gemini_key)
-                LOGGER.info("GeminiProvider initialized")
-            except Exception as e:
-                LOGGER.warning(f"Kunde inte initiera GeminiProvider: {e}")
+            self.providers['gemini'] = GeminiProvider(api_key=gemini_key)
+            LOGGER.info("GeminiProvider initialized")
 
         if not self.providers:
             LOGGER.error("HARDFAIL: Ingen LLM provider kunde initieras!")
@@ -336,21 +333,14 @@ class LLMService:
                     model=model
                 )
 
-            except Exception as e:
-                if self._is_rate_limit_error(e, llm_provider):
-                    # Rate limit - backa throttler och vänta extra
-                    throttler.report_rate_limit()
-                    LOGGER.warning(f"Rate limit träffad ({provider}), väntar innan retry...")
-                    time.sleep(2.0 + attempt * 2.0)  # Vänta 2/4/6 sek
-                else:
-                    # Annat fel
-                    throttler.report_error()
-                    LOGGER.warning(f"LLM-anrop misslyckades ({provider}, försök {attempt + 1}/{self.retry_attempts}): {e}")
-
+            except (ConnectionError, TimeoutError) as e:
+                # Nätverksfel - retry
+                throttler.report_error()
+                LOGGER.warning(f"LLM nätverksfel ({provider}, försök {attempt + 1}/{self.retry_attempts}): {e}")
                 if attempt < self.retry_attempts - 1:
                     time.sleep(self.retry_delay * (attempt + 1))
-                else:
-                    return LLMResponse(text="", success=False, error=str(e), model=model)
+                    continue
+                return LLMResponse(text="", success=False, error=str(e), model=model)
 
         return LLMResponse(text="", success=False, error="Max retries exceeded")
 
@@ -392,11 +382,7 @@ class LLMService:
 
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
-                try:
-                    results[idx] = future.result()
-                except Exception as e:
-                    LOGGER.error(f"Batch generate fel vid index {idx}: {e}")
-                    results[idx] = LLMResponse(text="", success=False, error=str(e))
+                results[idx] = future.result()  # generate() returnerar alltid LLMResponse
 
         return results
 
@@ -473,21 +459,14 @@ class LLMService:
                     model=model
                 )
 
-            except Exception as e:
-                if self._is_rate_limit_error(e, llm_provider):
-                    throttler.report_rate_limit()
-                    LOGGER.warning(f"Rate limit träffad ({provider}), väntar innan retry...")
-                    import time
-                    time.sleep(2.0 + attempt * 2.0)
-                else:
-                    throttler.report_error()
-                    LOGGER.warning(f"Multi-turn misslyckades ({provider}, försök {attempt + 1}/{self.retry_attempts}): {e}")
-
+            except (ConnectionError, TimeoutError) as e:
+                # Nätverksfel - retry
+                throttler.report_error()
+                LOGGER.warning(f"Multi-turn nätverksfel ({provider}, försök {attempt + 1}/{self.retry_attempts}): {e}")
                 if attempt < self.retry_attempts - 1:
-                    import time
                     time.sleep(self.retry_delay * (attempt + 1))
-                else:
-                    return LLMResponse(text="", success=False, error=str(e), model=model)
+                    continue
+                return LLMResponse(text="", success=False, error=str(e), model=model)
 
         return LLMResponse(text="", success=False, error="Max retries exceeded")
 

@@ -36,8 +36,12 @@ def _load_validation_config() -> dict:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
         return config.get('validation', {})
-    except Exception:
+    except FileNotFoundError:
+        LOGGER.warning(f"Config saknas: {config_path}, använder defaults")
         return {}
+    except yaml.YAMLError as e:
+        LOGGER.error(f"Ogiltig YAML i config: {e}")
+        raise RuntimeError(f"HARDFAIL: Ogiltig config YAML") from e
 
 VALIDATION_CONFIG = _load_validation_config()
 DATE_MIN_YEAR = VALIDATION_CONFIG.get('min_year', 2015)
@@ -89,49 +93,46 @@ class FrontmatterExtractor(DateExtractor):
         return filepath.lower().endswith('.md')
     
     def extract(self, filepath: str) -> Optional[datetime]:
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                # Läs bara första 2000 tecken (frontmatter är i början)
-                content = f.read(2000)
-            
-            match = self.PATTERN.search(content)
-            if match:
-                ts_str = match.group(1).strip()
-                result = None
-                
-                # Försök parsa ISO-format
-                # Hantera både med och utan timezone
-                for fmt in [
-                    '%Y-%m-%dT%H:%M:%S.%f%z',
-                    '%Y-%m-%dT%H:%M:%S%z',
-                    '%Y-%m-%dT%H:%M:%S.%f',
-                    '%Y-%m-%dT%H:%M:%S',
-                    '%Y-%m-%d'
-                ]:
-                    try:
-                        result = datetime.strptime(ts_str[:26].replace('+02:00', '+0200').replace('+01:00', '+0100'), fmt)
-                        break
-                    except ValueError:
-                        # Förväntat: prova nästa format
-                        LOGGER.debug(f"Format {fmt} matchade inte för {ts_str[:20]}")
-                        continue
-                
-                # Fallback: försök fromisoformat
-                if not result:
-                    try:
-                        result = datetime.fromisoformat(ts_str)
-                    except ValueError:
-                        LOGGER.debug(f"fromisoformat misslyckades för {ts_str[:20]}")
-                
-                # Validera att datumet är rimligt
-                if result and result.year >= self.MIN_YEAR:
-                    return result
-                elif result:
-                    LOGGER.debug(f"Frontmatter-datum {result.year} för gammalt i {os.path.basename(filepath)}")
-                    
-        except Exception as e:
-            LOGGER.debug(f"FrontmatterExtractor misslyckades för {filepath}: {e}")
-        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            # Läs bara första 2000 tecken (frontmatter är i början)
+            content = f.read(2000)
+
+        match = self.PATTERN.search(content)
+        if not match:
+            return None
+
+        ts_str = match.group(1).strip()
+        result = None
+
+        # Försök parsa ISO-format
+        # Hantera både med och utan timezone
+        for fmt in [
+            '%Y-%m-%dT%H:%M:%S.%f%z',
+            '%Y-%m-%dT%H:%M:%S%z',
+            '%Y-%m-%dT%H:%M:%S.%f',
+            '%Y-%m-%dT%H:%M:%S',
+            '%Y-%m-%d'
+        ]:
+            try:
+                result = datetime.strptime(ts_str[:26].replace('+02:00', '+0200').replace('+01:00', '+0100'), fmt)
+                break
+            except ValueError:
+                # Förväntat: prova nästa format
+                continue
+
+        # Fallback: försök fromisoformat
+        if not result:
+            try:
+                result = datetime.fromisoformat(ts_str)
+            except ValueError:
+                LOGGER.debug(f"Kunde inte parsa datum: {ts_str[:30]}")
+                return None
+
+        # Validera att datumet är rimligt
+        if result and result.year >= self.MIN_YEAR:
+            return result
+
+        LOGGER.debug(f"Frontmatter-datum {result.year if result else 'None'} för gammalt i {os.path.basename(filepath)}")
         return None
 
 
@@ -169,39 +170,27 @@ class GenericFilenameExtractor(DateExtractor):
         # 1. Försök YYYY-MM-DD (t.ex. Slack_kanal_2025-12-11_uuid.txt)
         match = self.PATTERN_DASH.search(basename)
         if match:
-            try:
-                year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-                result = datetime(year, month, day)
-                if result.year >= self.MIN_YEAR:
-                    return result
-            except ValueError:
-                pass
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            if 1 <= month <= 12 and 1 <= day <= 31 and year >= self.MIN_YEAR:
+                return datetime(year, month, day)
 
         # 2. Försök YYYYMMDD_HHMM (t.ex. Inspelning_20251208_0958_uuid.m4a)
         match = self.PATTERN_COMPACT_TIME.search(basename)
         if match:
-            try:
-                year = int(match.group(1))
-                month = int(match.group(2))
-                day = int(match.group(3))
-                hour = int(match.group(4))
-                minute = int(match.group(5))
-                result = datetime(year, month, day, hour, minute)
-                if result.year >= self.MIN_YEAR:
-                    return result
-            except ValueError:
-                pass
+            year = int(match.group(1))
+            month = int(match.group(2))
+            day = int(match.group(3))
+            hour = int(match.group(4))
+            minute = int(match.group(5))
+            if 1 <= month <= 12 and 1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59 and year >= self.MIN_YEAR:
+                return datetime(year, month, day, hour, minute)
 
         # 3. Försök _YYYYMMDD_ (generellt kompakt format)
         match = self.PATTERN_COMPACT.search(basename)
         if match:
-            try:
-                year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-                result = datetime(year, month, day)
-                if result.year >= self.MIN_YEAR:
-                    return result
-            except ValueError:
-                pass
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            if 1 <= month <= 12 and 1 <= day <= 31 and year >= self.MIN_YEAR:
+                return datetime(year, month, day)
 
         LOGGER.debug(f"Kunde inte parsa datum från {basename}")
         return None
@@ -248,10 +237,7 @@ class PDFExtractor(DateExtractor):
                             
         except ImportError:
             LOGGER.warning("pymupdf (fitz) inte installerat - kan inte läsa PDF-metadata")
-        except Exception as e:
-            LOGGER.debug(f"PDFExtractor misslyckades för {filepath}: {e}")
-        
-        return None
+            return None
 
 
 class FilesystemExtractor(DateExtractor):
@@ -275,29 +261,23 @@ class FilesystemExtractor(DateExtractor):
         return os.path.exists(filepath)
     
     def extract(self, filepath: str) -> Optional[datetime]:
-        try:
-            stat = os.stat(filepath)
-            
-            # Försök birthtime först (macOS)
-            if hasattr(stat, 'st_birthtime'):
-                birthtime = datetime.fromtimestamp(stat.st_birthtime)
-                if birthtime.year >= self.MIN_YEAR:
-                    return birthtime
-                else:
-                    LOGGER.debug(f"birthtime {birthtime.year} för gammal, använder mtime")
-            
-            # Fallback till mtime
-            mtime = datetime.fromtimestamp(stat.st_mtime)
-            if mtime.year >= self.MIN_YEAR:
-                return mtime
-            
-            # Även mtime är korrupt
-            LOGGER.warning(f"Både birthtime och mtime är korrupta för {filepath}")
-            return None
-            
-        except Exception as e:
-            LOGGER.debug(f"FilesystemExtractor misslyckades för {filepath}: {e}")
-        
+        stat = os.stat(filepath)
+
+        # Försök birthtime först (macOS)
+        if hasattr(stat, 'st_birthtime'):
+            birthtime = datetime.fromtimestamp(stat.st_birthtime)
+            if birthtime.year >= self.MIN_YEAR:
+                return birthtime
+            else:
+                LOGGER.debug(f"birthtime {birthtime.year} för gammal, använder mtime")
+
+        # Fallback till mtime
+        mtime = datetime.fromtimestamp(stat.st_mtime)
+        if mtime.year >= self.MIN_YEAR:
+            return mtime
+
+        # Även mtime är korrupt
+        LOGGER.warning(f"Både birthtime och mtime är korrupta för {filepath}")
         return None
 
 
@@ -372,9 +352,12 @@ if __name__ == "__main__":
                 os.path.expanduser(config['paths']['lake_store']),
                 os.path.expanduser(config['paths']['asset_documents']),
             ]
-        except Exception as e:
-            LOGGER.warning(f"Kunde inte ladda config: {e}")
+        except FileNotFoundError:
+            print(f"Config saknas: {config_path}")
             return []
+        except yaml.YAMLError as e:
+            print(f"Ogiltig YAML: {e}")
+            raise
     
     if len(sys.argv) < 2:
         print("Användning: python date_service.py <filepath> [filepath2] ...")

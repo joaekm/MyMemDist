@@ -198,8 +198,9 @@ class GraphService:
                 # Noden finns - bevara existerande data, skriv över med nytt
                 try:
                     current_props = json.loads(existing[0]) if existing[0] else {}
-                except:
-                    current_props = {}
+                except json.JSONDecodeError as e:
+                    LOGGER.error(f"Corrupt JSON in node {id}: {e}")
+                    raise ValueError(f"Corrupt JSON in existing node {id}") from e
 
                 final_props = current_props.copy()
                 final_props.update(new_props)
@@ -254,8 +255,9 @@ class GraphService:
                 nid = r[0]
                 try:
                     props = json.loads(r[1]) if r[1] else {}
-                except:
-                    props = {}
+                except json.JSONDecodeError as e:
+                    LOGGER.error(f"Corrupt JSON in node {nid}: {e}")
+                    raise ValueError(f"Corrupt JSON in node {nid}") from e
 
                 # Uppdatera räknare
                 count = props.get('retrieved_times', 0)
@@ -637,9 +639,9 @@ class GraphService:
             try:
                 props_t = json.loads(res_target[0]) if res_target[0] else {}
                 props_s = json.loads(res_source[0]) if res_source[0] else {}
-            except Exception as e:
+            except json.JSONDecodeError as e:
                 LOGGER.error(f"JSON decode error during merge: {e}")
-                return
+                raise ValueError(f"Corrupt JSON in nodes during merge: {e}") from e
 
             # 2. AGGREGERA PROPERTIES
             merged_props = props_t.copy()
@@ -656,23 +658,16 @@ class GraphService:
                         unique_list = []
                         for item in combined:
                             # Sortera keys för konsekvent hashning
-                            try:
-                                # Skapar en hashbar representation av dictet
-                                item_key = tuple(sorted((k, str(v)) for k, v in item.items()))
-                                if item_key not in seen:
-                                    seen.add(item_key)
-                                    unique_list.append(item)
-                            except Exception:
-                                # Fallback om datat är komplext: behåll allt
+                            # Skapar en hashbar representation av dictet
+                            item_key = tuple(sorted((ik, str(iv)) for ik, iv in item.items()))
+                            if item_key not in seen:
+                                seen.add(item_key)
                                 unique_list.append(item)
                         merged_props[k] = unique_list
 
                     # STANDARD: List of Strings/Ints
                     else:
-                        try:
-                            merged_props[k] = list(set(combined))
-                        except TypeError:
-                            merged_props[k] = combined # Fallback
+                        merged_props[k] = list(set(combined))
 
                 # Om skalärt värde saknas i target, kopiera från source
                 elif k not in merged_props:
@@ -808,8 +803,9 @@ class GraphService:
             orig_type = res[0]
             try:
                 orig_props = json.loads(res[1]) if res[1] else {}
-            except:
-                orig_props = {}
+            except json.JSONDecodeError as e:
+                LOGGER.error(f"Corrupt JSON in node {original_id}: {e}")
+                raise ValueError(f"Corrupt JSON in node {original_id}") from e
 
             node_context = orig_props.get("node_context", [])
 
@@ -853,20 +849,16 @@ class GraphService:
                 for target, etype, props in out_edges:
                     # Undvik self-loops om nya noden råkar vara target
                     if target == new_node: continue
-                    try:
-                        self.conn.execute("INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
-                                        [new_node, target, etype, props])
-                    except: pass
+                    self.conn.execute("INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
+                                    [new_node, target, etype, props])
 
             # Inkommande
             in_edges = self.conn.execute("SELECT source, edge_type, properties FROM edges WHERE target = ?", [original_id]).fetchall()
             for new_node in created_nodes:
                 for source, etype, props in in_edges:
                     if source == new_node: continue
-                    try:
-                        self.conn.execute("INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
-                                        [source, new_node, etype, props])
-                    except: pass
+                    self.conn.execute("INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
+                                    [source, new_node, etype, props])
 
             # 4. Radera originalnoden
             # Detta tar också bort dess kanter via Cascade (om implementerat) eller manuell delete

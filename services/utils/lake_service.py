@@ -37,21 +37,21 @@ class LakeService:
             return {}
 
         with self._get_lock(filepath):
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                if not content.startswith("---"):
-                    return {}
-                
-                parts = content.split("---", 2)
-                if len(parts) < 3:
-                    return {}
-                
-                return yaml.safe_load(parts[1]) or {}
-            except Exception as e:
-                LOGGER.error(f"Kunde inte läsa metadata från {filepath}: {e}")
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            if not content.startswith("---"):
                 return {}
+
+            parts = content.split("---", 2)
+            if len(parts) < 3:
+                return {}
+
+            try:
+                return yaml.safe_load(parts[1]) or {}
+            except yaml.YAMLError as e:
+                LOGGER.error(f"Ogiltig YAML i {filepath}: {e}")
+                raise ValueError(f"Corrupt YAML frontmatter in {filepath}") from e
 
     def update_metadata(self, filepath: str, updates: Dict[str, Any]) -> bool:
         """
@@ -64,53 +64,52 @@ class LakeService:
 
         lock = self._get_lock(filepath)
         with lock:
-            try:
-                # 1. Läs in hela filen
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    content = f.read()
+            # 1. Läs in hela filen
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
 
-                # 2. Separera Header och Body
-                if not content.startswith("---"):
-                    LOGGER.warning(f"Fil saknar YAML-block: {filepath}")
-                    return False
-                
-                parts = content.split("---", 2)
-                if len(parts) < 3:
-                    LOGGER.warning(f"Filstruktur ogiltig (delar saknas): {filepath}")
-                    return False
-
-                header_raw = parts[1]
-                body = parts[2] # Allt efter andra '---'
-
-                # 3. Parsa och Uppdatera
-                metadata = yaml.safe_load(header_raw) or {}
-                
-                # Applicera ändringar
-                changes_made = False
-                for k, v in updates.items():
-                    if metadata.get(k) != v:
-                        metadata[k] = v
-                        changes_made = True
-                
-                if not changes_made:
-                    return True # Inget att göra, men "lyckades"
-
-                # 4. Dumpa tillbaka (MED UNICODE-STÖD)
-                new_header = yaml.dump(metadata, sort_keys=False, allow_unicode=True)
-
-                # 5. Skriv tillbaka atomärt (nästan)
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write("---\n")
-                    f.write(new_header)
-                    f.write("---") # yaml.dump lägger ofta till en nyrad, parts[2] brukar börja med \n
-                    f.write(body)
-                
-                LOGGER.info(f"Uppdaterade metadata i {os.path.basename(filepath)}: {list(updates.keys())}")
-                return True
-
-            except Exception as e:
-                LOGGER.error(f"Kritist fel vid uppdatering av {filepath}: {e}")
+            # 2. Separera Header och Body
+            if not content.startswith("---"):
+                LOGGER.warning(f"Fil saknar YAML-block: {filepath}")
                 return False
+
+            parts = content.split("---", 2)
+            if len(parts) < 3:
+                LOGGER.warning(f"Filstruktur ogiltig (delar saknas): {filepath}")
+                return False
+
+            header_raw = parts[1]
+            body = parts[2]  # Allt efter andra '---'
+
+            # 3. Parsa och Uppdatera
+            try:
+                metadata = yaml.safe_load(header_raw) or {}
+            except yaml.YAMLError as e:
+                LOGGER.error(f"Ogiltig YAML i {filepath}: {e}")
+                raise ValueError(f"Corrupt YAML frontmatter in {filepath}") from e
+
+            # Applicera ändringar
+            changes_made = False
+            for k, v in updates.items():
+                if metadata.get(k) != v:
+                    metadata[k] = v
+                    changes_made = True
+
+            if not changes_made:
+                return True  # Inget att göra, men "lyckades"
+
+            # 4. Dumpa tillbaka (MED UNICODE-STÖD)
+            new_header = yaml.dump(metadata, sort_keys=False, allow_unicode=True)
+
+            # 5. Skriv tillbaka atomärt (nästan)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write("---\n")
+                f.write(new_header)
+                f.write("---")  # yaml.dump lägger ofta till en nyrad, parts[2] brukar börja med \n
+                f.write(body)
+
+            LOGGER.info(f"Uppdaterade metadata i {os.path.basename(filepath)}: {list(updates.keys())}")
+            return True
 
     def update_semantics(self, filepath: str, context_summary: Optional[str] = None,
                         relations_summary: Optional[str] = None,

@@ -74,10 +74,7 @@ from services.utils.parts_parser_service import (
     build_chunk_text
 )
 
-try:
-    from services.utils.date_service import get_timestamp as date_service_timestamp
-except ImportError:
-    date_service_timestamp = lambda x: datetime.datetime.now()
+from services.utils.date_service import get_timestamp as date_service_timestamp
 
 # Tysta tredjepartsloggers EFTER import
 for _name in ['httpx', 'httpcore', 'mcp', 'google', 'google_genai', 'anyio', 'watchdog']:

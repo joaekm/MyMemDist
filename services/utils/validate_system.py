@@ -30,7 +30,33 @@ LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
 GRAPH_DB_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
-LOG_FILE = os.path.expanduser(CONFIG['logging'].get('system_log', '~/MyMemory/Logs/system.log'))
+LOG_FILE = os.path.expanduser(CONFIG['logging'].get('system_log', '~/Library/Logs/MyMemory/system.log'))
+
+
+def ensure_runtime_directories():
+    """
+    Säkerställer att macOS-standard runtime-mappar finns.
+    Anropas vid uppstart för att skapa mappar som inte ingår i portabla data.
+    """
+    runtime_dirs = [
+        # Logs (~/Library/Logs/MyMemory/)
+        os.path.dirname(LOG_FILE),
+        # Application Support (~/Library/Application Support/MyMemory/)
+        os.path.expanduser('~/Library/Application Support/MyMemory'),
+        # MemoryDrop (inbox för nya filer)
+        os.path.expanduser('~/Library/Application Support/MyMemory/MemoryDrop'),
+        # Caches (~/Library/Caches/MyMemory/)
+        os.path.expanduser('~/Library/Caches/MyMemory'),
+        os.path.expanduser('~/Library/Caches/MyMemory/MeetingBuffer'),
+    ]
+
+    for dir_path in runtime_dirs:
+        if not os.path.exists(dir_path):
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+                LOGGER.info(f"Skapade runtime-mapp: {dir_path}")
+            except OSError as e:
+                LOGGER.warning(f"Kunde inte skapa mapp {dir_path}: {e}")
 
 # Hämta extensions
 DOC_EXTS = CONFIG.get('processing', {}).get('document_extensions', [])
@@ -274,6 +300,9 @@ def run_startup_checks():
     Kör alla valideringar och returnerar health_info för auto_repair.
     Används av start_services.py vid uppstart.
     """
+    # Säkerställ att runtime-mappar finns
+    ensure_runtime_directories()
+
     print("=== MyMem System Validator ===")
 
     lake_c = validera_filer()
