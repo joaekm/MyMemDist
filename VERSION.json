@@ -1,7 +1,7 @@
 {
-  "version": "0.2.4",
+  "version": "0.2.5",
   "date": "2026-02-04",
-  "description": "Fix: Menubar-app detekterar nu körande tjänster korrekt - Fixade processmatchning så att tjänster som körs som Python-modul (-m) hittas ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.2.4/MyMemory-Installer.dmg",
+  "description": "Menubar-app fixar och FFmpeg-stöd - Fix: Tjänster detekteras nu korrekt (processmatchning utan .py) - Fix: Python venv prioriteras före embedded Python - Ny: FFmpeg laddas ner automatiskt vid setup (krävs för transkribering) - Fix: Transcriber och Røde Collector använder lokal FFmpeg-installation ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.2.5/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
