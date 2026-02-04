@@ -1,7 +1,7 @@
 {
-  "version": "0.1.2",
+  "version": "0.1.3",
   "date": "2026-02-04",
-  "description": "Fixad Setup Wizard som inte visades för nya användare. **Buggfix:** - Borttagen felaktig dev-mode detektion som hoppade över Setup Wizard - Appen kollar nu endast produktions-runtime, inte utvecklingsmiljöer ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.1.2/MyMemory-Installer.dmg",
+  "description": "# Release Notes **Buggfix:** Appen stoppar nu alla Python-tjänster vid avslutning. Tidigare kunde tjänster (ingestion_engine, dreamer, mcp_server, transcriber) hänga kvar som bakgrundsprocesser efter att appen avslutats, vilket orsakade \"objekt används\"-fel vid ominstallation. Ändring: - Lagt till AppDelegate med applicationWillTerminate-hook - Alla körande tjänster stoppas synkront innan appen termineras ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.1.3/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
