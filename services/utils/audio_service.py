@@ -22,6 +22,35 @@ from datetime import datetime
 LOGGER = logging.getLogger('MyMem_AudioService')
 
 
+def _find_ffmpeg_binary(name: str) -> str:
+    """
+    Hitta ffmpeg/ffprobe binär.
+
+    Prioriteringsordning:
+    1. Runtime/.ffmpeg/ (lokal installation)
+    2. PATH (systeminstallation via homebrew etc.)
+    """
+    # Lokal installation i Runtime
+    local_path = os.path.expanduser(
+        f"~/Library/Application Support/MyMemory/Runtime/.ffmpeg/{name}"
+    )
+    if os.path.isfile(local_path) and os.access(local_path, os.X_OK):
+        return local_path
+
+    # Fallback till PATH
+    return name
+
+
+def _get_ffprobe() -> str:
+    """Returnerar sökväg till ffprobe."""
+    return _find_ffmpeg_binary('ffprobe')
+
+
+def _get_ffmpeg() -> str:
+    """Returnerar sökväg till ffmpeg."""
+    return _find_ffmpeg_binary('ffmpeg')
+
+
 @dataclass
 class AudioInfo:
     """Metadata om en ljudfil."""
@@ -74,7 +103,7 @@ def get_audio_info(filepath: str) -> AudioInfo:
     try:
         result = subprocess.run(
             [
-                'ffprobe',
+                _get_ffprobe(),
                 '-v', 'quiet',
                 '-print_format', 'json',
                 '-show_format',
@@ -205,7 +234,7 @@ def extract_audio_segment(
     try:
         result = subprocess.run(
             [
-                'ffmpeg',
+                _get_ffmpeg(),
                 '-y',  # Overwrite output
                 '-i', input_path,
                 '-ss', start_ts,

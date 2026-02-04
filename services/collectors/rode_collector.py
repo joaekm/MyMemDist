@@ -29,6 +29,7 @@ import yaml
 
 # --- CONFIG ---
 from services.utils.config_loader import get_config
+from services.utils.audio_service import _get_ffmpeg
 
 CONFIG = get_config()
 RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
@@ -142,7 +143,7 @@ def generate_target_name(recording_dt, file_uuid):
 def convert_wav_to_m4a(src_path, dest_path):
     """Konvertera WAV till m4a 128kbps mono via ffmpeg."""
     cmd = [
-        "ffmpeg",
+        _get_ffmpeg(),
         "-i", src_path,
         "-ac", "1",            # mono
         "-b:a", FFMPEG_BITRATE,  # bitrate
