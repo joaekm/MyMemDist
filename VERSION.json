@@ -1,7 +1,7 @@
 {
-  "version": "0.2.5",
-  "date": "2026-02-04",
-  "description": "Menubar-app fixar och FFmpeg-stöd - Fix: Tjänster detekteras nu korrekt (processmatchning utan .py) - Fix: Python venv prioriteras före embedded Python - Ny: FFmpeg laddas ner automatiskt vid setup (krävs för transkribering) - Fix: Transcriber och Røde Collector använder lokal FFmpeg-installation ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.2.5/MyMemory-Installer.dmg",
+  "version": "0.3.0",
+  "date": "2026-02-05",
+  "description": "# Release Notes Uppgraderingsflöde, uppdateringskontroll och Lake-notiser. **Nytt:** - \"Kolla efter uppdateringar\"-knapp i menubar – kontrollerar VERSION.json på GitHub - Automatisk uppgradering av backend-kod vid versionsmismatch (silent upgrade) - macOS-notiser vid ny Lake-fil: \"Filnamn – Tillagt i minnet!\" - Event-driven Lake-bevakning via DispatchSource (ersätter polling) **Förbättringar:** - Upgrade-safe nedladdning – bevarar .python/, venv/ och .ffmpeg/ vid uppgradering - .runtime_version stämplas med version från VERSION.json (inte bundle-version) - Tjänster startas om automatiskt efter lyckad uppgradering **Buggfixar:** - Fix: applicationWillTerminate dödar nu alla processer korrekt (utan .py-suffix) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.3.0/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
