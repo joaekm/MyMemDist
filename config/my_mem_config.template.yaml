@@ -223,8 +223,8 @@ slack:
 # Lämna credentials_path/token_path tomma för att inaktivera Gmail/Calendar.
 # Se setup-instruktioner för att konfigurera Google OAuth.
 google:
-  credentials_path: "~/MyMemory/Settings/google_credentials.json"
-  token_path: "~/MyMemory/Settings/google_token.json"
+  credentials_path: "~/MyMemory/Settings/Credentials/client_secret.json"
+  token_path: "~/MyMemory/Settings/Credentials/token.json"
 
   scopes:
     - "https://www.googleapis.com/auth/gmail.readonly"

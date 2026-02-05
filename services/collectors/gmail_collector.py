@@ -53,17 +53,17 @@ LOGGER = logging.getLogger('MyMem_GmailCollector')
 
 # Guard: avsluta rent om Google inte är konfigurerat
 if not GOOGLE_CONF.get('credentials_path'):
-    _LOGGER.info("google.credentials_path saknas i config — Gmail Collector inaktiv")
+    LOGGER.info("google.credentials_path saknas i config — Gmail Collector inaktiv")
     exit(0)
 if not GOOGLE_CONF.get('token_path'):
-    _LOGGER.info("google.token_path saknas i config — Gmail Collector inaktiv")
+    LOGGER.info("google.token_path saknas i config — Gmail Collector inaktiv")
     exit(0)
 
 CREDENTIALS_PATH = os.path.expanduser(GOOGLE_CONF['credentials_path'])
 TOKEN_PATH = os.path.expanduser(GOOGLE_CONF['token_path'])
 
 if not os.path.exists(CREDENTIALS_PATH):
-    _LOGGER.info(f"Google credentials-fil saknas ({CREDENTIALS_PATH}) — Gmail Collector inaktiv")
+    LOGGER.info(f"Google credentials-fil saknas ({CREDENTIALS_PATH}) — Gmail Collector inaktiv")
     exit(0)
 
 SCOPES = GOOGLE_CONF.get('scopes', ['https://www.googleapis.com/auth/gmail.readonly'])

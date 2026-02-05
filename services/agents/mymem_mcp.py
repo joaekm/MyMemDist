@@ -42,6 +42,7 @@ _root.addHandler(_fh)
 from mcp.server.fastmcp import FastMCP
 from services.utils.graph_service import GraphService
 from services.utils.vector_service import get_vector_service
+from services.utils.shared_lock import resource_lock
 
 # Tysta tredjepartsloggers EFTER import
 for _name in ['httpx', 'httpcore', 'mcp', 'anyio']:
@@ -300,24 +301,23 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
     använd sedan get_entity_summary eller get_neighbor_network för detaljer.
     """
     try:
-        # GraphService använder DuckDB internt och är robust
-        graph = GraphService(_get_graph_path(), read_only=True)
-        limit = GRAPH_SEARCH_LIMIT
+        with resource_lock("graph", exclusive=False, timeout=10.0):
+            graph = GraphService(_get_graph_path(), read_only=True)
+            limit = GRAPH_SEARCH_LIMIT
 
-        # Sök i id, aliases OCH hela properties-JSON
-        sql = "SELECT id, type, aliases, properties FROM nodes WHERE (id ILIKE ? OR aliases ILIKE ? OR properties ILIKE ?)"
-        params = [f"%{query}%", f"%{query}%", f"%{query}%"]
+            sql = "SELECT id, type, aliases, properties FROM nodes WHERE (id ILIKE ? OR aliases ILIKE ? OR properties ILIKE ?)"
+            params = [f"%{query}%", f"%{query}%", f"%{query}%"]
 
-        if node_type:
-            sql += " AND type = ?"
-            params.append(node_type)
+            if node_type:
+                sql += " AND type = ?"
+                params.append(node_type)
 
-        sql += " LIMIT ?"
-        params.append(limit)
+            sql += " LIMIT ?"
+            params.append(limit)
 
-        rows = graph.conn.execute(sql, params).fetchall()
-        graph.close()
-        
+            rows = graph.conn.execute(sql, params).fetchall()
+            graph.close()
+
         if not rows:
             return f"GRAF: Inga träffar för '{query}'" + (f" (Typ: {node_type})" if node_type else "")
 
@@ -326,8 +326,7 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
             node_id, n_type, aliases_raw, props_raw = r
             props = json.loads(props_raw) if props_raw else {}
             aliases = json.loads(aliases_raw) if aliases_raw else []
-            
-            # Formatera output för läsbarhet
+
             name = props.get('name', node_id)
             node_context = props.get('node_context', [])
             if node_context and isinstance(node_context, list):
@@ -336,13 +335,15 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
             else:
                 ctx_str = "No context"
             alias_str = f"Aliases: {len(aliases)}" if aliases else ""
-            
+
             output.append(f"• [{n_type}] {name}")
             output.append(f"  ID: {node_id}")
             if alias_str: output.append(f"  {alias_str}")
             output.append(f"  {ctx_str}")
-            
+
         return "\n".join(output)
+    except TimeoutError:
+        return "Grafsökning misslyckades: Databasen är upptagen (ingestion pågår). Försök igen om en stund."
     except Exception as e:
         return f"Grafsökning misslyckades: {e}"
 
@@ -372,42 +373,38 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
     Returnerar: Entiteter rankade efter semantisk likhet med din fråga.
     """
     try:
-        # 1. Hämta Singleton för Knowledge Base (samma som indexeraren använder)
-        # Vi ber explicit om "knowledge_base" enligt din instruktion
-        vs = get_vector_service("knowledge_base")
-        
-        # 2. Sök (VectorService returnerar en ren lista med dicts)
-        results = vs.search(query_text=query_text, limit=n_results)
-        
+        with resource_lock("vector", exclusive=False, timeout=10.0):
+            vs = get_vector_service("knowledge_base")
+            results = vs.search(query_text=query_text, limit=n_results)
+
         if not results:
             return f"VEKTOR: Inga semantiska matchningar för '{query_text}'."
 
         output = [f"=== VEKTOR RESULTAT ('{query_text}') ==="]
-        output.append(f"Modell: {vs.model_name}") # Bekräfta modellen för transparens
+        output.append(f"Modell: {vs.model_name}")
         output.append("-" * 30)
-        
+
         for i, item in enumerate(results):
-            # VectorService har redan packat upp Chroma-strukturen åt oss
             dist = item['distance']
             meta = item['metadata']
             content = item['document']
             uid = item['id']
-            
+
             content_preview = content.replace('\n', ' ')[:150] + "..."
-            
-            # Bedöm kvalitet (lägre distans = bättre)
+
             quality = "🔥 Stark" if dist < VECTOR_DISTANCE_STRONG else "❄️ Svag" if dist > VECTOR_DISTANCE_WEAK else "☁️ Medel"
-            
+
             output.append(f"{i+1}. [{quality} Match] (Dist: {dist:.3f})")
             output.append(f"   Fil: {meta.get('filename', 'Unknown')}")
             output.append(f"   Content: \"{content_preview}\"")
             output.append(f"   ID: {uid}")
             output.append("---")
-            
+
         return "\n".join(output)
 
+    except TimeoutError:
+        return "⚠️ VEKTOR-FEL: Databasen är upptagen (ingestion pågår). Försök igen om en stund."
     except Exception as e:
-        # Returnera felet till chatten för transparens
         return f"⚠️ VEKTOR-FEL: {str(e)}"
 
 # --- TOOL 3: LAKE (Metadata) ---
@@ -626,38 +623,34 @@ def get_neighbor_network(node_id: str) -> str:
     - "Hur hänger dessa entiteter ihop?"
     """
     try:
-        graph = GraphService(_get_graph_path(), read_only=True)
+        with resource_lock("graph", exclusive=False, timeout=10.0):
+            graph = GraphService(_get_graph_path(), read_only=True)
 
-        # Hämta huvudnoden
-        center_node = graph.get_node(node_id)
-        if not center_node:
+            center_node = graph.get_node(node_id)
+            if not center_node:
+                graph.close()
+                return f"Noden '{node_id}' hittades inte."
+
+            out_edges = graph.get_edges_from(node_id)
+            in_edges = graph.get_edges_to(node_id)
+
+            neighbor_ids = set()
+            for e in out_edges:
+                neighbor_ids.add(e['target'])
+            for e in in_edges:
+                neighbor_ids.add(e['source'])
+
+            neighbor_map = {}
+            for nid in neighbor_ids:
+                n = graph.get_node(nid)
+                if n:
+                    props = n.get('properties', {})
+                    neighbor_map[nid] = props.get('name', nid)
+                else:
+                    neighbor_map[nid] = nid
+
             graph.close()
-            return f"Noden '{node_id}' hittades inte."
 
-        # Hämta kanter
-        out_edges = graph.get_edges_from(node_id)
-        in_edges = graph.get_edges_to(node_id)
-
-        # Samla grann-IDn för namnuppslag
-        neighbor_ids = set()
-        for e in out_edges:
-            neighbor_ids.add(e['target'])
-        for e in in_edges:
-            neighbor_ids.add(e['source'])
-
-        # Hämta namn på grannar
-        neighbor_map = {}
-        for nid in neighbor_ids:
-            n = graph.get_node(nid)
-            if n:
-                props = n.get('properties', {})
-                neighbor_map[nid] = props.get('name', nid)
-            else:
-                neighbor_map[nid] = nid
-
-        graph.close()
-
-        # Formatera output
         c_props = center_node.get('properties', {})
         c_name = c_props.get('name', node_id)
 
@@ -680,6 +673,8 @@ def get_neighbor_network(node_id: str) -> str:
 
         return "\n".join(output)
 
+    except TimeoutError:
+        return "Nätverksutforskning misslyckades: Databasen är upptagen. Försök igen om en stund."
     except Exception as e:
         return f"Nätverksutforskning misslyckades: {e}"
 
@@ -705,15 +700,19 @@ def get_entity_summary(node_id: str) -> str:
     Perfekt för att svara på "Berätta allt du vet om X".
     """
     try:
-        graph = GraphService(_get_graph_path(), read_only=True)
-        node = graph.get_node(node_id)
+        with resource_lock("graph", exclusive=False, timeout=10.0):
+            graph = GraphService(_get_graph_path(), read_only=True)
+            node = graph.get_node(node_id)
 
-        if not node:
+            if not node:
+                graph.close()
+                return f"Noden '{node_id}' hittades inte."
+
+            props = node.get('properties', {})
+            name = props.get('name', node_id)
+            aliases = node.get('aliases', [])
+            ctx = props.get('node_context', [])
             graph.close()
-            return f"Noden '{node_id}' hittades inte."
-
-        props = node.get('properties', {})
-        name = props.get('name', node_id)
 
         output = [f"=== SUMMERING: {name} ==="]
         output.append(f"Typ: {node['type']}")
@@ -721,19 +720,14 @@ def get_entity_summary(node_id: str) -> str:
         output.append(f"Konfidens: {props.get('confidence', 'N/A')}")
         output.append(f"Status: {props.get('status', 'N/A')}")
 
-        # Statistik
         retrieved = props.get('retrieved_times', 0)
         last_seen = props.get('last_retrieved_at', 'Aldrig')
         output.append(f"Popularitet: {retrieved} visningar | Sist sedd: {last_seen}")
 
-        # Aliases
-        aliases = node.get('aliases', [])
         if aliases:
             output.append(f"Aliases: {', '.join(aliases[:5])}" + (" ..." if len(aliases) > 5 else ""))
 
-        # Kontext/bevis
         output.append("\n--- KONTEXT & BEVIS ---")
-        ctx = props.get('node_context', [])
         if ctx:
             seen_txt = set()
             count = 0
@@ -750,9 +744,10 @@ def get_entity_summary(node_id: str) -> str:
         else:
             output.append("(Ingen kontext lagrad)")
 
-        graph.close()
         return "\n".join(output)
 
+    except TimeoutError:
+        return "Summering misslyckades: Databasen är upptagen. Försök igen om en stund."
     except Exception as e:
         return f"Summering misslyckades: {e}"
 
@@ -766,9 +761,10 @@ def get_graph_statistics() -> str:
     Visar antal noder och kanter per typ.
     """
     try:
-        graph = GraphService(_get_graph_path(), read_only=True)
-        stats = graph.get_stats()
-        graph.close()
+        with resource_lock("graph", exclusive=False, timeout=10.0):
+            graph = GraphService(_get_graph_path(), read_only=True)
+            stats = graph.get_stats()
+            graph.close()
 
         output = ["=== GRAF STATISTIK ==="]
         output.append(f"Totalt antal noder: {stats['total_nodes']}")
@@ -784,6 +780,8 @@ def get_graph_statistics() -> str:
 
         return "\n".join(output)
 
+    except TimeoutError:
+        return "Kunde inte hämta statistik: Databasen är upptagen. Försök igen om en stund."
     except Exception as e:
         return f"Kunde inte hämta statistik: {e}"
 

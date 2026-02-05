@@ -625,12 +625,12 @@ def _setup_google():
 
     creds_source = ask("  Sökväg till din client_secret.json (eller Enter för att skippa)")
     if creds_source and os.path.exists(creds_source):
-        dest = MYMEMORY_DATA / "Credentials" / "client_secret.json"
+        dest = MYMEMORY_DATA / "Settings" / "Credentials" / "client_secret.json"
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(creds_source, dest)
         success(f"Kopierad till {dest}")
-        replacements["__GOOGLE_CREDENTIALS_PATH__"] = "~/MyMemory/Credentials/client_secret.json"
-        replacements["__GOOGLE_TOKEN_PATH__"] = "~/MyMemory/Credentials/token.json"
+        replacements["__GOOGLE_CREDENTIALS_PATH__"] = "~/MyMemory/Settings/Credentials/client_secret.json"
+        replacements["__GOOGLE_TOKEN_PATH__"] = "~/MyMemory/Settings/Credentials/token.json"
     else:
         if creds_source:
             warn(f"Filen finns inte: {creds_source}")
