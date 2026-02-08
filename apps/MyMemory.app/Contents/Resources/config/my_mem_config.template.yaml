@@ -1,0 +1,260 @@
+# MyMemory Konfiguration
+# Genererad av setup_mymemory.py — redigera efter behov.
+
+# --- SYSTEMINSTÄLLNINGAR ---
+system:
+  product_name: "Digitalist Företagsminne"  # Visas i CLI-header
+  timezone: "Europe/Stockholm" # Styr alla tidsstämplar i systemet (Assets, Lake, Index)
+  locale: "sv_SE"
+
+# --- SÄKERHET & BEHÖRIGHET ---
+security:
+  # Standardnivå för all nyinsamlad data (Privacy-First).
+  # Högre siffra = Högre säkerhet.
+  default_access_level: 5
+
+  # 5 = PRIVATE      (Endast ägaren. "Eyes Only".)
+  # 4 = RESTRICTED   (Delat med specifika projekt/kontexter.)
+  # 3 = INTERNAL     (Hela organisationen.)
+  # 2 = PARTNER      (Delat med externa samarbetspartners.)
+  # 1 = PUBLIC       (Helt öppet.)
+
+# --- ÄGARE & PROFIL ---
+owner:
+  id: "__OWNER_ID__"
+  profile:
+    full_name: "__OWNER_NAME__"
+    role: "__OWNER_ROLE__"
+    organization: "__OWNER_ORG__"
+    location: "__OWNER_LOCATION__"
+
+    # Nyckelkompetenser (Hjälper AI:n att välja nivå på svaret)
+    skills:
+      - "Ändra denna lista"
+
+# Sökvägar
+paths:
+  # Grundläggande sökvägar
+  drop_folder: "~/MyMemory/MemoryDrop"
+  asset_store: "~/MyMemory/Assets"
+  lake_store: "~/MyMemory/Lake"
+
+  # Asset subfolders
+  asset_documents: "~/MyMemory/Assets/Documents"
+  asset_recordings: "~/MyMemory/Assets/Recordings"
+  asset_transcripts: "~/MyMemory/Assets/Transcripts"
+  asset_slack: "~/MyMemory/Assets/Slack"
+  asset_calendar: "~/MyMemory/Assets/Calendar"
+  asset_mail: "~/MyMemory/Assets/Mail"
+  asset_ai_generated: "~/MyMemory/Assets/AIGenerated"
+  asset_failed: "~/MyMemory/Assets/Failed"
+
+  # --- INDEX ---
+  chroma_db: "~/MyMemory/Index/VectorDB"
+  graph_db: "~/MyMemory/Index/GraphDB"
+
+# Loggning
+logging:
+  system_log: "~/MyMemory/Logs/system.log"
+  rebuild_log: "~/MyMemory/Logs/rebuild.log"
+  log_level: "INFO"
+
+# AI-Motor & Modeller (Hybrid: Claude + Gemini)
+ai_engine:
+  # Provider-routing
+  default_provider: "anthropic"       # Claude för text-prompts
+  transcription_provider: "gemini"    # Gemini för transkribering
+
+  # Anthropic (Claude) - text-prompts
+  anthropic:
+    api_key: "__ANTHROPIC_API_KEY__"
+    throttling:
+      initial_rps: 10.0
+      max_rps: 30.0
+      min_rps: 0.5
+      increase_factor: 1.2
+      decrease_factor: 0.5
+      stabilize_after: 5
+
+  # Gemini - transkribering + fallback
+  gemini:
+    api_key: "__GEMINI_API_KEY__"
+    api_key_personal: ""
+    throttling:
+      initial_rps: 10.0
+      max_rps: 30.0
+      min_rps: 0.5
+      increase_factor: 1.2
+      decrease_factor: 0.5
+      stabilize_after: 5
+
+  # OpenAI (reserverad för framtida användning)
+  openai:
+    api_key: ""
+
+  # Modell-definitioner
+  models:
+    # Claude (Anthropic) - text-prompts
+    model_pro: "claude-sonnet-4-5-20250929"      # Konsolidering, komplex analys
+    model_fast: "claude-sonnet-4-5-20250929"    # Enrichment, strukturell analys
+    model_lite: "claude-haiku-4-5-20251001"     # Validering, entity resolution
+
+    # Gemini - transkribering
+    model_transcribe: "models/gemini-2.5-flash"  # Endast för transkribering
+
+    # Embedding: Svensk modell från KBLab (768 dim, optimerad för svenska + engelska)
+    embedding_model: "KBLab/sentence-bert-swedish-cased"
+
+  # Mappning: Vilken modell gör vad?
+  tasks:
+    transcription: "model_transcribe"  # Gemini (separat)
+    enrichment: "model_fast"           # Claude
+    consolidation: "model_pro"         # Claude
+
+  # Parallellisering
+  max_workers: 5                   # Default för ThreadPoolExecutor
+
+  # Retry-inställningar
+  max_retries: 3                   # Max retries vid tom/felaktig response
+  retry_delay_seconds: 2           # Sekunder mellan retries
+
+  # Gemini-specifikt
+  gemini_poll_interval_seconds: 1  # Status-poll vid file upload
+
+# Dreamer (Entity Resolution) - Tröskelvärden
+dreamer:
+  thresholds:
+    delete: 0.95
+    split: 0.90
+    rename_normal: 0.95
+    rename_weak: 0.70
+    recategorize: 0.90
+    merge: 0.90
+
+  candidate_limit: 50
+  vector_search_limit: 10
+
+  daemon:
+    enabled: true
+    node_threshold: 15
+    max_hours_between_runs: 24
+    poll_interval_seconds: 300
+    state_file: "~/MyMemory/Index/.dreamer_state.json"
+
+# Search - Tröskelvärden och limits för MCP-sökning
+search:
+  graph_limit: 15
+  distance_strong: 0.8
+  distance_weak: 1.2
+  max_entity_queries: 5
+  max_semantic_queries: 3
+  results_per_query: 2
+
+# Collectors - Inställningar för datainsamlare
+collectors:
+  slack:
+    page_size: 200
+
+  rode:
+    volume_prefix: "WirelessPRO"           # Volymnamn-prefix i /Volumes/
+    poll_interval_seconds: 30              # Sekunder mellan pollar
+    ffmpeg_bitrate: "128k"                 # AAC bitrate för m4a-konvertering
+    state_dir: "~/MyMemory/Assets/.rode_state"  # Spårfiler per enhet
+
+# Validation
+validation:
+  min_year: 2015
+  entity_extraction_max_attempts: 7
+
+# --- FILTYPER FÖR SORTERING ---
+processing:
+  metadata_text_limit: 50000
+  summary_max_chars: 30000
+  header_scan_chars: 3000
+  llm_context_limit: 5000
+  enrichment_text_limit: 2000
+  max_keywords: 10
+
+  document_extensions:
+    - .pdf
+    - .docx
+    - .txt
+    - .md
+    - .json
+    - .xls
+    - .xlsx
+    - .csv
+
+  audio_extensions:
+    - .mp3
+    - .wav
+    - .m4a
+    - .mp4
+    - .aac
+    - .flac
+    - .ogg
+    - .mov
+
+# --- PROCESS-REGLER ---
+processing_policy:
+  description: "Styr logiken för skapande och underhåll av grafer."
+  confidence_create: 0.5
+  confidence_edge: 0.8
+  confidence_link: 1.0
+  dreamer_thresholds:
+    delete: 0.95
+    split: 0.90
+    rename_normal: 0.95
+    rename_weak: 0.70
+    merge: 0.90
+
+# --- SLACK INTEGRATION (valfritt) ---
+# Lämna bot_token tomt för att inaktivera Slack Collector.
+slack:
+  bot_token: "__SLACK_BOT_TOKEN__"
+
+  # Kanal-ID:n att bevaka (högerklicka kanal → Visa detaljer → Kanal-ID)
+  channels: []
+  #  - "C0XXXXXXXX"  # #kanal-namn
+
+  history_days: 7
+
+# --- GOOGLE INTEGRATION (valfritt) ---
+# Lämna credentials_path/token_path tomma för att inaktivera Gmail/Calendar.
+# Se setup-instruktioner för att konfigurera Google OAuth.
+google:
+  credentials_path: "~/MyMemory/Settings/Credentials/client_secret.json"
+  token_path: "~/MyMemory/Settings/Credentials/token.json"
+
+  scopes:
+    - "https://www.googleapis.com/auth/gmail.readonly"
+    - "https://www.googleapis.com/auth/calendar.readonly"
+
+  gmail:
+    history_days: 7
+    target_label: "__GMAIL_LABEL__"
+
+  calendar:
+    history_days: 30
+
+# --- MEETING TRANSCRIBER ---
+meeting_transcriber:
+  icecast_url: "http://localhost:8000/meeting"
+  buffer_seconds: 30
+  buffer_dir: "~/MyMemory/MeetingBuffer"
+
+# --- RICH TRANSCRIBER ---
+transcriber:
+  chunk_size_bytes: 10000000
+  calendar_window_minutes: 10
+  part_preview_limit: 500
+  max_file_workers: 2
+  max_chunk_workers: 10
+
+# --- DESKTOP ---
+desktop:
+  host: "localhost"
+  port: 8765
+  llm_provider: "gemini"
+  max_tool_calls: 15
+  timeout_seconds: 30

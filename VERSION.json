@@ -1,7 +1,7 @@
 {
-  "version": "0.3.1",
-  "date": "2026-02-05",
-  "description": "# Release Notes Processhantering och collector-fixar. **Buggfixar:** - Fix: MCP-sökning hängde sig under ingestion pga saknade process-lås (shared_lock) - Fix: Gmail collector kraschade vid import (felaktigt variabelnamn _LOGGER) - Fix: Google credentials-sökvägar pekade fel i config (gmail/calendar fungerade inte) - Fix: Menubar-app dödar nu ALLA 12 tjänst-processer vid avslut (var bara 4) - Fix: Zombie-processer kunde ackumuleras vid app-omstart **Förbättringar:** - MCP-verktyg använder nu shared resource_lock med 10s timeout istället för att hänga - Singleton-skydd: startAllServices() stoppar befintliga processer innan ny start - Process group kill: använder os.killpg() för att döda hela processträd - Ny testsvit: tools/test_collectors.py validerar alla 5 collectors + daemon ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.3.1/MyMemory-Installer.dmg",
+  "version": "0.4.0",
+  "date": "2026-02-08",
+  "description": "# Release Notes Backend bundlad i appen, transcriber-fix och notiser. **Nytt:** - Backend-kod (services, config) bundlas nu i .app-filen vid bygge - Uppgradering sker via DMG-nedladdning direkt i appen - Config-filer (promptar, scheman) synkas automatiskt vid appstart - Venv-dependencies uppdateras automatiskt om requirements.txt ändrats **Buggfixar:** - Fix: ChromaDB hänger inte längre vid uppstart — embeddings_queue dräneras automatiskt - Fix: Transcriber hänger inte längre vid DuckDB-låskonflikt (try/finally garanterar graph.close()) - Fix: Notiser visas nu korrekt i menubar (UNUserNotificationCenterDelegate) - Fix: Vektor-sökning har nu timeout-skydd (30s) mot hängande queries - Fix: Orphan-processer kan inte längre uppstå — flock-baserad singleton + cleanup vid start **Arkitektur:** - Singleton via flock: start_services.py tar OS-level fillock som förhindrar dubbletter - MyMemDist innehåller nu bara VERSION.json och DMG (inte services/config/) - start_services.py prioriterar ~/MyMemory/Settings/ config - Release-skriptet kopierar DMG istället för att synka enskilda filer ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.4.0/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

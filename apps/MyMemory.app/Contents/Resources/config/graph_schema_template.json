@@ -1,0 +1,350 @@
+{
+"meta": {
+    "version": "2.3",
+    "description": "Strikt schema för MyMemory med stöd för Self-Healing Graph (Provisional/Verified) samt Declarative Healing.",
+    "strict_mode": true,
+    "changelog": {
+      "2.3": "Borttagen Business_relation nodtyp. HAS_BUSINESS_RELATION går nu direkt Organization → Organization med relation_type som edge property."
+    }
+  },
+  "processing_policy": {
+    "description": "Globala regler för hur osäker data hanteras.",
+    "min_confidence_threshold": 0.3,
+    "trusted_source_confidence_floor": 0.8,
+    "source_mappings": {
+      "slack": "Slack Log",
+      "mail": "Email Thread",
+      "calendar": "Calendar Event"
+    }
+  },
+  "base_properties": {
+    "description": "Egenskaper som alla noder automatiskt får (system-nivå).",
+    "properties": {
+      "id": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": false,
+        "description": "Primary Key (UUID för dok, Email för person, etc)"
+      },
+      "name": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": true,
+        "description": "Nodens primära namn/identifierare"
+      },
+      "type": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": true,
+        "description": "Nodtypen (Person, Organization, etc.)"
+      },
+      "source": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": true,
+        "default": "graph_node",
+        "description": "Markör för vektorsök att detta är en graf-nod"
+      },
+      "created_at": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": false
+      },
+      "last_synced_at": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": false
+      },
+      "last_seen_at": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": false,
+        "description": "Tidpunkt då noden senast observerades/bearbetades av systemet."
+      },
+      "last_retrieved_at": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": false,
+        "description": "Tidpunkt då noden senast användes i ett svar (Relevans)."
+      },
+      "retrieved_times": {
+        "type": "integer",
+        "required": true,
+        "default": 0,
+        "include_in_vector": false,
+        "description": "Antal gånger noden använts i ett svar (Popularitet)."
+      },
+      "last_refined_at": {
+        "type": "string",
+        "required": true,
+        "default": "never",
+        "include_in_vector": false,
+        "description": "Tidpunkt då Dreamer senast städade noden (Underhåll)."
+      },
+      "source_system": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": false
+      },
+      "status": {
+        "type": "enum",
+        "required": true,
+        "values": ["VERIFIED", "PROVISIONAL"],
+        "default": "PROVISIONAL",
+        "include_in_vector": false,
+        "description": "Anger om entiteten är bekräftad sanning eller en gissning."
+      },
+      "confidence": {
+        "type": "float",
+        "required": true,
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.5,
+        "include_in_vector": false,
+        "description": "Schema-Fit Score. 1.0 = Trusted/Verified, <0.3 = Brus."
+      },
+      "node_context": {
+        "type": "list",
+        "required": true,
+        "include_in_vector": false,
+        "item_schema": {
+          "text": {"type": "string", "required": true, "description": "Beskrivande mening om entitetens roll i dokumentet"},
+          "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"}
+        },
+        "description": "Beviskedja - lista med objekt {text: string, origin: string} som visar var noden omnämns. Används för Entity Resolution och Dreamer-förädling."
+      },
+      "aliases": {
+        "type": "list",
+        "required": false,
+        "include_in_vector": false,
+        "description": "Alternativa namn/identifierare för noden. Används vid Entity Resolution för fuzzy matching."
+      }
+    }
+  },
+  "nodes": {
+    "Person": {
+      "description": "En unik fysisk individ.",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2,
+        "required_properties": ["email"]
+      },
+      "primary_key_strategy": "NATURAL_KEY",
+      "lookup_key": "name",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "STRICT_LOOKUP",
+      "properties": {
+        "email": { 
+          "required": false, 
+          "type": "string", 
+          "regex": "^[\\w.]+@([\\w-]+\\.)+[\\w-]{2,4}$",
+          "description": "Unik identifierare (används som ID)"
+        },
+        "name": { "required": true, "type": "string" },
+        "person_type": { 
+          "required": false, 
+          "type": "enum", 
+          "values": ["Intern", "Extern"],
+          "description": "Intern om domän matchar ägarens organisation"
+        },
+        "phone": { "required": false, "type": "string" },
+        "linked_in": { "required": false, "type": "string" },
+        "slack_alias": { "required": false, "type": "string" }
+      }
+    },
+    "Organization": {
+      "description": "En juridisk person (Bolag, Myndighet) eller en formell, namngiven organisation (t.ex. 'Google', 'Skatteverket'). VIKTIGT: Ad-hoc team, informella grupper eller generella roller (t.ex. 'Kunden', 'Leverantören') är INTE organisationer.",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2
+      },
+      "primary_key_strategy": "NATURAL_KEY",
+      "lookup_key": "org_number",
+      "fallback_key": "name",
+      "allowed_sources": ["Mail", "Calendar"],
+      "creation_policy": "STRICT_LOOKUP",
+      "properties": {
+        "name": { "required": true, "type": "string" },
+        "org_type": { 
+          "required": false, 
+          "type": "enum", 
+          "values": ["Bolag", "Förening", "Nation", "Myndighet", "Kommun"] 
+        },
+        "org_number": { "required": false, "type": "string", "description": "Föredraget ID" },
+        "domain": { "required": false, "type": "string" },
+        "source_id": { "required": false, "type": "string" },
+        "urls": { "required": false, "type": "list" }
+      }
+    },
+    "Group": {
+      "description": "En namngiven, organisatorisk enhet inom en organisation (t.ex. 'HR-avdelningen', 'Ledningsgruppen', 'Team Alpha'). Måste ha en viss beständighet. Tillfälliga möteskonstellationer är inte en Grupp.",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2
+      },
+      "primary_key_strategy": "COMPOSITE_KEY",
+      "lookup_key": "name",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "STRICT_LOOKUP",
+      "properties": {
+        "name": { "required": true, "type": "string" },
+        "group_type": { 
+          "required": false, 
+          "type": "enum", 
+          "values": ["Team", "Affärsenhet", "Avdelning", "Enhet", "Arbetsgrupp", "Styrgrupp", "Ledningsgrupp"] 
+        },
+        "slack_channel": { "required": false, "type": "string" },
+        "source_id": { "required": false, "type": "string" }
+      }
+    },
+    "Project": {
+      "description": "Ett tidsbegränsat, namngivet initiativ med ett tydligt mål, budget eller beställare (t.ex. 'Projekt Y', 'Uppdrag X'). VIKTIGT: Detta är INTE tekniska funktioner, kod-moduler, dokumentrubriker eller generella arbetsprocesser. Om det är en funktion i ett system, ignorera det.",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2
+      },
+      "primary_key_strategy": "NATURAL_KEY",
+      "lookup_key": "source_id",
+      "fallback_key": "name",
+      "allowed_sources": ["Harvest", "Jira", "Manual", "System"],
+      "creation_policy": "STRICT_LOOKUP",
+      "properties": {
+        "name": { "required": true, "type": "string" },
+        "source_id": { "required": false, "type": "string", "description": "Harvest ID, Jira Key" },
+        "project_status": { "required": false, "type": "enum", "values": ["Aktiv", "Arkiverad", "Planerad"] },
+        "project_type": { "required": false, "type": "enum", "values": ["Intern", "Extern"] },
+        "start_date": { "required": false, "type": "date" },
+        "end_date": { "required": false, "type": "date" },
+        "budget_value": { "required": false, "type": "string" },
+        "budget_hours": { "required": false, "type": "number" }
+      }
+    },
+    "Event": {
+      "description": "En specifik, tidsbestämd händelse (Möte, Workshop, Konferens) som har ägt rum. Måste ha en tidpunkt eller deltagare. Generella omnämnanden av 'möten' utan detaljer ska ignoreras.",
+      "healing_policy": {
+        "max_days_as_provisional": 30,
+        "min_connections_to_survive": 1
+      },
+      "primary_key_strategy": "SOURCE_ID",
+      "lookup_key": "source_id",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "ALWAYS_CREATE",
+      "properties": {
+        "name": { "required": true, "type": "string", "default": "No Title" },
+        "source_id": { "required": false, "type": "string", "description": "Google Event ID" },
+        "start_time": { "required": false, "type": "timestamp" },
+        "end_time": { "required": false, "type": "timestamp" },
+        "internal": { "required": false, "type": "boolean" },
+        "event_type": { "required": false, "type": "string" },
+        "location": { "required": false, "type": "string" }
+      }
+    },
+    "Roles": {
+      "description": "En funktionell yrkesroll eller titel (t.ex. 'Projektledare', 'Utvecklare'). Beskriver vad någon gör, inte vem de är.",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2
+      },
+      "primary_key_strategy": "NATURAL_KEY",
+      "lookup_key": "name",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "STRICT_LOOKUP",
+      "properties": {
+        "name": { "required": true, "type": "string" },
+        "category": { "required": false, "type": "enum", "values": ["Funktionell", "Formell"] },
+        "skill_level": { "required": false, "type": "string" }
+      }
+    },
+    "Document": {
+      "description": "Ett ostrukturerat objekt som bär information.",
+      "healing_policy": {
+        "max_days_as_provisional": 365,
+        "min_connections_to_survive": 0
+      },
+      "primary_key_strategy": "UUID",
+      "lookup_key": "uuid",
+      "allowed_sources": ["FileRetriever", "DocConverter", "Transcriber"],
+      "creation_policy": "ALWAYS_CREATE",
+      "properties": {
+        "uuid": { "required": true, "type": "uuid", "description": "Filens UUID från Assets" },
+        "title": { "required": true, "type": "string" },
+        "doc_format": {
+          "required": false,
+          "type": "enum",
+          "values": [".pdf", ".docx", ".txt", ".md", ".json", ".xls", ".xlsx", ".csv"]
+        },
+        "doc_type": {
+          "required": false,
+          "type": "enum",
+          "values": ["Avtal", "Beslut", "Specifikation", "Leveransdokument", "Offert", "Uppdragsbeskrivning", "Protokoll", "Faktura", "Rapport"]
+        },
+        "created_at": { "required": false, "type": "timestamp" },
+        "version": { "required": false, "type": "string" },
+        "timestamp": { "required": false, "type": "timestamp", "description": "Alias för created_at (legacy)" },
+        "source_type": {
+          "required": false,
+          "type": "enum",
+          "values": ["Document", "Slack Log", "Email Thread", "Calendar Event", "Transcript"],
+          "description": "Typ av källa"
+        },
+        "context_summary": { "required": false, "type": "string", "description": "AI-genererad kontextsammanfattning" },
+        "relations_summary": { "required": false, "type": "string", "description": "AI-genererad relationssammanfattning" },
+        "summary": { "required": false, "type": "string", "description": "DEPRECATED - använd context_summary" }
+      }
+    }
+  },
+  "edges": {
+    "MENTIONS": {
+      "source_type": ["Document"],
+      "target_type": ["Person", "Organization", "Group", "Project", "Event"],
+      "description": "Dokumentet nämner en entitet.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0 },
+        "snippet": { "required": false, "type": "string" }
+      }
+    },
+    "ATTENDED": {
+      "source_type": ["Person"],
+      "target_type": ["Event"],
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "duration_minutes": { "required": false, "type": "integer" }
+      }
+    },
+    "BELONGS_TO": {
+      "source_type": ["Person", "Group"],
+      "target_type": ["Organization", "Group"],
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "start_date": { "required": false, "type": "date" },
+        "end_date": { "required": false, "type": "date" },
+        "job_title": { "required": false, "type": "string" },
+        "job_function": { "required": false, "type": "string" }
+      }
+    },
+    "HAS_BUSINESS_RELATION": {
+      "source_type": ["Organization"],
+      "target_type": ["Organization"],
+      "description": "Affärsrelation mellan två organisationer. Source är den som HAR rollen (t.ex. Digitalist är Leverantör), target är motparten.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "relation_type": { "required": true, "type": "enum", "values": ["Kund", "Leverantör", "Partner", "Prospekt", "Lead"] },
+        "relation_status": { "required": false, "type": "enum", "values": ["Aktiv", "Inaktiv"] },
+        "contract_id": { "required": false, "type": "string" }
+      }
+    },
+    "HAS_ROLE": {
+      "source_type": ["Person"],
+      "target_type": ["Roles"],
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "context": { "required": false, "type": "string" }
+      }
+    }
+  }
+}

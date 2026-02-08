@@ -1,0 +1,44 @@
+# Kravfil för DFM-projektet (Digitalist Företagsminne)
+# Versioner pinnade 2026-02-08 — uppgradera en i taget och verifiera.
+
+# Filbevakning
+watchdog==6.0.0
+
+# Config & Metadata
+pyyaml
+
+# Text-extrahering (Dokument)
+pymupdf==1.26.7
+python-docx==1.2.0
+
+# Dataanalys & Tabellhantering
+pandas==2.3.3
+openpyxl==3.1.5
+tabulate==0.9.0
+
+# Validering & Schema
+pydantic>=2.0,<3.0
+
+# AI & API
+google-genai==1.52.0
+anthropic==0.76.0
+
+# Google OAuth (Gmail & Calendar)
+google-api-python-client==2.187.0
+google-auth-oauthlib==1.2.3
+google-auth-httplib2==0.2.1
+
+# --- DATABASER ---
+duckdb==1.4.3
+chromadb==1.3.5
+sentence-transformers==4.1.0
+
+# Slack-agent
+slack_sdk==3.39.0
+
+# Terminalformatering
+rich==14.2.0
+
+# MCP
+fastmcp==2.14.1
+uvicorn==0.38.0
