@@ -312,7 +312,7 @@ def drain_embeddings_queue():
             conn.commit()
             print(f"🔧 ChromaDB: Rensade {count} fastnade poster ur embeddings_queue")
         conn.close()
-    except Exception as e:
+    except sqlite3.Error as e:
         LOGGER.error(f"Failed to drain embeddings_queue (non-critical): {e}")
 
 
