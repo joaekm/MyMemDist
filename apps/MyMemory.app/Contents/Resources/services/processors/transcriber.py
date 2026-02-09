@@ -797,7 +797,7 @@ def step5_enrich_context(
                 vector_results.append({
                     'query': query,
                     'distance': doc.get('distance'),
-                    'metadata': doc.get('metadata', {})
+                    'metadata': doc.get('metadata') or {}
                 })
         LOGGER.info(f"Steg 5: Vektor-sökning klar, {len(vector_results)} träffar")
     except Exception as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional

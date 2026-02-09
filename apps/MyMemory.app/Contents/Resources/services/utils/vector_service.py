@@ -138,8 +138,8 @@ class VectorService:
             formatted.append({
                 "id": ids[i],
                 "distance": distances[i],
-                "metadata": metadatas[i],
-                "document": documents[i]
+                "metadata": metadatas[i] or {},
+                "document": documents[i] or ""
             })
         return formatted
 

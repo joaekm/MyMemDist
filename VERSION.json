@@ -1,7 +1,7 @@
 {
-  "version": "0.4.1",
-  "date": "2026-02-08",
-  "description": "# Release Notes - Fix: Notis-filnamn visar nu rent namn utan UUID-suffix - Fix: Services-kod synkas från app-bundle till Runtime vid uppgradering (MCP-server och andra tjänster uppdateras automatiskt) - Fix: Dependency-check vid appstart (requirements.txt) ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.4.1/MyMemory-Installer.dmg",
+  "version": "0.4.2",
+  "date": "2026-02-09",
+  "description": "# Release Notes - Fix: VectorService returnerade None-metadata/document — kraschade transcriber och MCP-sökning - Fix: Tydligare format-instruktioner för transkriberings-prompten (renare output från Gemini) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.4.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

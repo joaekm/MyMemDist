@@ -14,6 +14,18 @@ transcriber:
     4. Gör INGA sammanfattningar.
     5. Utelämna talljud som "mm", "uh", "eh", "öh" och liknande.
 
+    FORMAT (följ exakt):
+    - En rad per replik, talarbytet markerar ny rad.
+    - Inga blankrader mellan repliker.
+    - Inga tidsstämplar.
+    - Ingen markdown-formatering (ingen bold, ingen kursiv, inga rubriker).
+    - Formatet ska vara: "Talare N: text"
+
+    EXEMPEL:
+    Talare 1: Ja, det stämmer.
+    Talare 2: Okej, men hur tänker du kring det här med leveransen?
+    Talare 1: Vi siktar på att vara klara i mars.
+
   # STEG 4: Berikningsfrågor (transkribering → söktermer)
   enrichment_queries: |
     Analysera denna transkribering och extrahera sökbara termer.
