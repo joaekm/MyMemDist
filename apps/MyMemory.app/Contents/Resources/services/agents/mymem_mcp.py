@@ -301,6 +301,16 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
     använd sedan get_entity_summary eller get_neighbor_network för detaljer.
     """
     try:
+        # Validera node_type mot schemat om angivet
+        if node_type:
+            schema_path = os.path.expanduser(CONFIG.get('paths', {}).get('graph_schema', ''))
+            if schema_path and os.path.exists(schema_path):
+                with open(schema_path, 'r') as sf:
+                    schema = json.load(sf)
+                valid_types = [nt['type'] for nt in schema.get('node_types', [])]
+                if node_type not in valid_types:
+                    return f"Ogiltig node_type: '{node_type}'. Giltiga: {', '.join(sorted(valid_types))}"
+
         with resource_lock("graph", exclusive=False, timeout=10.0):
             graph = GraphService(_get_graph_path(), read_only=True)
             limit = GRAPH_SEARCH_LIMIT
@@ -987,6 +997,13 @@ def read_document_content(doc_id: str, max_length: int = 8000, section: str = "s
 
         if not filepath:
             return f"DOKUMENT EJ HITTAT: Kunde inte hitta fil för ID '{doc_id}' i Lake."
+
+        # Säkerhetskontroll: verifiera att filepath ligger inom Lake-mappen
+        lake_real = os.path.realpath(_get_lake_path())
+        file_real = os.path.realpath(filepath)
+        if not file_real.startswith(lake_real + os.sep):
+            LOGGER.warning(f"Path traversal blockerad: {file_real} utanför {lake_real}")
+            return "FEL: Filen ligger utanför Lake-mappen."
 
         # Läs filen
         try:

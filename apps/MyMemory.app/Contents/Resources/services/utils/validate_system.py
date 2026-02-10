@@ -6,6 +6,7 @@ import datetime
 import logging
 import duckdb
 import json
+import subprocess
 
 from services.utils.vector_service import get_vector_service
 from services.utils.config_loader import get_config
@@ -316,6 +317,28 @@ def drain_embeddings_queue():
         LOGGER.error(f"Failed to drain embeddings_queue (non-critical): {e}")
 
 
+def check_filevault_status():
+    """
+    Kontrollerar om FileVault (diskkryptering) är aktiverat.
+    Loggar varning om det inte är aktivt (ISO 27001 A.10).
+    """
+    try:
+        result = subprocess.run(
+            ["/usr/bin/fdesetup", "status"],
+            capture_output=True, text=True, timeout=5
+        )
+        is_enabled = "FileVault is On" in result.stdout
+        if is_enabled:
+            print("FileVault: aktiverat")
+        else:
+            LOGGER.warning("FileVault is NOT enabled — local data is stored unencrypted")
+            print("FileVault: EJ aktiverat — lokal data lagras okrypterad")
+        return is_enabled
+    except (OSError, subprocess.SubprocessError) as e:
+        LOGGER.warning(f"Could not determine FileVault status: {e}")
+        return None
+
+
 def run_startup_checks():
     """
     Kör alla valideringar och returnerar health_info för auto_repair.
@@ -323,6 +346,9 @@ def run_startup_checks():
     """
     # Säkerställ att runtime-mappar finns
     ensure_runtime_directories()
+
+    # Kontrollera FileVault (diskkryptering)
+    check_filevault_status()
 
     # Rensa ChromaDB-kö FÖRE all VectorService-användning (förhindrar hängning)
     drain_embeddings_queue()
