@@ -1,7 +1,7 @@
 {
-  "version": "0.5.1",
+  "version": "0.5.2",
   "date": "2026-02-10",
-  "description": "# Release Notes - Fix: App kraschade vid start (SIGABRT) — Process/waitUntilExit blockerade main thread under SwiftUI-grafens uppbyggnad - Fix: Statuscheck körs nu på bakgrundstråd (DispatchQueue.global) istället för main thread - Fix: Initial statuscheck fördröjd 0.5s för att undvika re-entrant state-mutation ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.5.1/MyMemory-Installer.dmg",
+  "description": "# Release Notes - Fix: App kraschade vid start (SIGABRT) — statuscheck blockerade main thread under SwiftUI-uppstart - Fix: Statuscheck körs nu på bakgrundstråd istället för main thread - Fix: DMG-installer fungerar utan \"skadat\"-varning (re-signering utan hardened runtime) - Nytt: Systemlogg-flik i Inställningar med realtidsvisning och färgkodning - Nytt: Log Level-väljare (segmented) med auto-sparning - Nytt: \"Öppna i Terminal\"-knapp för loggfilen - Nytt: TokenField med visa/dölj-toggle och multiline för långa API-nycklar - Nytt: Samlad Collectors-rad — individuella collectors visas bara vid fel - Nytt: Røde Wireless som Toggle-switch (av som default) - Nytt: Inställningar öppnas via SettingsLink (fungerar med accessory-appar) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.5.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
