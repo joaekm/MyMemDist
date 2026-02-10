@@ -347,6 +347,25 @@ class GraphService:
 
             return result is not None
 
+    def update_node_properties(self, node_id: str, properties: dict):
+        """
+        Direkt överskrivning av properties (inte merge som upsert_node).
+        Används vid cleanup, t.ex. borttag av enskilda node_context-entries.
+
+        Args:
+            node_id: ID på noden att uppdatera
+            properties: Nya properties (ersätter befintliga helt)
+        """
+        if self.read_only:
+            raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
+
+        properties_json = json.dumps(properties, ensure_ascii=False)
+        with self._lock:
+            self.conn.execute(
+                "UPDATE nodes SET properties = ? WHERE id = ?",
+                [properties_json, node_id]
+            )
+
     def find_node_by_name(self, node_type: str, name: str, fuzzy: bool = True) -> str | None:
         """
         Sök efter en nod baserat på namn (exakt eller fuzzy).

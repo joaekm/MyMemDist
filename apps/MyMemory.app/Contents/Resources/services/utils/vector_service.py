@@ -146,6 +146,14 @@ class VectorService:
     def delete(self, id: str):
         self.collection.delete(ids=[id])
 
+    def delete_by_parent(self, parent_id: str) -> int:
+        """Delete all chunks with given parent_id (for transcript parts)."""
+        results = self.collection.get(where={"parent_id": parent_id})
+        if results and results['ids']:
+            self.collection.delete(ids=results['ids'])
+            return len(results['ids'])
+        return 0
+
     def count(self) -> int:
         return self.collection.count()
 
