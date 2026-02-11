@@ -1,7 +1,7 @@
 {
-  "version": "0.5.4",
+  "version": "0.6.0",
   "date": "2026-02-11",
-  "description": "# Release Notes ChromaDB-stabilitet och skydd mot extern databasåtkomst. **Buggfixar:** - Borttagen `drain_embeddings_queue()` ur startup-validering — extern sqlite3 DELETE mot ChromaDB:s kö orsakade dataförlust i HNSW-index - Borttagen extern sqlite3-verifiering (steg 5) ur rebuild_vector.py — öppna sqlite3-anslutningar medan ChromaDB:s Rust-backend är aktiv korrumperar FTS5 - Fixad count-verifiering i rebuild_vector.py — transkript dubbelräknades (doc + chunks) - Fixad krasch i document_manager vid deletion (saknad default för asset_rejected-sökväg) **Robusthet:** - PoC-tester bekräftar: ChromaDB 1.3.5 hanterar kill, batch-volym och multi-process korrekt — enda kända korruptionsväg är extern sqlite3 mot aktiv Rust-backend - Ny regel: ingen kod ska öppna sqlite3-anslutningar mot ChromaDB:s databas ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.5.4/MyMemory-Installer.dmg",
+  "description": "# Release Notes Fix: Dokumenthantering i menubar fungerar nu. **Buggfix:** - DocumentManagementView.swift saknades i Xcode-projektfilen — filen kompilerades aldrig, vilket gjorde att System-sektionen och \"Hantera dokument...\" inte syntes i menubar-appen ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.6.0/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
