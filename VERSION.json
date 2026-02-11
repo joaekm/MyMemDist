@@ -1,7 +1,7 @@
 {
-  "version": "0.5.3",
-  "date": "2026-02-10",
-  "description": "# Release Notes Dokumenthantering, vector rebuild-verktyg och samlad regressionssvit. **Nytt:** - Hantera dokument via menubar — lista och ta bort dokument ur alla tre lager (Lake, Vector, Graf) - Ny System-sektion i menubar med \"Leta efter uppdateringar\" och \"Hantera dokument...\" - Verktyg för att återskapa VectorDB från Lake + Graf utan LLM-kostnad (rebuild_vector.py) - Samlad regressionssvit (run_tests.py) med tre nivåer: quick, standard, full - E2E-test för full dokumentlivscykel: ingestion, validering, deletion **Buggfixar:** - Settings-fönster hamnar inte längre bakom andra fönster - VectorDB-korruption hittad och åtgärdad (FTS5-index + fastnad write-kö) ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.5.3/MyMemory-Installer.dmg",
+  "version": "0.5.4",
+  "date": "2026-02-11",
+  "description": "# Release Notes ChromaDB-stabilitet och skydd mot extern databasåtkomst. **Buggfixar:** - Borttagen `drain_embeddings_queue()` ur startup-validering — extern sqlite3 DELETE mot ChromaDB:s kö orsakade dataförlust i HNSW-index - Borttagen extern sqlite3-verifiering (steg 5) ur rebuild_vector.py — öppna sqlite3-anslutningar medan ChromaDB:s Rust-backend är aktiv korrumperar FTS5 - Fixad count-verifiering i rebuild_vector.py — transkript dubbelräknades (doc + chunks) - Fixad krasch i document_manager vid deletion (saknad default för asset_rejected-sökväg) **Robusthet:** - PoC-tester bekräftar: ChromaDB 1.3.5 hanterar kill, batch-volym och multi-process korrekt — enda kända korruptionsväg är extern sqlite3 mot aktiv Rust-backend - Ny regel: ingen kod ska öppna sqlite3-anslutningar mot ChromaDB:s databas ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.5.4/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

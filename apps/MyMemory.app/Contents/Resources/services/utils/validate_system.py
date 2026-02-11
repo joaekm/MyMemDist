@@ -287,35 +287,6 @@ def rensa_gammal_logg():
         LOGGER.error(f"Fel vid loggrensning: {e}")
         print(f"❌ Fel vid loggrensning: {e}")
 
-def drain_embeddings_queue():
-    """Rensa ChromaDB:s embeddings_queue om den har fastnade poster.
-
-    ChromaDB 1.x köar embeddings i SQLite innan flush till HNSW-index.
-    Om processen avbryts (kill -9, krasch) kan poster fastna i kön.
-    Detta blockerar ALLA efterföljande operationer (get, query, etc.)
-    eftersom ChromaDB försöker flusha kön vid varje anrop.
-
-    Säker att köra: poster i kön har redan sparats i collections-tabellen.
-    Nästa ingestion återskapar HNSW-indexposterna.
-    """
-    import sqlite3
-
-    db_file = os.path.join(CHROMA_PATH, 'chroma.sqlite3')
-    if not os.path.exists(db_file):
-        return
-
-    try:
-        conn = sqlite3.connect(db_file)
-        count = conn.execute("SELECT count(*) FROM embeddings_queue").fetchone()[0]
-        if count > 0:
-            LOGGER.warning(f"ChromaDB embeddings_queue has {count} stale entries — draining to prevent hang")
-            conn.execute("DELETE FROM embeddings_queue")
-            conn.commit()
-            print(f"🔧 ChromaDB: Rensade {count} fastnade poster ur embeddings_queue")
-        conn.close()
-    except sqlite3.Error as e:
-        LOGGER.error(f"Failed to drain embeddings_queue (non-critical): {e}")
-
 
 def check_filevault_status():
     """
@@ -349,9 +320,6 @@ def run_startup_checks():
 
     # Kontrollera FileVault (diskkryptering)
     check_filevault_status()
-
-    # Rensa ChromaDB-kö FÖRE all VectorService-användning (förhindrar hängning)
-    drain_embeddings_queue()
 
     print("=== MyMem System Validator ===")
 

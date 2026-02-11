@@ -51,7 +51,7 @@ class VectorService:
         # Init Chroma
         os.makedirs(self.db_path, exist_ok=True)
         self.client = chromadb.PersistentClient(path=self.db_path)
-        
+
         # MODEL SELECTION - Läser från ai_engine.models.embedding_model
         model_name = self.config.get('ai_engine', {}).get('models', {}).get(
             'embedding_model',
