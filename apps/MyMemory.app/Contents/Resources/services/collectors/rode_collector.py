@@ -4,14 +4,14 @@ Røde Wireless Pro Collector
 
 Detekterar inkopplade Røde Wireless Pro-mikrofoner (USB mass storage),
 kopierar WAV-filer, konverterar till m4a 128kbps mono, och döper om
-enligt namnstandarden: Inspelning_YYYYMMDD_HHMM_UUID.m4a
+enligt namnstandarden: Inspelning_Rode_YYYYMMDD_HHMM_UUID.m4a
 
 Flöde:
 1. Pollar /Volumes/ efter "WirelessPRO*"-volymer
 2. Skannar varje volym efter .WAV-filer
 3. Hoppar över redan importerade filer (spårfil per enhet)
-4. Konverterar WAV → m4a (128kbps, mono) via ffmpeg
-5. Placerar i Assets/Recordings/ med korrekt namnschema
+4. Konverterar WAV → m4a (128kbps, mono) via ffmpeg till tmp/-mapp
+5. Atomic rename till Assets/Recordings/ (undviker race med transcriber watchdog)
 6. Loggar till system.log med prefix RODE
 """
 
@@ -33,6 +33,7 @@ from services.utils.audio_service import _get_ffmpeg
 
 CONFIG = get_config()
 RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
+TMP_FOLDER = os.path.join(RECORDINGS_FOLDER, "tmp")
 LOG_FILE = os.path.expanduser(CONFIG['logging'].get('system_log', '~/MyMemory/Logs/system.log'))
 
 # Røde-specifik config
@@ -135,9 +136,9 @@ def get_recording_datetime(filepath):
 
 
 def generate_target_name(recording_dt, file_uuid):
-    """Generera filnamn enligt namnstandarden: Inspelning_YYYYMMDD_HHMM_UUID.m4a"""
+    """Generera filnamn enligt namnstandarden: Inspelning_Rode_YYYYMMDD_HHMM_UUID.m4a"""
     date_str = recording_dt.strftime("%Y%m%d_%H%M")
-    return f"Inspelning_{date_str}_{file_uuid}.m4a"
+    return f"Inspelning_Rode_{date_str}_{file_uuid}.m4a"
 
 
 def convert_wav_to_m4a(src_path, dest_path):
@@ -166,7 +167,11 @@ def convert_wav_to_m4a(src_path, dest_path):
 
 
 def process_volume(volume_path):
-    """Processa alla nya WAV-filer på en Røde-volym."""
+    """Processa alla nya WAV-filer på en Røde-volym.
+
+    Konverterar till tmp/-mapp och gör atomic rename till Recordings/
+    för att undvika race condition med transcriber watchdog.
+    """
     vol_name = os.path.basename(volume_path)
     state = load_state(volume_path)
     imported = state.get("imported_files", {})
@@ -189,22 +194,31 @@ def process_volume(volume_path):
         terminal_status("rode", f"{filename} ({vol_name})", "processing")
         LOGGER.info(f"Ny fil: {filename} på {vol_name}")
 
+        tmp_path = None
         try:
             # Extrahera tidstämpel och generera namn
             recording_dt = get_recording_datetime(wav_path)
             file_uuid = str(uuid.uuid4())
             target_name = generate_target_name(recording_dt, file_uuid)
+            tmp_path = os.path.join(TMP_FOLDER, target_name)
             dest_path = os.path.join(RECORDINGS_FOLDER, target_name)
 
-            # Konvertera
-            LOGGER.info(f"Konverterar: {filename} -> {target_name}")
-            convert_wav_to_m4a(wav_path, dest_path)
+            # Konvertera till tmp/
+            LOGGER.info(f"Konverterar: {filename} -> tmp/{target_name}")
+            convert_wav_to_m4a(wav_path, tmp_path)
 
-            # Verifiera att filen skapades
-            if not os.path.exists(dest_path):
-                raise RuntimeError(f"Utfil saknas efter konvertering: {dest_path}")
+            # Verifiera att tmp-filen skapades och har innehåll
+            if not os.path.exists(tmp_path):
+                raise RuntimeError(f"Utfil saknas efter konvertering: {tmp_path}")
 
-            dest_size = os.path.getsize(dest_path)
+            dest_size = os.path.getsize(tmp_path)
+            if dest_size == 0:
+                raise RuntimeError(f"Utfil tom efter konvertering: {tmp_path}")
+
+            # Atomic rename till Recordings/ — triggar watchdog med färdig fil
+            os.rename(tmp_path, dest_path)
+            tmp_path = None  # Rensat, ingen cleanup behövs
+
             src_size = os.path.getsize(wav_path)
 
             # Spara i state
@@ -235,6 +249,13 @@ def process_volume(volume_path):
         except OSError as e:
             LOGGER.error(f"Filfel: {filename}: {e}")
             terminal_status("rode", filename, "failed", str(e))
+        finally:
+            # Rensa tmp-fil om den finns kvar efter fel
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError as cleanup_err:  # noqa: FALLBACK_DOCUMENTED - tmp-cleanup failure accepteras
+                    LOGGER.warning(f"Kunde inte rensa tmp-fil {tmp_path}: {cleanup_err}")
 
     return new_count
 
@@ -280,5 +301,6 @@ def poll_loop():
 
 if __name__ == "__main__":
     os.makedirs(RECORDINGS_FOLDER, exist_ok=True)
+    os.makedirs(TMP_FOLDER, exist_ok=True)
     os.makedirs(STATE_DIR, exist_ok=True)
     poll_loop()

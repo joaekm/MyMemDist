@@ -1151,15 +1151,25 @@ def process_audio(filväg: str, filnamn: str):
 # =============================================================================
 
 class AudioHandler(FileSystemEventHandler):
-    def on_created(self, event):
-        if event.is_directory:
-            return
-        fname = os.path.basename(event.src_path)
+    def _handle_new_file(self, filepath):
+        """Hantera ny ljudfil (från on_created eller on_moved)."""
+        fname = os.path.basename(filepath)
         ext = os.path.splitext(fname)[1].lower()
         if ext in MEDIA_EXTENSIONS:
             base = os.path.splitext(fname)[0]
             if UUID_PATTERN.search(base):
-                FILE_EXECUTOR.submit(process_audio_with_progress, event.src_path, fname)
+                FILE_EXECUTOR.submit(process_audio_with_progress, filepath, fname)
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        self._handle_new_file(event.src_path)
+
+    def on_moved(self, event):
+        """Hanterar atomic rename (t.ex. från rode_collector tmp/ → Recordings/)."""
+        if event.is_directory:
+            return
+        self._handle_new_file(event.dest_path)
 
 
 def process_audio_with_progress(filväg: str, filnamn: str):

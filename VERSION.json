@@ -1,7 +1,7 @@
 {
-  "version": "0.6.0",
-  "date": "2026-02-11",
-  "description": "# Release Notes Fix: Dokumenthantering i menubar fungerar nu. **Buggfix:** - DocumentManagementView.swift saknades i Xcode-projektfilen — filen kompilerades aldrig, vilket gjorde att System-sektionen och \"Hantera dokument...\" inte syntes i menubar-appen ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.6.0/MyMemory-Installer.dmg",
+  "version": "0.6.1",
+  "date": "2026-02-12",
+  "description": "# Release Notes Fix: Røde-inspelningar som inte transkriberades (race condition). **Buggfix:** - Røde Collector konverterar nu till tmp/-mapp och gör atomic rename till Recordings/ — transcribern kunde tidigare stjäla filen under pågående konvertering och flytta den till failed/ - Transcriber watchdog hanterar nu on_moved-events (krävs för atomic rename) - Rensade 60 duplicerade rode-filer (1.6GB) ur failed/-mappen **Förbättringar:** - Nytt filnamnsprefix: Inspelning_Rode_ (spårbarhet mot vanliga inspelningar) - Utökade rode-tester: prefix, tmp-mapp, atomic rename, watchdog-kompatibilitet ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.6.1/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
