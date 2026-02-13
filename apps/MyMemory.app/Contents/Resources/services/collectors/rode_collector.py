@@ -29,7 +29,7 @@ import yaml
 
 # --- CONFIG ---
 from services.utils.config_loader import get_config
-from services.utils.audio_service import _get_ffmpeg
+from services.utils.audio_service import _get_ffmpeg, _get_ffprobe
 
 CONFIG = get_config()
 RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
@@ -118,8 +118,34 @@ def file_signature(filepath):
     return f"{os.path.basename(filepath)}|{stat.st_size}|{int(stat.st_mtime)}"
 
 
+def _get_wav_duration_seconds(filepath):
+    """Hämta WAV-filens duration i sekunder via ffprobe."""
+    ffprobe_path = _get_ffprobe()
+
+    cmd = [
+        ffprobe_path,
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        filepath
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError) as e:
+        LOGGER.warning(f"Kunde inte hämta duration för {filepath}: {e}")
+
+    return None
+
+
 def get_recording_datetime(filepath):
-    """Extrahera inspelningstid från filens mtime."""
+    """Extrahera inspelningens STARTTID från mtime minus duration.
+
+    Rode-enheten sätter mtime vid inspelningsslut. Vi subtraherar
+    filens duration för att få starttiden.
+    """
     try:
         import zoneinfo
         tz = zoneinfo.ZoneInfo(SYSTEM_TZ)
@@ -128,11 +154,18 @@ def get_recording_datetime(filepath):
 
     mtime = os.path.getmtime(filepath)
     if tz:
-        dt = datetime.datetime.fromtimestamp(mtime, tz=tz)
+        end_dt = datetime.datetime.fromtimestamp(mtime, tz=tz)
     else:
-        dt = datetime.datetime.fromtimestamp(mtime)
+        end_dt = datetime.datetime.fromtimestamp(mtime)
 
-    return dt
+    duration = _get_wav_duration_seconds(filepath)
+    if duration:
+        start_dt = end_dt - datetime.timedelta(seconds=duration)
+        LOGGER.debug(f"Recording start: {start_dt} (end: {end_dt}, duration: {duration:.0f}s)")
+        return start_dt
+
+    LOGGER.warning(f"Använder mtime som fallback (duration ej tillgänglig): {filepath}")
+    return end_dt
 
 
 def generate_target_name(recording_dt, file_uuid):

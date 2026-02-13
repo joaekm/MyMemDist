@@ -1,7 +1,7 @@
 {
-  "version": "0.6.1",
-  "date": "2026-02-12",
-  "description": "# Release Notes Fix: Røde-inspelningar som inte transkriberades (race condition). **Buggfix:** - Røde Collector konverterar nu till tmp/-mapp och gör atomic rename till Recordings/ — transcribern kunde tidigare stjäla filen under pågående konvertering och flytta den till failed/ - Transcriber watchdog hanterar nu on_moved-events (krävs för atomic rename) - Rensade 60 duplicerade rode-filer (1.6GB) ur failed/-mappen **Förbättringar:** - Nytt filnamnsprefix: Inspelning_Rode_ (spårbarhet mot vanliga inspelningar) - Utökade rode-tester: prefix, tmp-mapp, atomic rename, watchdog-kompatibilitet ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.6.1/MyMemory-Installer.dmg",
+  "version": "0.6.2",
+  "date": "2026-02-13",
+  "description": "# Release Notes Fixat timestamp-extraktion — 38% av alla dokument saknade content timestamp. **Buggfixar:** - Transkript får nu korrekt timestamp (Rich Transcriber **Tid:**-format matchas) - Dokument med datum i filnamnet får timestamp via filnamnsparsning - Rode-inspelningar beräknar starttid istället för sluttid (mtime - duration) - 141 befintliga Lake-filer retrofixade med nytt verktyg (fix_lake_timestamps.py) **Förbättringar:** - Release-processen verifierar att repot är rent och pushat innan start - Release-skriptet committar och pushar MyMemory-repot automatiskt efter release - ChromaDB-stabilitet: extern sqlite3-åtkomst borttagen (förhindrar FTS5-korruption) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.6.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

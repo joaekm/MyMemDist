@@ -137,6 +137,9 @@ UUID_SUFFIX_PATTERN = re.compile(
 STANDARD_TIMESTAMP_PATTERN = re.compile(r'^DATUM_TID:\s+(.+)$', re.MULTILINE)
 TRANSCRIBER_DATE_PATTERN = re.compile(r'^DATUM:\s+(\d{4}-\d{2}-\d{2})$', re.MULTILINE)
 TRANSCRIBER_START_PATTERN = re.compile(r'^START:\s+(\d{2}:\d{2})$', re.MULTILINE)
+RICH_TRANSCRIBER_PATTERN = re.compile(
+    r'^\*\*Tid:\*\*\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', re.MULTILINE
+)
 
 PROCESSED_FILES = set()
 PROCESS_LOCK = threading.Lock()
@@ -230,14 +233,16 @@ VALIDATOR_PARAMS = StdioServerParameters(
 )
 
 
-def extract_content_date(text: str) -> str:
+def extract_content_date(text: str, filename: str = None) -> str:
     """
     Extract timestamp_content - when the content actually happened.
 
-    Strict extraction without fallbacks:
+    Extraction priority:
     1. DATUM_TID header (from collectors: Slack, Calendar, Gmail) -> ISO string
-    2. Transcriber format DATUM + START -> combined to ISO string
-    3. Otherwise -> "UNKNOWN"
+    2. Rich Transcriber format **Tid:** YYYY-MM-DD HH:MM:SS -> ISO string
+    3. Legacy Transcriber format DATUM + START -> combined to ISO string
+    4. Filename date pattern (YYYY-MM-DD, YYYYMMDD_HHMM, etc.) -> ISO string
+    5. Otherwise -> "UNKNOWN"
 
     Returns:
         ISO format string or "UNKNOWN"
@@ -255,7 +260,18 @@ def extract_content_date(text: str) -> str:
         except ValueError:
             LOGGER.warning(f"extract_content_date: Invalid DATUM_TID '{ts_str}'")
 
-    # 2. Try Transcriber format (DATUM + START)
+    # 2. Try Rich Transcriber format (**Tid:** YYYY-MM-DD HH:MM:SS)
+    rich_match = RICH_TRANSCRIBER_PATTERN.search(header_section)
+    if rich_match:
+        ts_str = rich_match.group(1).strip()
+        try:
+            dt = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+            LOGGER.debug(f"extract_content_date: Rich Transcriber -> {dt.isoformat()}")
+            return dt.isoformat()
+        except ValueError:
+            LOGGER.warning(f"extract_content_date: Invalid Rich Transcriber format '{ts_str}'")
+
+    # 3. Try legacy Transcriber format (DATUM + START)
     date_match = TRANSCRIBER_DATE_PATTERN.search(header_section)
     start_match = TRANSCRIBER_START_PATTERN.search(header_section)
 
@@ -277,8 +293,18 @@ def extract_content_date(text: str) -> str:
         except ValueError as e:
             LOGGER.debug(f"extract_content_date: Could not parse date '{date_str}': {e}")
 
-    # 3. No source found
-    LOGGER.info("extract_content_date: No date source -> UNKNOWN")
+    # 4. Try filename date extraction
+    if filename:
+        from services.utils.date_service import GenericFilenameExtractor
+        extractor = GenericFilenameExtractor()
+        if extractor.can_extract(filename):
+            dt = extractor.extract(filename)
+            if dt:
+                LOGGER.debug(f"extract_content_date: Filename -> {dt.isoformat()}")
+                return dt.isoformat()
+
+    # 5. No source found
+    LOGGER.info(f"extract_content_date: No date source -> UNKNOWN ({filename or 'no filename'})")
     return "UNKNOWN"
 
 
@@ -587,7 +613,7 @@ def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
     base_name = os.path.splitext(filename)[0]
     lake_file = os.path.join(LAKE_STORE, f"{base_name}.md")
 
-    timestamp_content = extract_content_date(raw_text)
+    timestamp_content = extract_content_date(raw_text, filename)
     default_access_level = CONFIG.get('security', {}).get('default_access_level', 5)
 
     frontmatter = {
