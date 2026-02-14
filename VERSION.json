@@ -1,7 +1,7 @@
 {
-  "version": "0.6.2",
-  "date": "2026-02-13",
-  "description": "# Release Notes Fixat timestamp-extraktion — 38% av alla dokument saknade content timestamp. **Buggfixar:** - Transkript får nu korrekt timestamp (Rich Transcriber **Tid:**-format matchas) - Dokument med datum i filnamnet får timestamp via filnamnsparsning - Rode-inspelningar beräknar starttid istället för sluttid (mtime - duration) - 141 befintliga Lake-filer retrofixade med nytt verktyg (fix_lake_timestamps.py) **Förbättringar:** - Release-processen verifierar att repot är rent och pushat innan start - Release-skriptet committar och pushar MyMemory-repot automatiskt efter release - ChromaDB-stabilitet: extern sqlite3-åtkomst borttagen (förhindrar FTS5-korruption) ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.6.2/MyMemory-Installer.dmg",
+  "version": "0.7.0",
+  "date": "2026-02-14",
+  "description": "# Release Notes Re-ingest vid dokumentmutation och intelligent ljudchunking. **Nytt:** - Ingestion Engine triggar re-ingest när Asset-fil uppdaterats (mtime-jämförelse mot Lake) - Fullständig cleanup vid re-ingest: stale entiteter, node_context, vektor-poster rensas innan ny data skrivs - Watchdog reagerar på filändringar (on_modified) — kalenderhändelser och redigerade dokument reflekteras automatiskt - Silence-aware chunking: ljudfiler klipps vid tysta partier istället för godtyckliga bytegränser - Chunk overlap (15s) med deterministisk deduplicering — eliminerar content loss vid chunkgränser - Audio-normalisering (EBU R128 loudnorm) före transkribering **Tester:** - Ny testfil: test_transcriber_chunking.py (8 tester för chunking, overlap, dedup) - test_ingestion_cycle.py utökad med re-ingest-fas (V1→V2 mutation + validering) - Alla 7 tester i full suite passerar ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.0/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

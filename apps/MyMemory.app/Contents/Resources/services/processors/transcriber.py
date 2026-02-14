@@ -51,7 +51,8 @@ except ImportError:
 
 from services.utils.audio_service import (
     get_audio_info, calculate_chunks, extract_audio_segment,
-    seconds_to_timestamp, AudioInfo, ChunkInfo
+    detect_silence_regions, seconds_to_timestamp,
+    AudioInfo, ChunkInfo
 )
 from services.utils.date_service import get_timestamp
 from services.utils.llm_service import LLMService, AdaptiveThrottler
@@ -102,6 +103,10 @@ os.makedirs(FAILED_FOLDER, exist_ok=True)
 # Transcriber-specifika config
 TRANSCRIBER_CONFIG = CONFIG.get('transcriber', {})
 CHUNK_SIZE_BYTES = TRANSCRIBER_CONFIG.get('chunk_size_bytes', 10000000)  # 10MB default
+CHUNK_OVERLAP_SECONDS = TRANSCRIBER_CONFIG.get('chunk_overlap_seconds', 15)
+SILENCE_THRESHOLD_DB = TRANSCRIBER_CONFIG.get('silence_threshold_db', -35)
+SILENCE_MIN_DURATION = TRANSCRIBER_CONFIG.get('silence_min_duration', 0.3)
+NORMALIZE_AUDIO = TRANSCRIBER_CONFIG.get('normalize_audio', True)
 CALENDAR_WINDOW_MINUTES = TRANSCRIBER_CONFIG.get('calendar_window_minutes', 30)
 PART_PREVIEW_LIMIT = TRANSCRIBER_CONFIG.get('part_preview_limit', 500)
 MAX_FILE_WORKERS = TRANSCRIBER_CONFIG.get('max_file_workers', 2)
@@ -292,6 +297,64 @@ def _get_prompt(section: str, key: str) -> str:
     return PROMPTS.get(section, {}).get(key, '')
 
 
+def _deduplicate_overlap(
+    chunks: List[TranscriptChunk],
+    chunk_infos: List[ChunkInfo]
+) -> List[TranscriptChunk]:
+    """
+    Ta bort duplicerad text från overlap-zoner.
+
+    Deterministisk strategi (ingen LLM): för varje chunk med overlap,
+    beräkna hur stor andel av chunken som är overlap (tid-proportionellt)
+    och ta bort motsvarande andel ord från chunk-starten.
+
+    Args:
+        chunks: Transkriberade chunks med text
+        chunk_infos: ChunkInfo med overlap-metadata
+
+    Returns:
+        Chunks med trimmad text (inga dubbletter)
+    """
+    if len(chunks) != len(chunk_infos):
+        LOGGER.warning(f"Overlap-dedup: chunks ({len(chunks)}) != chunk_infos ({len(chunk_infos)}), hoppar över")
+        return chunks
+
+    result = []
+    for chunk, info in zip(chunks, chunk_infos):
+        if info.overlap_seconds <= 0 or chunk.index == 0:
+            result.append(chunk)
+            continue
+
+        # Beräkna overlap-andel av total chunk-tid
+        chunk_duration = info.end_time_seconds - info.start_time_seconds
+        if chunk_duration <= 0:
+            result.append(chunk)
+            continue
+
+        overlap_ratio = info.overlap_seconds / chunk_duration
+
+        # Ta bort motsvarande andel ord från starten
+        words = chunk.text.split()
+        words_to_remove = int(len(words) * overlap_ratio)
+
+        if words_to_remove > 0 and words_to_remove < len(words):
+            trimmed_text = ' '.join(words[words_to_remove:])
+            result.append(TranscriptChunk(
+                index=chunk.index,
+                text=trimmed_text,
+                start_seconds=chunk.start_seconds,
+                end_seconds=chunk.end_seconds
+            ))
+            LOGGER.debug(
+                f"Overlap-dedup chunk {chunk.index}: tog bort {words_to_remove}/{len(words)} ord "
+                f"(overlap={info.overlap_seconds:.1f}s, ratio={overlap_ratio:.2f})"
+            )
+        else:
+            result.append(chunk)
+
+    return result
+
+
 # =============================================================================
 # STEG 1: METADATA
 # =============================================================================
@@ -355,9 +418,23 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
         bytes_per_second=audio_metadata.bytes_per_second,
         format=source_ext
     )
-    chunk_infos = calculate_chunks(audio_info, chunk_size_bytes=CHUNK_SIZE_BYTES)
 
-    LOGGER.info(f"{kort_namn} → Delas upp i {len(chunk_infos)} chunks")
+    # Silence detection för intelligent chunking
+    silence_regions = detect_silence_regions(
+        audio_metadata.filepath,
+        threshold_db=SILENCE_THRESHOLD_DB,
+        min_duration=SILENCE_MIN_DURATION
+    )
+    LOGGER.info(f"{kort_namn} → {len(silence_regions)} tysta regioner detekterade")
+
+    chunk_infos = calculate_chunks(
+        audio_info,
+        chunk_size_bytes=CHUNK_SIZE_BYTES,
+        overlap_seconds=CHUNK_OVERLAP_SECONDS,
+        silence_regions=silence_regions
+    )
+
+    LOGGER.info(f"{kort_namn} → Delas upp i {len(chunk_infos)} chunks (overlap={CHUNK_OVERLAP_SECONDS}s)")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         # Fas 1: Extrahera chunks med ffmpeg
@@ -370,7 +447,8 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
                 input_path=audio_metadata.filepath,
                 output_path=chunk_path,
                 start_seconds=chunk_info.start_time_seconds,
-                end_seconds=chunk_info.end_time_seconds
+                end_seconds=chunk_info.end_time_seconds,
+                normalize=NORMALIZE_AUDIO
             )
             chunk_paths.append((chunk_info, chunk_path))
 
@@ -468,8 +546,15 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
 
         transcript_chunks.sort(key=lambda c: c.index)
 
-    total_chars = sum(len(c.text) for c in transcript_chunks)
-    LOGGER.info(f"{kort_namn} → Transkribering klar: {len(transcript_chunks)} chunks, {total_chars} tecken")
+    # Deduplicera overlap-text
+    total_before = sum(len(c.text) for c in transcript_chunks)
+    transcript_chunks = _deduplicate_overlap(transcript_chunks, chunk_infos)
+    total_after = sum(len(c.text) for c in transcript_chunks)
+
+    LOGGER.info(
+        f"{kort_namn} → Transkribering klar: {len(transcript_chunks)} chunks, "
+        f"{total_after} tecken (dedup: {total_before - total_after} tecken borttagna)"
+    )
 
     return transcript_chunks
 

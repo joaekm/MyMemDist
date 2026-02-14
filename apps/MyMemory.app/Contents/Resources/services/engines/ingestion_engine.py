@@ -797,6 +797,102 @@ def write_vector(unit_id: str, filename: str, raw_text: str, source_type: str,
     LOGGER.info(f"Vector: {filename} -> ChromaDB")
 
 
+def _clean_before_reingest(unit_id: str, filename: str, lake_file: str):
+    """
+    Clean stale data from Graph + Vector before re-ingestion.
+
+    Removes old node_context entries (origin == unit_id), deletes orphan entities,
+    removes Document node + MENTIONS edges, and clears vector entries.
+
+    Does NOT touch Assets (they're the source of truth for re-ingest).
+    Lake file is deleted so write_lake() can recreate it as the final "commit".
+    """
+    graph = GraphService(GRAPH_DB_PATH)
+    from services.utils.vector_service import get_vector_service
+    vs = get_vector_service("knowledge_base")
+
+    try:
+        # 1. Clean entity node_context entries from this document
+        edges = graph.get_edges_from(unit_id)
+        mentions = [e for e in edges if e.get("type") == "MENTIONS"]
+
+        entities_cleaned = 0
+        entities_deleted = 0
+
+        for edge in mentions:
+            entity_id = edge["target"]
+            entity = graph.get_node(entity_id)
+            if not entity:
+                continue
+
+            props = entity.get("properties", {})
+            node_context = props.get("node_context", [])
+
+            # Remove entries originating from this document
+            new_context = [
+                nc for nc in node_context
+                if not (isinstance(nc, dict) and nc.get("origin") == unit_id)
+            ]
+
+            if not new_context:
+                # No context left — check if entity is orphan
+                other_incoming = [e for e in graph.get_edges_to(entity_id) if e["source"] != unit_id]
+                other_outgoing = graph.get_edges_from(entity_id)
+
+                if not other_incoming and not other_outgoing:
+                    graph.delete_node(entity_id)
+                    vs.delete(entity_id)
+                    entities_deleted += 1
+                    continue
+
+            props["node_context"] = new_context
+            graph.update_node_properties(entity_id, props)
+
+            vs.upsert_node({
+                'id': entity_id,
+                'type': entity.get('type'),
+                'properties': props,
+                'aliases': entity.get('aliases', [])
+            })
+            entities_cleaned += 1
+
+        # 2. Delete Document node + MENTIONS edges
+        graph.delete_node(unit_id)
+
+        # 3. Delete vector entries (document + transcript chunks)
+        vs.delete(unit_id)
+        vs.delete_by_parent(unit_id)
+
+    finally:
+        graph.close()
+
+    # 4. Delete Lake file (will be recreated as final "commit" step)
+    try:
+        os.remove(lake_file)
+    except OSError as e:
+        LOGGER.warning(f"Could not remove Lake file during re-ingest: {e}")
+
+    LOGGER.info(
+        f"Re-ingest cleanup: {filename} -> "
+        f"{entities_cleaned} entities cleaned, {entities_deleted} orphans deleted"
+    )
+
+
+def _needs_reingest(filepath: str, lake_file: str) -> bool:
+    """
+    Check if Asset file is newer than Lake file (content was updated).
+
+    Returns True if re-ingestion is needed.
+    """
+    try:
+        asset_mtime = os.path.getmtime(filepath)
+        lake_mtime = os.path.getmtime(lake_file)
+        return asset_mtime > lake_mtime
+    except OSError as e:
+        LOGGER.warning(f"Could not compare timestamps for {filepath}: {e}")
+        return False
+
+
 def process_document(filepath: str, filename: str, _lock_held: bool = False):
     """
     Main document processing function.
@@ -820,15 +916,25 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
     base_name = os.path.splitext(filename)[0]
     lake_file = os.path.join(LAKE_STORE, f"{base_name}.md")
 
+    is_reingest = False
     if os.path.exists(lake_file):
-        LOGGER.debug(f"Skippar {filename} - redan i Lake")
-        return  # Idempotent
+        if _needs_reingest(filepath, lake_file):
+            is_reingest = True
+            LOGGER.info(f"Re-ingest triggered: {filename} (Asset newer than Lake)")
+        else:
+            LOGGER.debug(f"Skippar {filename} - redan i Lake")
+            return  # Idempotent
 
-    LOGGER.info(f"Processing: {filename}")
+    LOGGER.info(f"{'Re-processing' if is_reingest else 'Processing'}: {filename}")
     terminal_status("ingestion", filename, "processing")
 
     def _do_process():
         """Inner processing logic."""
+        # 0. Clean stale data before re-ingestion
+        if is_reingest:
+            terminal_status("ingestion", filename, "re-ingest cleanup")
+            _clean_before_reingest(unit_id, filename, lake_file)
+
         # 1. Extract text (via text_extractor)
         raw_text = extract_text(filepath)
 
@@ -883,8 +989,11 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
         write_lake(unit_id, filename, raw_text, source_type, semantic_metadata, ingestion_payload)
 
         # Done - log and terminal
-        LOGGER.info(f"Completed: {filename}")
+        action = "Re-ingested" if is_reingest else "Completed"
+        LOGGER.info(f"{action}: {filename}")
         detail = f"{nodes_written} noder, {edges_written} relationer"
+        if is_reingest:
+            detail = f"re-ingest: {detail}"
         terminal_status("ingestion", filename, "done", detail=detail)
 
     try:
@@ -906,12 +1015,22 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
 
 
 class DocumentHandler:
-    """Watchdog event handler for new documents."""
+    """Watchdog event handler for new and modified documents."""
 
     def on_created(self, event):
         if event.is_directory:
             return
         process_document(event.src_path, os.path.basename(event.src_path))
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        fname = os.path.basename(event.src_path)
+        if not UUID_SUFFIX_PATTERN.search(fname):
+            return
+        with PROCESS_LOCK:
+            PROCESSED_FILES.discard(fname)
+        process_document(event.src_path, fname)
 
 
 # --- INIT & WATCHDOG ---
@@ -928,6 +1047,18 @@ if __name__ == "__main__":
             if event.is_directory:
                 return
             process_document(event.src_path, os.path.basename(event.src_path))
+
+        def on_modified(self, event):
+            if event.is_directory:
+                return
+            fname = os.path.basename(event.src_path)
+            if not UUID_SUFFIX_PATTERN.search(fname):
+                return
+            # Allow re-processing: clear from PROCESSED_FILES
+            # so process_document can re-evaluate via _needs_reingest()
+            with PROCESS_LOCK:
+                PROCESSED_FILES.discard(fname)
+            process_document(event.src_path, fname)
 
     folders = [
         CONFIG['paths']['asset_documents'],

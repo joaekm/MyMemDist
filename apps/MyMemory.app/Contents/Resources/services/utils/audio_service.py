@@ -3,8 +3,9 @@ Audio Service - Hjälpfunktioner för ljudfilshantering.
 
 Använder ffprobe/ffmpeg för:
 - Hämta metadata (duration, storlek, format)
-- Chunking av stora ljudfiler
-- Extrahera segment för parallell transkribering
+- Silence detection för intelligent chunking
+- Chunking av stora ljudfiler vid tysta partier
+- Extrahera segment med valfri normalisering
 
 Alla parametrar läses från config.
 """
@@ -14,12 +15,15 @@ import subprocess
 import json
 import re
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
 
 # Logger
 LOGGER = logging.getLogger('MyMem_AudioService')
+
+# Sökfönster för silence-baserad chunking (sekunder runt ideal klipppunkt)
+_SILENCE_SEARCH_WINDOW = 30.0
 
 
 def _find_ffmpeg_binary(name: str) -> str:
@@ -64,6 +68,14 @@ class AudioInfo:
 
 
 @dataclass
+class SilenceRegion:
+    """En tyst region i en ljudfil."""
+    start: float      # Starttid i sekunder
+    end: float         # Sluttid i sekunder
+    duration: float    # Längd i sekunder
+
+
+@dataclass
 class ChunkInfo:
     """Information om en chunk."""
     chunk_index: int
@@ -73,6 +85,7 @@ class ChunkInfo:
     end_time_seconds: float
     start_timestamp: str  # "HH:MM:SS"
     end_timestamp: str    # "HH:MM:SS"
+    overlap_seconds: float = 0.0  # Hur mycket overlap med föregående chunk
 
 
 def seconds_to_timestamp(seconds: float) -> str:
@@ -161,13 +174,119 @@ def get_audio_info(filepath: str) -> AudioInfo:
         raise RuntimeError(f"HARDFAIL: Kunde inte parsa ffprobe-output: {e}")
 
 
-def calculate_chunks(audio_info: AudioInfo, chunk_size_bytes: int) -> List[ChunkInfo]:
+def detect_silence_regions(
+    filepath: str,
+    threshold_db: float = -35.0,
+    min_duration: float = 0.3
+) -> List[SilenceRegion]:
     """
-    Beräkna chunk-gränser för en ljudfil.
+    Detektera tysta regioner i en ljudfil med ffmpeg silencedetect.
+
+    Args:
+        filepath: Sökväg till ljudfilen
+        threshold_db: Tröskelvärde i dB (lägre = känsligare)
+        min_duration: Minsta tystnadslängd i sekunder
+
+    Returns:
+        Lista med SilenceRegion sorterad på starttid
+
+    Raises:
+        FileNotFoundError: Om filen inte finns
+        RuntimeError: Om ffmpeg misslyckas
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"HARDFAIL: Ljudfil finns inte: {filepath}")
+
+    try:
+        result = subprocess.run(
+            [
+                _get_ffmpeg(),
+                '-i', filepath,
+                '-af', f'silencedetect=n={threshold_db}dB:d={min_duration}',
+                '-f', 'null',
+                '-'
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+
+        # silencedetect skriver till stderr (normalt ffmpeg-beteende)
+        stderr = result.stderr
+
+        # Parsa silence_start och silence_end/silence_duration
+        starts = re.findall(r'silence_start:\s*([\d.]+)', stderr)
+        ends = re.findall(r'silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)', stderr)
+
+        regions = []
+        for i, start_str in enumerate(starts):
+            start = float(start_str)
+            if i < len(ends):
+                end = float(ends[i][0])
+                duration = float(ends[i][1])
+            else:
+                # Sista tystnad som inte avslutas (fil slutar med tystnad)
+                end = start + min_duration
+                duration = min_duration
+
+            regions.append(SilenceRegion(start=start, end=end, duration=duration))
+
+        LOGGER.debug(f"Silence detection: {len(regions)} tysta regioner i {filepath}")
+
+        return regions
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"HARDFAIL: ffmpeg silence detection timeout för {filepath}")
+
+
+def _find_best_silence(
+    target_time: float,
+    silence_regions: List[SilenceRegion],
+    search_window: float = _SILENCE_SEARCH_WINDOW
+) -> Optional[float]:
+    """
+    Hitta den bästa klipppunkten (mittpunkt av närmaste tystnad) nära target_time.
+
+    Args:
+        target_time: Ideal klipppunkt i sekunder
+        silence_regions: Lista med tysta regioner
+        search_window: Sökfönster i sekunder runt target_time (±)
+
+    Returns:
+        Mittpunkt av närmaste tystnad, eller None om ingen hittas inom fönstret
+    """
+    best_point = None
+    best_distance = float('inf')
+
+    for region in silence_regions:
+        midpoint = (region.start + region.end) / 2.0
+
+        distance = abs(midpoint - target_time)
+        if distance <= search_window and distance < best_distance:
+            best_distance = distance
+            best_point = midpoint
+
+    return best_point
+
+
+def calculate_chunks(
+    audio_info: AudioInfo,
+    chunk_size_bytes: int,
+    overlap_seconds: float = 0.0,
+    silence_regions: Optional[List[SilenceRegion]] = None
+) -> List[ChunkInfo]:
+    """
+    Beräkna chunk-gränser för en ljudfil med silence-aware splitting.
+
+    Chunkar vid tysta partier nära ideal-gränsen. Om silence_regions ges
+    söks närmaste tystnad inom ±30s av varje ideal klipppunkt. Lägger till
+    konfigurerbart overlap mellan chunks.
 
     Args:
         audio_info: Metadata om ljudfilen
-        chunk_size_bytes: Önskad chunk-storlek i bytes
+        chunk_size_bytes: Önskad chunk-storlek i bytes (avgör ideal tidslängd)
+        overlap_seconds: Sekunder overlap med föregående chunk
+        silence_regions: Tysta regioner från detect_silence_regions()
 
     Returns:
         Lista med ChunkInfo för varje chunk
@@ -175,17 +294,54 @@ def calculate_chunks(audio_info: AudioInfo, chunk_size_bytes: int) -> List[Chunk
     if chunk_size_bytes <= 0:
         raise ValueError(f"HARDFAIL: Ogiltig chunk_size_bytes: {chunk_size_bytes}")
 
+    # Beräkna ideal chunk-längd i sekunder
+    ideal_chunk_seconds = chunk_size_bytes / audio_info.bytes_per_second
+    total_duration = audio_info.duration_seconds
+
+    # Om filen är kortare än en chunk: returnera hela filen
+    if total_duration <= ideal_chunk_seconds:
+        return [ChunkInfo(
+            chunk_index=0,
+            start_byte=0,
+            end_byte=audio_info.total_bytes,
+            start_time_seconds=0.0,
+            end_time_seconds=total_duration,
+            start_timestamp=seconds_to_timestamp(0.0),
+            end_timestamp=seconds_to_timestamp(total_duration),
+            overlap_seconds=0.0
+        )]
+
     chunks = []
-    current_byte = 0
     chunk_index = 0
+    current_time = 0.0
 
-    while current_byte < audio_info.total_bytes:
-        start_byte = current_byte
-        end_byte = min(start_byte + chunk_size_bytes, audio_info.total_bytes)
+    while current_time < total_duration:
+        # Starttid (med overlap bakåt, utom för första chunk)
+        if chunk_index == 0:
+            start_time = 0.0
+            chunk_overlap = 0.0
+        else:
+            start_time = max(0.0, current_time - overlap_seconds)
+            chunk_overlap = current_time - start_time
 
-        # Beräkna tider baserat på bytes
-        start_time = start_byte / audio_info.bytes_per_second
-        end_time = end_byte / audio_info.bytes_per_second
+        # Ideal sluttid
+        ideal_end = current_time + ideal_chunk_seconds
+
+        # Om vi är nära slutet: ta resten
+        if ideal_end >= total_duration - (ideal_chunk_seconds * 0.2):
+            end_time = total_duration
+        else:
+            # Sök tystnad nära ideal sluttid
+            if silence_regions:
+                silence_point = _find_best_silence(ideal_end, silence_regions)
+                end_time = silence_point if silence_point is not None else ideal_end
+            else:
+                end_time = ideal_end
+
+        # Beräkna byte-positioner (proportionellt)
+        start_byte = int(start_time * audio_info.bytes_per_second)
+        end_byte = int(end_time * audio_info.bytes_per_second)
+        end_byte = min(end_byte, audio_info.total_bytes)
 
         chunks.append(ChunkInfo(
             chunk_index=chunk_index,
@@ -194,13 +350,18 @@ def calculate_chunks(audio_info: AudioInfo, chunk_size_bytes: int) -> List[Chunk
             start_time_seconds=start_time,
             end_time_seconds=end_time,
             start_timestamp=seconds_to_timestamp(start_time),
-            end_timestamp=seconds_to_timestamp(end_time)
+            end_timestamp=seconds_to_timestamp(end_time),
+            overlap_seconds=chunk_overlap
         ))
 
-        current_byte = end_byte
+        # Nästa chunk startar vid sluttid (utan overlap — overlap läggs på vid start)
+        current_time = end_time
         chunk_index += 1
 
-    LOGGER.debug(f"Beräknade {len(chunks)} chunks för {audio_info.filepath}")
+    LOGGER.info(
+        f"Beräknade {len(chunks)} chunks för {audio_info.filepath} "
+        f"(silence={'ja' if silence_regions else 'nej'}, overlap={overlap_seconds}s)"
+    )
 
     return chunks
 
@@ -209,18 +370,18 @@ def extract_audio_segment(
     input_path: str,
     output_path: str,
     start_seconds: float,
-    end_seconds: float
+    end_seconds: float,
+    normalize: bool = False
 ) -> str:
     """
     Extrahera ett segment från en ljudfil med ffmpeg.
-
-    Använder stream copy (ingen omkodning) för snabbhet.
 
     Args:
         input_path: Sökväg till källfilen
         output_path: Sökväg för output-filen
         start_seconds: Starttid i sekunder
         end_seconds: Sluttid i sekunder
+        normalize: Om True, normalisera ljud med EBU R128 loudnorm
 
     Returns:
         Sökväg till den extraherade filen
@@ -231,20 +392,39 @@ def extract_audio_segment(
     start_ts = seconds_to_timestamp(start_seconds)
     end_ts = seconds_to_timestamp(end_seconds)
 
+    if normalize:
+        # Re-encoding med EBU R128 loudnorm
+        cmd = [
+            _get_ffmpeg(),
+            '-y',
+            '-i', input_path,
+            '-ss', start_ts,
+            '-to', end_ts,
+            '-af', 'loudnorm=I=-16:TP=-1.5',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            output_path
+        ]
+        timeout = 120  # Re-encoding tar längre
+    else:
+        # Stream copy (snabb, ingen omkodning)
+        cmd = [
+            _get_ffmpeg(),
+            '-y',
+            '-i', input_path,
+            '-ss', start_ts,
+            '-to', end_ts,
+            '-c', 'copy',
+            output_path
+        ]
+        timeout = 60
+
     try:
         result = subprocess.run(
-            [
-                _get_ffmpeg(),
-                '-y',  # Overwrite output
-                '-i', input_path,
-                '-ss', start_ts,
-                '-to', end_ts,
-                '-c', 'copy',  # Stream copy, ingen omkodning
-                output_path
-            ],
+            cmd,
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=timeout
         )
 
         if result.returncode != 0:
