@@ -640,11 +640,12 @@ def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
     return lake_file
 
 
-def write_graph(unit_id: str, filename: str, ingestion_payload: List) -> tuple:
+def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_service=None) -> tuple:
     """Write entities and edges to graph, and index nodes to vector."""
     graph = GraphService(GRAPH_DB_PATH)
-    from services.utils.vector_service import get_vector_service
-    vector_service = get_vector_service("knowledge_base")
+    if vector_service is None:
+        from services.utils.vector_service import get_vector_service
+        vector_service = get_vector_service("knowledge_base")
 
     # Skapa Document-nod för källdokumentet (krävs för MENTIONS-kanter)
     graph.upsert_node(
@@ -739,7 +740,7 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List) -> tuple:
 
 
 def write_vector(unit_id: str, filename: str, raw_text: str, source_type: str,
-                 semantic_metadata: Dict, timestamp_ingestion: str):
+                 semantic_metadata: Dict, timestamp_ingestion: str, vector_service=None):
     """
     Write document to vector index.
 
@@ -750,8 +751,9 @@ def write_vector(unit_id: str, filename: str, raw_text: str, source_type: str,
     For other documents:
     - Indexes as single document (existing behavior)
     """
-    from services.utils.vector_service import get_vector_service
-    vector_service = get_vector_service("knowledge_base")
+    if vector_service is None:
+        from services.utils.vector_service import get_vector_service
+        vector_service = get_vector_service("knowledge_base")
 
     # Check if transcript with parts structure
     if source_type == "Transcript" and has_transcript_parts(raw_text):
@@ -797,7 +799,7 @@ def write_vector(unit_id: str, filename: str, raw_text: str, source_type: str,
     LOGGER.info(f"Vector: {filename} -> ChromaDB")
 
 
-def _clean_before_reingest(unit_id: str, filename: str, lake_file: str):
+def _clean_before_reingest(unit_id: str, filename: str, lake_file: str, vector_service=None):
     """
     Clean stale data from Graph + Vector before re-ingestion.
 
@@ -808,8 +810,11 @@ def _clean_before_reingest(unit_id: str, filename: str, lake_file: str):
     Lake file is deleted so write_lake() can recreate it as the final "commit".
     """
     graph = GraphService(GRAPH_DB_PATH)
-    from services.utils.vector_service import get_vector_service
-    vs = get_vector_service("knowledge_base")
+    if vector_service is None:
+        from services.utils.vector_service import get_vector_service
+        vs = get_vector_service("knowledge_base")
+    else:
+        vs = vector_service
 
     try:
         # 1. Clean entity node_context entries from this document
@@ -928,12 +933,12 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
     LOGGER.info(f"{'Re-processing' if is_reingest else 'Processing'}: {filename}")
     terminal_status("ingestion", filename, "processing")
 
-    def _do_process():
+    def _do_process(vector_service=None):
         """Inner processing logic."""
         # 0. Clean stale data before re-ingestion
         if is_reingest:
             terminal_status("ingestion", filename, "re-ingest cleanup")
-            _clean_before_reingest(unit_id, filename, lake_file)
+            _clean_before_reingest(unit_id, filename, lake_file, vector_service=vector_service)
 
         # 1. Extract text (via text_extractor)
         raw_text = extract_text(filepath)
@@ -976,14 +981,14 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
         )
 
         # 7. Write to Graph
-        nodes_written, edges_written = write_graph(unit_id, filename, ingestion_payload)
+        nodes_written, edges_written = write_graph(unit_id, filename, ingestion_payload, vector_service=vector_service)
 
         # 7b. Update Dreamer daemon counter (OBJEKT-76)
         _increment_dreamer_node_counter(nodes_written)
 
         # 8. Write to Vector
         timestamp_ingestion = datetime.datetime.now().isoformat()
-        write_vector(unit_id, filename, raw_text, source_type, semantic_metadata, timestamp_ingestion)
+        write_vector(unit_id, filename, raw_text, source_type, semantic_metadata, timestamp_ingestion, vector_service=vector_service)
 
         # 9. Write to Lake (SIST - fungerar som "commit" att allt lyckades)
         write_lake(unit_id, filename, raw_text, source_type, semantic_metadata, ingestion_payload)
@@ -1002,9 +1007,10 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
             _do_process()
         else:
             # Acquire locks for this document (realtime scenario)
+            from services.utils.vector_service import vector_scope
             with resource_lock("graph", exclusive=True):
-                with resource_lock("vector", exclusive=True):
-                    _do_process()
+                with vector_scope(exclusive=True) as vs:
+                    _do_process(vector_service=vs)
 
     except Exception as e:
         LOGGER.error(f"HARDFAIL {filename}: {e}")

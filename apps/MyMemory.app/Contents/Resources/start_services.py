@@ -105,51 +105,54 @@ def auto_repair(health_info):
         return
 
     try:
-        from services.utils.vector_service import get_vector_service
+        from services.utils.vector_service import vector_scope
 
         lake_id_set = set(lake_ids_dict.keys())
-        vector_service = get_vector_service("knowledge_base")
-        coll = vector_service.collection
-        vector_ids = set(coll.get()['ids'])
 
-        missing = lake_id_set - vector_ids
-        if not missing:
-            return
+        with vector_scope(exclusive=True, timeout=30.0) as vector_service:
+            coll = vector_service.collection
+            vector_ids = set(coll.get()['ids'])
 
-        LOGGER.info(f"Repairing {len(missing)} missing Vector entries")
+            missing = lake_id_set - vector_ids
+            if not missing:
+                return
 
-        for uid in missing:
-            filename = lake_ids_dict.get(uid, f"{uid}.md")
-            filepath = os.path.join(lake_store, filename)
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    content = f.read()
+            LOGGER.info(f"Repairing {len(missing)} missing Vector entries")
 
-                if not content.startswith("---"):
+            for uid in missing:
+                filename = lake_ids_dict.get(uid, f"{uid}.md")
+                filepath = os.path.join(lake_store, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+
+                    if not content.startswith("---"):
+                        continue
+                    parts = content.split("---", 2)
+                    if len(parts) < 3:
+                        continue
+
+                    metadata = yaml.safe_load(parts[1])
+                    text = parts[2].strip()
+
+                    ai_summary = metadata.get('ai_summary') or ""
+                    timestamp = metadata.get('timestamp_ingestion') or ""
+
+                    full_doc = f"FILENAME: {filename}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
+
+                    coll.upsert(
+                        ids=[uid],
+                        documents=[full_doc],
+                        metadatas=[{"timestamp": timestamp, "filename": filename}]
+                    )
+                except (OSError, ValueError) as e:  # File read/parse errors
+                    LOGGER.warning(f"Could not index {filename}: {e}")
                     continue
-                parts = content.split("---", 2)
-                if len(parts) < 3:
-                    continue
 
-                metadata = yaml.safe_load(parts[1])
-                text = parts[2].strip()
+            LOGGER.info("Vector repair complete")
 
-                ai_summary = metadata.get('ai_summary') or ""
-                timestamp = metadata.get('timestamp_ingestion') or ""
-
-                full_doc = f"FILENAME: {filename}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
-
-                coll.upsert(
-                    ids=[uid],
-                    documents=[full_doc],
-                    metadatas=[{"timestamp": timestamp, "filename": filename}]
-                )
-            except (OSError, ValueError) as e:  # File read/parse errors
-                LOGGER.warning(f"Could not index {filename}: {e}")
-                continue
-
-        LOGGER.info("Vector repair complete")
-
+    except TimeoutError:
+        LOGGER.warning("auto_repair: could not acquire vector lock in 30s")
     except (OSError, RuntimeError) as e:  # Vector service errors
         LOGGER.error(f"Vector repair failed (non-critical): {e}")
 

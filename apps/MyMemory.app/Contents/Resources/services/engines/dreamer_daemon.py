@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from services.utils.graph_service import GraphService
-from services.utils.vector_service import VectorService
+from services.utils.vector_service import vector_scope
 from services.utils.shared_lock import resource_lock
 from services.engines.dreamer import Dreamer
 
@@ -162,14 +162,13 @@ def _run_dreamer(config: dict) -> dict:
     try:
         # Take exclusive locks for entire cycle (OBJEKT-73)
         with resource_lock("graph", exclusive=True):
-            with resource_lock("vector", exclusive=True):
+            with vector_scope(exclusive=True) as vector_service:
                 LOGGER.info("Locks acquired, initializing Dreamer...")
 
                 graph_path = os.path.expanduser(
                     config.get('paths', {}).get('graph_db', '~/MyMemory/Index/my_mem_graph.duckdb')
                 )
                 graph_service = GraphService(graph_path)
-                vector_service = VectorService()
                 dreamer = Dreamer(graph_service, vector_service)
 
                 LOGGER.info("Running resolution cycle...")

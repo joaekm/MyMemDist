@@ -21,7 +21,7 @@ import yaml
 
 from services.utils.config_loader import get_config
 from services.utils.graph_service import GraphService
-from services.utils.vector_service import get_vector_service
+from services.utils.vector_service import vector_scope
 from services.utils.shared_lock import resource_lock
 
 LOGGER = logging.getLogger("DocumentManager")
@@ -194,10 +194,13 @@ def collect_impact(unit_id: str, graph: GraphService) -> dict:
             "other_sources": other_sources,
         })
 
-    vs = get_vector_service("knowledge_base")
-    chunks = vs.collection.get(where={"parent_id": unit_id})
-    chunk_count = len(chunks['ids']) if chunks and chunks['ids'] else 0
-    impact["vector_entries"] = 1 + chunk_count
+    try:
+        with vector_scope(exclusive=False, timeout=10.0) as vs:
+            chunks = vs.collection.get(where={"parent_id": unit_id})
+            chunk_count = len(chunks['ids']) if chunks and chunks['ids'] else 0
+        impact["vector_entries"] = 1 + chunk_count
+    except (TimeoutError, OSError, RuntimeError):
+        impact["vector_entries"] = -1  # Unknown
 
     return impact
 
@@ -257,9 +260,8 @@ def execute_deletion(doc_id: str) -> dict:
     }
 
     with resource_lock("graph", exclusive=True):
-        with resource_lock("vector", exclusive=True):
+        with vector_scope(exclusive=True) as vs:
             graph = GraphService(graph_db_path)
-            vs = get_vector_service("knowledge_base")
 
             try:
                 # 1. Rensa entity node_context

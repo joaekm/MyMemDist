@@ -1,7 +1,7 @@
 {
-  "version": "0.7.0",
-  "date": "2026-02-14",
-  "description": "# Release Notes Re-ingest vid dokumentmutation och intelligent ljudchunking. **Nytt:** - Ingestion Engine triggar re-ingest när Asset-fil uppdaterats (mtime-jämförelse mot Lake) - Fullständig cleanup vid re-ingest: stale entiteter, node_context, vektor-poster rensas innan ny data skrivs - Watchdog reagerar på filändringar (on_modified) — kalenderhändelser och redigerade dokument reflekteras automatiskt - Silence-aware chunking: ljudfiler klipps vid tysta partier istället för godtyckliga bytegränser - Chunk overlap (15s) med deterministisk deduplicering — eliminerar content loss vid chunkgränser - Audio-normalisering (EBU R128 loudnorm) före transkribering **Tester:** - Ny testfil: test_transcriber_chunking.py (8 tester för chunking, overlap, dedup) - test_ingestion_cycle.py utökad med re-ingest-fas (V1→V2 mutation + validering) - Alla 7 tester i full suite passerar ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.0/MyMemory-Installer.dmg",
+  "version": "0.7.1",
+  "date": "2026-02-15",
+  "description": "# Release Notes Fixar ChromaDB-korruption som orsakade att systemet inte kunde starta. **Buggfix:** - ChromaDB VectorDB blev permanent korrupt (SIGSEGV) p.g.a. multi-process access — ett dokumenterat icke-stött mönster i ChromaDB - Ny `vector_scope()` context manager garanterar att bara en process åt gången har filhandtag till VectorDB - Alla 11 VectorDB-access-punkter konverterade till ephemeral PersistentClient (öppna-använd-stäng) - Transcriber saknade helt resource_lock vid vektor-sökning — tillagt **Tekniskt:** - Embedding-funktionen cachas på modulnivå (ingen prestandaförsämring) - ChromaDB:s SharedSystemClient-cache rensas vid close() för korrekt reopen - Ny regel 17 i CLAUDE.md: all VectorDB-access via vector_scope() ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.1/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

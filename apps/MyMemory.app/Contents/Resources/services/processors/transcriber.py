@@ -58,7 +58,7 @@ from services.utils.date_service import get_timestamp
 from services.utils.llm_service import LLMService, AdaptiveThrottler
 from services.utils.providers import GeminiProvider
 from services.utils.graph_service import GraphService
-from services.utils.vector_service import get_vector_service
+from services.utils.vector_service import vector_scope
 from services.utils.metadata_service import generate_semantic_metadata, get_owner_name
 from services.utils.terminal_status import status as terminal_status, service_status
 
@@ -875,17 +875,19 @@ def step5_enrich_context(
     LOGGER.info("Steg 5: Startar vektor-sökning")
     vector_results = []
     try:
-        vector = get_vector_service("knowledge_base")
-        for query in queries.semantic_queries[:MAX_SEMANTIC_QUERIES]:
-            results = vector.search(query, limit=RESULTS_PER_QUERY)
-            for doc in results:
-                vector_results.append({
-                    'query': query,
-                    'distance': doc.get('distance'),
-                    'metadata': doc.get('metadata') or {}
-                })
+        with vector_scope(exclusive=False, timeout=10.0) as vector:
+            for query in queries.semantic_queries[:MAX_SEMANTIC_QUERIES]:
+                results = vector.search(query, limit=RESULTS_PER_QUERY)
+                for doc in results:
+                    vector_results.append({
+                        'query': query,
+                        'distance': doc.get('distance'),
+                        'metadata': doc.get('metadata') or {}
+                    })
         LOGGER.info(f"Steg 5: Vektor-sökning klar, {len(vector_results)} träffar")
-    except Exception as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional
+    except TimeoutError:
+        LOGGER.warning("Steg 5: Vektor-sökning skipped (lock timeout 10s)")
+    except (OSError, RuntimeError) as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional
         LOGGER.warning(f"Vektor-sökning misslyckades: {e}")
 
     # Bygg rik rådata

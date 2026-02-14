@@ -8,7 +8,7 @@ import duckdb
 import json
 import subprocess
 
-from services.utils.vector_service import get_vector_service
+from services.utils.vector_service import vector_scope
 from services.utils.config_loader import get_config
 
 # Enkel loggning för CLI-verktyg
@@ -149,7 +149,7 @@ def validera_filer():
 def validera_chroma(expected_lake_count, lake_ids):
     print_header("2. VEKTOR-AUDIT (CHROMA)")
     try:
-        vector_service = get_vector_service("knowledge_base")
+      with vector_scope(exclusive=False, timeout=15.0) as vector_service:
         coll = vector_service.collection
         total_count = coll.count()
 
@@ -231,6 +231,9 @@ def validera_chroma(expected_lake_count, lake_ids):
                 else:
                     print(f"⚠️ GRAF-NODER DRIFT: {len(graph_vectors)} vektorer vs {graph_node_count} graf-noder ({diff} saknas i Vector)")
 
+    except TimeoutError:
+        LOGGER.warning("Chroma validation: lock timeout (15s)")
+        print("⚠️ Kunde inte validera ChromaDB (lock timeout)")
     except (OSError, RuntimeError) as e:
         LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
         print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
@@ -330,11 +333,14 @@ def run_startup_checks():
     vector_count = 0
 
     if lake_c > 0:
-        # Chroma (via VectorService för konsistent collection-namn)
+        # Chroma (via vector_scope för ephemeral access)
         try:
-            vector_service = get_vector_service("knowledge_base")
-            vector_count = vector_service.count()
+            with vector_scope(exclusive=False, timeout=15.0) as vs:
+                vector_count = vs.count()
             validera_chroma(lake_c, lake_ids)
+        except TimeoutError:
+            LOGGER.warning("Startup check: vector lock timeout")
+            print("⚠️ Kunde inte läsa ChromaDB (lock timeout)")
         except (OSError, RuntimeError) as e:
             LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
             print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")

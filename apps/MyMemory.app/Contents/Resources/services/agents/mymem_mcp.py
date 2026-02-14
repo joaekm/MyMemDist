@@ -41,7 +41,7 @@ _root.addHandler(_fh)
 
 from mcp.server.fastmcp import FastMCP
 from services.utils.graph_service import GraphService
-from services.utils.vector_service import get_vector_service
+from services.utils.vector_service import vector_scope
 from services.utils.shared_lock import resource_lock
 
 # Tysta tredjepartsloggers EFTER import
@@ -383,15 +383,15 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
     Returnerar: Entiteter rankade efter semantisk likhet med din fråga.
     """
     try:
-        with resource_lock("vector", exclusive=False, timeout=10.0):
-            vs = get_vector_service("knowledge_base")
+        with vector_scope(exclusive=False, timeout=10.0) as vs:
             results = vs.search(query_text=query_text, limit=n_results)
+            model_name = vs.model_name
 
         if not results:
             return f"VEKTOR: Inga semantiska matchningar för '{query_text}'."
 
         output = [f"=== VEKTOR RESULTAT ('{query_text}') ==="]
-        output.append(f"Modell: {vs.model_name}")
+        output.append(f"Modell: {model_name}")
         output.append("-" * 30)
 
         for i, item in enumerate(results):
@@ -414,7 +414,7 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
 
     except TimeoutError:
         return "⚠️ VEKTOR-FEL: Databasen är upptagen (ingestion pågår). Försök igen om en stund."
-    except Exception as e:
+    except (OSError, RuntimeError) as e:
         return f"⚠️ VEKTOR-FEL: {str(e)}"
 
 # --- TOOL 3: LAKE (Metadata) ---
