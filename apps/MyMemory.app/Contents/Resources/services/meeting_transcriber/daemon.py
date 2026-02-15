@@ -50,6 +50,16 @@ SAMPLE_WIDTH = 2     # 16-bit (2 bytes)
 
 # Buffring
 BUFFER_SECONDS = MEETING_CONFIG.get('buffer_seconds', 30)
+OVERLAP_SECONDS = MEETING_CONFIG.get('overlap_seconds', 5)
+
+# Promptar
+PROMPTS_PATH = Path(__file__).parent.parent.parent / "config" / "services_prompts.yaml"
+with open(PROMPTS_PATH) as f:
+    _PROMPTS = yaml.safe_load(f)
+MEETING_PROMPT = _PROMPTS.get('transcriber', {}).get('meeting_transcribe', '').strip()
+
+# Modell
+TRANSCRIBE_MODEL = CONFIG.get('ai_engine', {}).get('model_transcribe', 'gemini-2.0-flash')
 
 
 class BatchTranscriber:
@@ -63,14 +73,17 @@ class BatchTranscriber:
         CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
 
         # Beräkna bytes per buffer
-        self.bytes_per_buffer = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH * BUFFER_SECONDS
+        self.bytes_per_second = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH
+        self.bytes_per_buffer = self.bytes_per_second * BUFFER_SECONDS
+        self.overlap_bytes = self.bytes_per_second * OVERLAP_SECONDS
+        self._overlap_tail = b""
 
     async def run(self):
         """Huvudloop: buffra audio, transkribera, skriv chunks."""
         self._log(f"Startar Meeting Transcriber")
         self._log(f"Icecast URL: {ICECAST_URL}")
         self._log(f"Output: {CHUNKS_DIR}")
-        self._log(f"Buffer: {BUFFER_SECONDS} sekunder per batch")
+        self._log(f"Buffer: {BUFFER_SECONDS} sekunder per batch, {OVERLAP_SECONDS}s overlap")
 
         await self._start_ffmpeg()
 
@@ -82,11 +95,20 @@ class BatchTranscriber:
 
         try:
             while self.running:
-                # Buffra audio
-                audio_data = await self._buffer_audio()
+                # Buffra ny audio
+                new_audio = await self._buffer_audio()
 
-                if not audio_data:
+                if not new_audio:
                     break
+
+                # Prependa overlap från föregående chunk
+                audio_data = self._overlap_tail + new_audio
+
+                # Spara tail för nästa iteration
+                if self.overlap_bytes > 0:
+                    self._overlap_tail = new_audio[-self.overlap_bytes:]
+                else:
+                    self._overlap_tail = b""
 
                 # Transkribera
                 transcript = await self._transcribe(audio_data)
@@ -172,9 +194,9 @@ class BatchTranscriber:
 
         try:
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=TRANSCRIBE_MODEL,
                 contents=[
-                    "Transkribera detta ljudklipp på svenska. Skriv ENDAST vad som sägs, inga kommentarer.",
+                    MEETING_PROMPT,
                     types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav")
                 ]
             )

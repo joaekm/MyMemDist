@@ -3,6 +3,10 @@
 # --- Transformations-agenten (Ljud/Video) ---
 transcriber:
 
+  # Meeting Transcriber (live stream → text chunks)
+  meeting_transcribe: |
+    Transkribera detta ljudklipp på svenska. Skriv ENDAST vad som sägs, inga kommentarer.
+
   # PASS 1: Rådatat (Ljud -> Text)
   pass1_raw: |
     Din uppgift är att transkribera ljudfilen ordagrant till svenska.

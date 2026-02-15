@@ -1,7 +1,7 @@
 {
-  "version": "0.7.3",
+  "version": "0.7.4",
   "date": "2026-02-15",
-  "description": "Settings-synk vid release och rensat transcriber-UI. **Nytt:** - `tools/sync_settings.py` — synkar strukturella config-ändringar till ~/MyMemory/Settings/ vid release. Nya nycklar adderas med template-defaults, användarvärden bevaras. Dry run som default. - Release-skriptet (`release.sh`) kör Settings-synk automatiskt i steg 5b (efter version-bump, före build) **Förbättringar:** - Transcriber-inställningar i menubar-appen rensat: bara Normalisera ljud (toggle) och Workers (sliders med cap: filer 1-4, chunks 1-20) visas. Tekniska parametrar (silence threshold, chunking, provider) dolda från UI men kvar i config. - MCP-server: fixat docstring för search_graph_nodes **Dokumentation:** - PoC-lärdomar från Drive Forecast Skill dokumenterade i konceptlogg - OBJEKT-98 (Intent Engine) uppdaterat med PoC-resultat - OBJEKT-99 (Config Merge vid Release) tillagt i backlogg ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.3/MyMemory-Installer.dmg",
+  "description": "# Release Notes ## Meeting Transcriber: Overlap & Config Cleanup - **Chunk-overlap:** 5 sekunders audio-overlap mellan chunks förhindrar att ord klipps vid chunk-gränser. Konfigurerbart via `meeting_transcriber.overlap_seconds` (0 stänger av). - **Modell från config:** Meeting transcriber använder nu `ai_engine.model_transcribe` (gemini-2.5-flash) istället för hårdkodad gemini-2.0-flash. - **Prompt externaliserad:** Transkriberingsprompt flyttad till `services_prompts.yaml` enligt projektregler. - **Uppdaterade bundlade app-filer** från v0.7.3-bygget. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.4/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
