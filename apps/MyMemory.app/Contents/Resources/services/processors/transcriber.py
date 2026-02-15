@@ -887,7 +887,7 @@ def step5_enrich_context(
         LOGGER.info(f"Steg 5: Vektor-sökning klar, {len(vector_results)} träffar")
     except TimeoutError:
         LOGGER.warning("Steg 5: Vektor-sökning skipped (lock timeout 10s)")
-    except (OSError, RuntimeError) as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional
+    except (OSError, RuntimeError, ValueError) as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional
         LOGGER.warning(f"Vektor-sökning misslyckades: {e}")
 
     # Bygg rik rådata

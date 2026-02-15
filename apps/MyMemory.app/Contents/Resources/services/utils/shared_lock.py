@@ -137,12 +137,14 @@ def resource_lock(resource: str, exclusive: bool = True, timeout: Optional[float
     finally:
         # Release lock - best effort, log but don't raise
         try:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-            LOGGER.debug(f"Released {lock_type_str} lock on {resource}")
+            if not lock_file.closed:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                LOGGER.debug(f"Released {lock_type_str} lock on {resource}")
         except OSError as e:
             # Lock release failure is logged but not fatal
             LOGGER.warning(f"Could not release lock on {resource}: {e}")
-        lock_file.close()
+        if not lock_file.closed:
+            lock_file.close()
 
 
 def is_locked(resource: str) -> bool:

@@ -1,7 +1,7 @@
 {
-  "version": "0.7.1",
+  "version": "0.7.2",
   "date": "2026-02-15",
-  "description": "# Release Notes Fixar ChromaDB-korruption som orsakade att systemet inte kunde starta. **Buggfix:** - ChromaDB VectorDB blev permanent korrupt (SIGSEGV) p.g.a. multi-process access — ett dokumenterat icke-stött mönster i ChromaDB - Ny `vector_scope()` context manager garanterar att bara en process åt gången har filhandtag till VectorDB - Alla 11 VectorDB-access-punkter konverterade till ephemeral PersistentClient (öppna-använd-stäng) - Transcriber saknade helt resource_lock vid vektor-sökning — tillagt **Tekniskt:** - Embedding-funktionen cachas på modulnivå (ingen prestandaförsämring) - ChromaDB:s SharedSystemClient-cache rensas vid close() för korrekt reopen - Ny regel 17 i CLAUDE.md: all VectorDB-access via vector_scope() ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.1/MyMemory-Installer.dmg",
+  "description": "# Release Notes Fixade bugg där Transcriber-pipelinen kraschade med HARDFAIL vid vektor-sökning. **Buggfix:** - shared_lock: TimeoutError ersattes av ValueError (\"I/O operation on closed file\") vid lock-timeout — finally-blocket försökte flocka en redan stängd fil, och den nya exceptionen överskuggade TimeoutError - transcriber: Lade till ValueError i exception-hanteringen för vektor-sökning (defensivt, optional steg) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
