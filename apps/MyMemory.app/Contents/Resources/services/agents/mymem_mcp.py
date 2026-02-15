@@ -547,14 +547,18 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
     Sök i dokumentens YAML-metadata – hitta filer baserat på taggning.
 
     SÖKER I FRONTMATTER:
-    - source: Var dokumentet kommer ifrån (slack, email, etc.)
-    - tags: Manuella eller automatiska taggar
-    - author: Vem som skapat dokumentet
-    - Andra custom-fält
+    - source_type: Dokumenttyp — "Slack Log", "Email Thread", "Calendar Event", "Transcript", "Document"
+    - document_keywords: AI-extraherade nyckelord (lista)
+    - owner: Dokumentets ägare
+    - context_summary: AI-genererad sammanfattning
+    - relations_summary: AI-genererad sammanfattning av relationer
+    - original_filename: Originalfilnamn (t.ex. "Slack_sälj_sales_2026-01-13_uuid.txt")
 
     EXEMPEL:
-    - Alla Slack-konversationer: keyword="slack", field="source"
-    - Dokument taggade med "upphandling": keyword="upphandling", field="tags"
+    - Alla Slack-loggar: keyword="Slack Log", field="source_type"
+    - Alla mail: keyword="Email Thread", field="source_type"
+    - Dokument om upphandling: keyword="upphandling", field="document_keywords"
+    - Fritextsökning i alla fält: keyword="Besqab" (utan field)
 
     KOMBINERA MED read_document_content för att läsa matchande filer.
     """

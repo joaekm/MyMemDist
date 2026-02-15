@@ -1,7 +1,7 @@
 {
-  "version": "0.7.2",
+  "version": "0.7.3",
   "date": "2026-02-15",
-  "description": "# Release Notes Fixade bugg där Transcriber-pipelinen kraschade med HARDFAIL vid vektor-sökning. **Buggfix:** - shared_lock: TimeoutError ersattes av ValueError (\"I/O operation on closed file\") vid lock-timeout — finally-blocket försökte flocka en redan stängd fil, och den nya exceptionen överskuggade TimeoutError - transcriber: Lade till ValueError i exception-hanteringen för vektor-sökning (defensivt, optional steg) ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.2/MyMemory-Installer.dmg",
+  "description": "Settings-synk vid release och rensat transcriber-UI. **Nytt:** - `tools/sync_settings.py` — synkar strukturella config-ändringar till ~/MyMemory/Settings/ vid release. Nya nycklar adderas med template-defaults, användarvärden bevaras. Dry run som default. - Release-skriptet (`release.sh`) kör Settings-synk automatiskt i steg 5b (efter version-bump, före build) **Förbättringar:** - Transcriber-inställningar i menubar-appen rensat: bara Normalisera ljud (toggle) och Workers (sliders med cap: filer 1-4, chunks 1-20) visas. Tekniska parametrar (silence threshold, chunking, provider) dolda från UI men kvar i config. - MCP-server: fixat docstring för search_graph_nodes **Dokumentation:** - PoC-lärdomar från Drive Forecast Skill dokumenterade i konceptlogg - OBJEKT-98 (Intent Engine) uppdaterat med PoC-resultat - OBJEKT-99 (Config Merge vid Release) tillagt i backlogg ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.3/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
