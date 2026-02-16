@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import signal
+import time
 import yaml
 import json
 import logging
@@ -82,6 +83,20 @@ def _get_lake_path():
 GRAPH_SEARCH_LIMIT = SEARCH_CONFIG.get('graph_limit', 15)
 VECTOR_DISTANCE_STRONG = SEARCH_CONFIG.get('distance_strong', 0.8)
 VECTOR_DISTANCE_WEAK = SEARCH_CONFIG.get('distance_weak', 1.2)
+SLOW_QUERY_THRESHOLD = SEARCH_CONFIG.get('slow_query_threshold_ms', 2000)
+
+
+def _log_tool_time(tool_name: str, t0: float):
+    """Loggar exekveringstid för ett MCP-verktyg.
+
+    Loggar alltid vid INFO-nivå. Varnar om tiden överskrider SLOW_QUERY_THRESHOLD.
+    """
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    if elapsed_ms > SLOW_QUERY_THRESHOLD:
+        logging.warning(f"SLOW {tool_name}: {elapsed_ms:.0f}ms")
+    else:
+        logging.info(f"{tool_name}: {elapsed_ms:.0f}ms")
+
 
 mcp = FastMCP("MyMemory")
 
@@ -217,6 +232,7 @@ def switch_index(backup_path: str = None) -> str:
         _current_paths["lake"] = LAKE_PATH
         _current_paths["vector"] = VECTOR_PATH
         _current_paths["label"] = "default"
+        _lake_cache.invalidate()
         return f"✅ Återställt till DEFAULT index:\n  Graf: {GRAPH_PATH}\n  Lake: {LAKE_PATH}\n  Vektor: {VECTOR_PATH}"
 
     # Expandera och validera sökvägen
@@ -246,6 +262,7 @@ def switch_index(backup_path: str = None) -> str:
     _current_paths["lake"] = lake_path
     _current_paths["vector"] = vector_path
     _current_paths["label"] = os.path.basename(backup_path)
+    _lake_cache.invalidate()
 
     return (
         f"✅ Bytte till BACKUP index ({_current_paths['label']}):\n"
@@ -267,17 +284,103 @@ def get_current_index() -> str:
 # --- HELPERS ---
 
 def _parse_frontmatter(file_path: str) -> Dict:
-    """Läser YAML-frontmatter från en markdown-fil."""
+    """Läser YAML-frontmatter från en markdown-fil.
+
+    Läser rad-för-rad istället för hela filen - viktigt för stora
+    transkript/dokument där frontmatter bara är ~20 rader i toppen.
+    """
     try:
+        lines = []
+        in_frontmatter = False
         with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-            if content.startswith('---'):
-                parts = content.split('---', 2)
-                if len(parts) >= 3:
-                    return yaml.safe_load(parts[1])
-        return {}
+            first_line = f.readline()
+            if not first_line.startswith('---'):
+                return {}
+            in_frontmatter = True
+            for line in f:
+                if line.startswith('---'):
+                    break
+                lines.append(line)
+            else:
+                # Nådde EOF utan avslutande ---
+                return {}
+        if not lines:
+            return {}
+        return yaml.safe_load(''.join(lines)) or {}
     except Exception:
         return {}
+
+
+# --- LAKE METADATA CACHE ---
+# Cachar frontmatter för alla Lake-filer så att search_by_date_range
+# och search_lake_metadata inte behöver läsa varje fil vid varje sökning.
+
+class _LakeMetadataCache:
+    """In-memory cache av Lake-filernas frontmatter.
+
+    Laddar alla filer vid första anrop, sedan inkrementellt:
+    - Nya filer (finns på disk men inte i cache) läggs till
+    - Borttagna filer (finns i cache men inte på disk) rensas
+    Invalideras helt om index byts (switch_index).
+    """
+
+    def __init__(self):
+        self._cache: Dict[str, Dict] = {}  # filename -> frontmatter
+        self._loaded = False
+        self._lake_path: Optional[str] = None
+
+    def invalidate(self):
+        """Rensa hela cachen (t.ex. vid index-byte)."""
+        self._cache.clear()
+        self._loaded = False
+        self._lake_path = None
+
+    def _ensure_loaded(self):
+        """Ladda eller uppdatera cachen inkrementellt."""
+        lake_path = _get_lake_path()
+
+        # Om lake-sökväg ändrats → full reload
+        if self._lake_path != lake_path:
+            self._cache.clear()
+            self._loaded = False
+            self._lake_path = lake_path
+
+        if not os.path.exists(lake_path):
+            return
+
+        current_files = {f for f in os.listdir(lake_path) if f.endswith('.md')}
+        cached_files = set(self._cache.keys())
+
+        if self._loaded:
+            # Inkrementell uppdatering
+            new_files = current_files - cached_files
+            removed_files = cached_files - current_files
+
+            for filename in removed_files:
+                del self._cache[filename]
+
+            for filename in new_files:
+                full_path = os.path.join(lake_path, filename)
+                self._cache[filename] = _parse_frontmatter(full_path)
+        else:
+            # Full load
+            import time as _time
+            t0 = _time.monotonic()
+            for filename in current_files:
+                if filename not in self._cache:
+                    full_path = os.path.join(lake_path, filename)
+                    self._cache[filename] = _parse_frontmatter(full_path)
+            elapsed = _time.monotonic() - t0
+            logging.info(f"Lake metadata cache loaded: {len(self._cache)} files in {elapsed:.2f}s")
+            self._loaded = True
+
+    def get_all(self) -> Dict[str, Dict]:
+        """Returnera {filename: frontmatter} för alla Lake-filer."""
+        self._ensure_loaded()
+        return self._cache
+
+
+_lake_cache = _LakeMetadataCache()
 
 # --- TOOL 1: GRAPH (Structure) ---
 
@@ -300,6 +403,7 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
     TIPS: Börja ofta här för att hitta rätt node_id,
     använd sedan get_entity_summary eller get_neighbor_network för detaljer.
     """
+    _t0 = time.monotonic()
     try:
         # Validera node_type mot schemat om angivet
         if node_type:
@@ -356,6 +460,8 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
         return "Grafsökning misslyckades: Databasen är upptagen (ingestion pågår). Försök igen om en stund."
     except Exception as e:
         return f"Grafsökning misslyckades: {e}"
+    finally:
+        _log_tool_time("search_graph_nodes", _t0)
 
 # --- TOOL 2: VECTOR (Semantics) ---
 
@@ -382,6 +488,7 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
 
     Returnerar: Entiteter rankade efter semantisk likhet med din fråga.
     """
+    _t0 = time.monotonic()
     try:
         with vector_scope(exclusive=False, timeout=10.0) as vs:
             results = vs.search(query_text=query_text, limit=n_results)
@@ -416,6 +523,8 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
         return "⚠️ VEKTOR-FEL: Databasen är upptagen (ingestion pågår). Försök igen om en stund."
     except (OSError, RuntimeError) as e:
         return f"⚠️ VEKTOR-FEL: {str(e)}"
+    finally:
+        _log_tool_time("query_vector_memory", _t0)
 
 # --- TOOL 3: LAKE (Metadata) ---
 
@@ -447,6 +556,7 @@ def search_by_date_range(
         end_date: Slutdatum (YYYY-MM-DD)
         date_field: "content" (default), "ingestion", eller "updated"
     """
+    _t0 = time.monotonic()
     from datetime import datetime
 
     # Mappa date_field till frontmatter-nyckel
@@ -475,12 +585,9 @@ def search_by_date_range(
     skipped_unknown = 0
 
     try:
-        files = [f for f in os.listdir(_get_lake_path()) if f.endswith('.md')]
+        all_metadata = _lake_cache.get_all()
 
-        for filename in files:
-            full_path = os.path.join(_get_lake_path(), filename)
-            frontmatter = _parse_frontmatter(full_path)
-
+        for filename, frontmatter in all_metadata.items():
             timestamp_str = frontmatter.get(timestamp_key)
 
             # Hantera UNKNOWN och None
@@ -539,6 +646,8 @@ def search_by_date_range(
 
     except Exception as e:
         return f"Datumsökning misslyckades: {e}"
+    finally:
+        _log_tool_time("search_by_date_range", _t0)
 
 
 @mcp.tool()
@@ -562,56 +671,55 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
 
     KOMBINERA MED read_document_content för att läsa matchande filer.
     """
+    _t0 = time.monotonic()
+    metadata_max_results = SEARCH_CONFIG.get('lake_metadata_max_results', 10)
     matches = []
-    scanned_count = 0
-    
+
     try:
         if not os.path.exists(_get_lake_path()):
              return f"⚠️ LAKE-FEL: Mappen {LAKE_PATH} finns inte."
 
-        # Hämta alla .md filer
-        files = [f for f in os.listdir(_get_lake_path()) if f.endswith('.md')]
-        
-        for filename in files:
-            scanned_count += 1
-            full_path = os.path.join(_get_lake_path(), filename)
-            frontmatter = _parse_frontmatter(full_path)
-            
+        all_metadata = _lake_cache.get_all()
+        keyword_lower = keyword.lower()
+
+        for filename, frontmatter in all_metadata.items():
             found = False
             hit_details = []
-            
+
             # Söklogik
             for k, v in frontmatter.items():
                 # Om användaren specificerat fält, hoppa över andra
                 if field and k != field:
                     continue
-                
+
                 # Sök i listor (t.ex. mentions, keywords)
                 if isinstance(v, list):
                     for item in v:
-                        if keyword.lower() in str(item).lower():
+                        if keyword_lower in str(item).lower():
                             found = True
                             hit_details.append(f"{k}: ...{item}...")
                 # Sök i strängar (t.ex. summary, title)
                 elif isinstance(v, str):
-                    if keyword.lower() in v.lower():
+                    if keyword_lower in v.lower():
                         found = True
                         hit_details.append(f"{k}: {v[:50]}...")
-            
+
             if found:
                 matches.append(f"📄 {filename} -> [{', '.join(hit_details)}]")
-                if len(matches) >= 10: # Cap results
+                if len(matches) >= metadata_max_results:
                     break
-        
+
         if not matches:
-            return f"LAKE: Inga metadata-träffar för '{keyword}' (Skannade {scanned_count} filer)."
-            
+            return f"LAKE: Inga metadata-träffar för '{keyword}' (Skannade {len(all_metadata)} filer)."
+
         output = [f"=== LAKE METADATA ({len(matches)} träffar) ==="]
         output.extend(matches)
         return "\n".join(output)
 
     except Exception as e:
         return f"Lake-sökning misslyckades: {e}"
+    finally:
+        _log_tool_time("search_lake_metadata", _t0)
 
 
 # --- TOOL 5: RELATIONSHIP EXPLORER ---
@@ -636,6 +744,7 @@ def get_neighbor_network(node_id: str) -> str:
     - "Vilka personer jobbar med projektet?"
     - "Hur hänger dessa entiteter ihop?"
     """
+    _t0 = time.monotonic()
     try:
         with resource_lock("graph", exclusive=False, timeout=10.0):
             graph = GraphService(_get_graph_path(), read_only=True)
@@ -691,6 +800,8 @@ def get_neighbor_network(node_id: str) -> str:
         return "Nätverksutforskning misslyckades: Databasen är upptagen. Försök igen om en stund."
     except Exception as e:
         return f"Nätverksutforskning misslyckades: {e}"
+    finally:
+        _log_tool_time("get_neighbor_network", _t0)
 
 
 # --- TOOL 6: ENTITY SUMMARY ---
@@ -713,6 +824,7 @@ def get_entity_summary(node_id: str) -> str:
 
     Perfekt för att svara på "Berätta allt du vet om X".
     """
+    _t0 = time.monotonic()
     try:
         with resource_lock("graph", exclusive=False, timeout=10.0):
             graph = GraphService(_get_graph_path(), read_only=True)
@@ -764,6 +876,8 @@ def get_entity_summary(node_id: str) -> str:
         return "Summering misslyckades: Databasen är upptagen. Försök igen om en stund."
     except Exception as e:
         return f"Summering misslyckades: {e}"
+    finally:
+        _log_tool_time("get_entity_summary", _t0)
 
 
 # --- TOOL 7: GRAPH STATISTICS ---
@@ -774,6 +888,7 @@ def get_graph_statistics() -> str:
     Hämtar övergripande statistik om kunskapsgrafen.
     Visar antal noder och kanter per typ.
     """
+    _t0 = time.monotonic()
     try:
         with resource_lock("graph", exclusive=False, timeout=10.0):
             graph = GraphService(_get_graph_path(), read_only=True)
@@ -798,6 +913,8 @@ def get_graph_statistics() -> str:
         return "Kunde inte hämta statistik: Databasen är upptagen. Försök igen om en stund."
     except Exception as e:
         return f"Kunde inte hämta statistik: {e}"
+    finally:
+        _log_tool_time("get_graph_statistics", _t0)
 
 
 # --- TOOL 8: RELATIVE DATE PARSER ---
@@ -978,6 +1095,7 @@ def read_document_content(doc_id: str, max_length: int = 8000, section: str = "s
         max_length: Max antal tecken (default 8000)
         section: "smart" (default), "head", "tail", eller "full"
     """
+    _t0 = time.monotonic()
     try:
         # Hitta filen
         filepath = None
@@ -1041,6 +1159,8 @@ def read_document_content(doc_id: str, max_length: int = 8000, section: str = "s
     except Exception as e:
         logging.error(f"read_document_content: Fel för {doc_id}: {e}")
         return f"Dokumentläsning misslyckades: {e}"
+    finally:
+        _log_tool_time("read_document_content", _t0)
 
 
 # --- TOOL 10: INGEST CONTENT ---

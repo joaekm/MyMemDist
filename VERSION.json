@@ -1,7 +1,7 @@
 {
-  "version": "0.7.4",
-  "date": "2026-02-15",
-  "description": "# Release Notes ## Meeting Transcriber: Overlap & Config Cleanup - **Chunk-overlap:** 5 sekunders audio-overlap mellan chunks förhindrar att ord klipps vid chunk-gränser. Konfigurerbart via `meeting_transcriber.overlap_seconds` (0 stänger av). - **Modell från config:** Meeting transcriber använder nu `ai_engine.model_transcribe` (gemini-2.5-flash) istället för hårdkodad gemini-2.0-flash. - **Prompt externaliserad:** Transkriberingsprompt flyttad till `services_prompts.yaml` enligt projektregler. - **Uppdaterade bundlade app-filer** från v0.7.3-bygget. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.4/MyMemory-Installer.dmg",
+  "version": "0.7.5",
+  "date": "2026-02-16",
+  "description": "# Release Notes ## MCP Sökprestanda: Lake Cache & Timing **Prestanda:** - `search_by_date_range` och `search_lake_metadata` använder nu en in-memory metadata-cache istället för att läsa varje Lake-fil vid varje sökning. Första sökningen laddar cachen (~0.8s), efterföljande sökningar tar ~2ms. - `_parse_frontmatter()` läser nu bara YAML-headern rad-för-rad istället för hela filen — stor skillnad för transkript (100-500KB). **Observerbarhet:** - Alla MCP-sökverktyg loggar nu sin exekveringstid till system.log. Sökningar som tar >2s markeras med `SLOW`-varning. Tröskelvärde konfigurerbart via `search.slow_query_threshold_ms`. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.5/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
