@@ -71,7 +71,9 @@ from services.utils.metadata_service import generate_semantic_metadata, get_owne
 from services.utils.parts_parser_service import (
     has_transcript_parts,
     extract_transcript_parts,
-    build_chunk_text
+    build_chunk_text,
+    chunk_document,
+    build_overview_chunk_text
 )
 
 from services.utils.date_service import get_timestamp as date_service_timestamp
@@ -781,10 +783,60 @@ def write_vector(unit_id: str, filename: str, raw_text: str, source_type: str,
                 )
             return
 
-    # Standard document indexing (non-transcript or no parts)
+    # Try document chunking for long non-transcript docs (OBJEKT-100)
+    chunking_cfg = CONFIG.get('processing', {}).get('chunking', {})
+    chunk_size = chunking_cfg.get('chunk_size', 2000)
+    chunk_overlap = chunking_cfg.get('chunk_overlap', 200)
+    chunk_threshold = chunking_cfg.get('chunk_threshold', 4000)
+    overview_content_chars = chunking_cfg.get('overview_content_chars', 500)
+
     ctx_summary = semantic_metadata.get("context_summary", "")
     rel_summary = semantic_metadata.get("relations_summary", "")
 
+    parts = chunk_document(raw_text, source_type, chunk_size, chunk_overlap, chunk_threshold)
+
+    if parts:
+        # Part 0: Overview chunk
+        overview_text = build_overview_chunk_text(
+            filename, ctx_summary, rel_summary, raw_text, overview_content_chars
+        )
+        vector_service.upsert(
+            id=f"{unit_id}__part_0",
+            text=overview_text,
+            metadata={
+                "timestamp": timestamp_ingestion,
+                "filename": filename,
+                "source_type": source_type,
+                "parent_id": unit_id,
+                "part_number": 0,
+                "title": "Overview",
+            }
+        )
+
+        # Parts 1..N: Content chunks
+        for part in parts:
+            chunk_id = f"{unit_id}__part_{part.part_number}"
+            chunk_text = build_chunk_text(part)
+            vector_service.upsert(
+                id=chunk_id,
+                text=chunk_text,
+                metadata={
+                    "timestamp": timestamp_ingestion,
+                    "filename": filename,
+                    "source_type": source_type,
+                    "parent_id": unit_id,
+                    "part_number": part.part_number,
+                    "title": part.title or "",
+                    "time_start": part.time_start or "",
+                    "time_end": part.time_end or "",
+                }
+            )
+
+        total = len(parts) + 1
+        LOGGER.info(f"Vector: {filename} -> {total} chunks ({source_type} chunking)")
+        return
+
+    # Standard document indexing (short docs or fallback)
     vector_text = f"FILENAME: {filename}\nSUMMARY: {ctx_summary}\nRELATIONS: {rel_summary}\n\nCONTENT:\n{raw_text[:8000]}"
 
     vector_service.upsert(

@@ -1,7 +1,7 @@
 {
-  "version": "0.7.5",
-  "date": "2026-02-16",
-  "description": "# Release Notes ## MCP Sökprestanda: Lake Cache & Timing **Prestanda:** - `search_by_date_range` och `search_lake_metadata` använder nu en in-memory metadata-cache istället för att läsa varje Lake-fil vid varje sökning. Första sökningen laddar cachen (~0.8s), efterföljande sökningar tar ~2ms. - `_parse_frontmatter()` läser nu bara YAML-headern rad-för-rad istället för hela filen — stor skillnad för transkript (100-500KB). **Observerbarhet:** - Alla MCP-sökverktyg loggar nu sin exekveringstid till system.log. Sökningar som tar >2s markeras med `SLOW`-varning. Tröskelvärde konfigurerbart via `search.slow_query_threshold_ms`. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.5/MyMemory-Installer.dmg",
+  "version": "0.7.6",
+  "date": "2026-02-19",
+  "description": "# Release Notes ## Chunkning: Alla dokument sökbara (OBJEKT-100) 38% av Lake-dokumenten (248/675) trunkerades vid 8000 tecken under embedding — allt efter var osynligt för sökning. Nu splittas långa dokument i semantiska chunks med source-type-medveten logik: - **Slack-loggar** splittas på meddelande-timestamps, trådsvar hålls med parent - **E-posttrådar** splittas på mailgränser (`On ... wrote:`, `*From:*`) - **Dokument** splittas på markdown-rubriker, paragrafer, med fixed-size fallback - **Kalender och transkript** oförändrade (redan hanterade) Varje chunkat dokument får en overview-chunk (part_0) med filnamn, sammanfattning och relationer, plus content-chunks (part_1..N). Befintlig transcript-chunkning och sökning via MCP fungerar som tidigare. **Resultat:** VectorDB gick från ~3600 till 7516 entries. All text som tidigare trunkerades är nu sökbar. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.7.6/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
