@@ -51,20 +51,27 @@ class AnthropicProvider(BaseProvider):
                 messages=[{"role": "user", "content": prompt}]
             )
 
-            # Extrahera text från response
+            # Extrahera text och token usage från response
+            input_tok = getattr(response.usage, 'input_tokens', 0) if response.usage else 0
+            output_tok = getattr(response.usage, 'output_tokens', 0) if response.usage else 0
+
             if response.content and len(response.content) > 0:
                 text = response.content[0].text
                 return ProviderResponse(
                     text=text,
                     success=True,
-                    model=model
+                    model=model,
+                    input_tokens=input_tok,
+                    output_tokens=output_tok
                 )
             else:
                 return ProviderResponse(
                     text="",
                     success=False,
                     error="Empty response from Claude",
-                    model=model
+                    model=model,
+                    input_tokens=input_tok,
+                    output_tokens=output_tok
                 )
 
         except anthropic.RateLimitError as e:
@@ -117,19 +124,26 @@ class AnthropicProvider(BaseProvider):
                 messages=messages
             )
 
+            input_tok = getattr(response.usage, 'input_tokens', 0) if response.usage else 0
+            output_tok = getattr(response.usage, 'output_tokens', 0) if response.usage else 0
+
             if response.content and len(response.content) > 0:
                 text = response.content[0].text
                 return ProviderResponse(
                     text=text,
                     success=True,
-                    model=model
+                    model=model,
+                    input_tokens=input_tok,
+                    output_tokens=output_tok
                 )
             else:
                 return ProviderResponse(
                     text="",
                     success=False,
                     error="Empty response from Claude",
-                    model=model
+                    model=model,
+                    input_tokens=input_tok,
+                    output_tokens=output_tok
                 )
 
         except anthropic.RateLimitError as e:

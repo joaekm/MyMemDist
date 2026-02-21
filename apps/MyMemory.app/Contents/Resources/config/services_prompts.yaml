@@ -209,7 +209,7 @@ doc_converter:
 
     === DINA INSTRUKTIONER ===
     1. EXTRAHERA NODER:
-    
+
     TILLÅTNA NODTYPER (OCH EGENSKAPER):
     Här är de enda nodtyper du får skapa. Observera särskilt vilka egenskaper och enum-värden som är tillåtna.
     {node_types_context}
@@ -222,6 +222,12 @@ doc_converter:
         * <0.3 (Låg/Brus): Entiteten är generisk eller trivial.
       - "node_context": En fras eller mening som beskriver vad vi lärt oss om entiteten baserat på texten.
       - "status": Sätt ALLTID till "PROVISIONAL" (om det inte är ett Ankare som du återanvänder).
+
+    NAME NORMALIZATION:
+      - Always output person names in given-name-first order: "Suzanne Winting", NOT "Winting Suzanne".
+      - Some source systems (Outlook/Teams/Adda) store names as "Lastname Firstname". Correct this.
+      - Use proper Swedish diacritics when inferable: "Ohlén" not "Ohlen", "Björkengren" not "Bjorkengren".
+      - For compound surnames, preserve the full name: "Mia Friari Söderholm", NOT "Friari Söderholm Mia".
       
     
     2. ANKARE (Prioritet 1):
@@ -232,15 +238,35 @@ doc_converter:
       - Identifiera kopplingar mellan noderna.
       - Skapa ENDAST relationstyper som existerar enligt TILLÅTNA RELATIONSTYPER nedan.
       - Koppla relationer ENDAST på det sätt som explicit framgår som tillåtet (Källa -> Mål).
-      - Om en relationstyp har "properties" med required=true, MÅSTE du inkludera dessa.
-        Exempel: HAS_BUSINESS_RELATION kräver "relation_type" (Kund, Leverantör, Partner, etc.)
-      - VIKTIGT: Abstrakta roller (Kund, Leverantör, Partner) är INTE noder - de är edge properties.
+      - Om en relationstyp har properties, inkludera dem som nycklar i edge-objektet.
+        Properties markerade med (*) är REQUIRED och MÅSTE inkluderas.
+        Valfria properties ska inkluderas om informationen finns i texten.
+      - Abstrakta roller (Kund, Leverantör, Partner) är INTE noder - de är edge properties (relation_type).
     
     TILLÅTNA RELATIONSTYPER (WHITELIST):
     {edge_types_context}
 
     === KONTEXT FRÅN KÄLLAN ===
     {known_entities_context}
+
+    === EDGE PROPERTY RULES ===
+    EVERY edge MUST include all properties that can be inferred from the text.
+
+    BELONGS_TO (Person/Group -> Organization/Group):
+      - job_title: Extract if the person's title or position is mentioned (e.g. "Projektledare", "VD", "Utvecklare")
+      - job_function: Extract if the person's function/department is mentioned (e.g. "Försäljning", "IT")
+
+    HAS_BUSINESS_RELATION (Organization -> Organization):
+      - relation_type (*REQUIRED*): MUST be one of [Kund, Leverantör, Partner, Prospekt, Lead]. NEVER omit this.
+      - relation_status: Set to "Aktiv" or "Inaktiv" if inferable.
+
+    HAS_ROLE (Person -> Roles):
+      - context: Describe in what context the person has this role (e.g. "Lead developer on Project X")
+
+    ATTENDED (Person -> Event):
+      - For Calendar Events: Do NOT create ATTENDED edges. They are handled by deterministic post-processing.
+      - For other source types: Create ATTENDED if the text indicates a person participated in an event.
+      - duration_minutes: Include if meeting duration is mentioned.
 
     RETURNERA JSON (Exakt format):
     {{
@@ -255,12 +281,48 @@ doc_converter:
         }}
       ],
       "edges": [
-        {{ "source": "Namn", "target": "Namn", "type": "RELATIONSTYP", "confidence": 0.9 }}
+        {{ "source": "PersonNamn", "target": "OrgNamn", "type": "BELONGS_TO", "confidence": 0.9, "job_title": "Projektledare", "job_function": "IT" }},
+        {{ "source": "OrgA", "target": "OrgB", "type": "HAS_BUSINESS_RELATION", "confidence": 0.85, "relation_type": "Kund", "relation_status": "Aktiv" }},
+        {{ "source": "PersonNamn", "target": "RollNamn", "type": "HAS_ROLE", "confidence": 0.8, "context": "Lead developer on Project X" }}
       ]
     }}
 
     TEXT ATT ANALYSERA:
     "{text_chunk}"
+
+  # --- Source type-specifika kontextinstruktioner ---
+  # Refereras via prompt_key i graph_schema_template.json source_type_profiles
+
+  source_context_email: |
+    KONTEXT: Detta är en e-posttråd. Avsändare (Från) och mottagare (Till/CC) är viktiga Person-noder.
+    E-postsignaturer innehåller ofta jobbtitlar, telefonnummer och organisationsnamn — extrahera dessa som properties.
+    Använd e-postdomäner för att identifiera organisationer.
+
+  source_context_document: |
+    KONTEXT: Detta är ett formellt dokument (avtal, rapport, offert, specifikation).
+    Fokusera på AFFÄRSENTITETER: personer, organisationer, projekt och deras relationer.
+    IGNORERA tekniska implementationsdetaljer: kodmoduler, ramverk, bibliotek, UI-komponenter, API-endpoints, databastabeller.
+    Om dokumentet innehåller org_number, budget_value eller contract_id — extrahera dem som properties.
+
+  source_context_calendar: |
+    KONTEXT: Detta är en kalenderexport med händelser.
+    Events är de primära entiteterna. Skapa INTE nya Person-noder — deltagare matchas mot befintlig graf.
+    Skapa INTE ATTENDED-edges — dessa hanteras av deterministisk post-processing.
+    Fokusera på att extrahera Event-properties (name, start_time, end_time, location) och eventuella organisationer eller projekt som nämns i titel eller beskrivning.
+
+  source_context_slack: |
+    KONTEXT: Detta är en Slack-konversation. Formatet är ofta 'Namn: Meddelande'.
+    Avsändare är starka Person-kandidater — Slack-profiler har fullständiga namn.
+    Slack-kanaler (#kanalnamn) är INTE entiteter — ignorera dem.
+    Konversationsspråk innehåller sällan formella relationer — var konservativ med edges.
+
+  source_context_transcript: |
+    KONTEXT: Detta är ett mötestranskript. Det är BRUSIGT men värdefullt för KONTEXT om kända entiteter.
+    Din PRIMÄRA uppgift är att identifiera BEFINTLIGA entiteter som nämns i samtalet — personer, organisationer, projekt — så att de kan LÄNKAS till sina grafnoder och berikas med kontext.
+    Skapa INGA nya entiteter. Talare använder ofta bara förnamn, förkortningar eller informella referenser.
+    För varje entitet du identifierar, ge en rik node_context som beskriver vad som sades om dem i samtalet.
+    Fokusera på: beslut som fattades, ämnen som diskuterades, åsikter som uttrycktes, åtgärdspunkter som nämndes.
+    Ignorera: utfyllnadsord, småprat, teknisk jargong som inte handlar om affärsentiteter.
 
   entity_critic: |
     Du är en strikt kvalitetsgranskare för Knowledge Graph-entiteter.

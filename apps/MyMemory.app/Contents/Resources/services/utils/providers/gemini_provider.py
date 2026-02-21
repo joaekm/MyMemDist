@@ -54,18 +54,29 @@ class GeminiProvider(BaseProvider):
                 )]
             )
 
+            # Extrahera token usage från Gemini
+            input_tok = 0
+            output_tok = 0
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                input_tok = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
+                output_tok = getattr(response.usage_metadata, 'candidates_token_count', 0) or 0
+
             if response.text:
                 return ProviderResponse(
                     text=response.text,
                     success=True,
-                    model=model
+                    model=model,
+                    input_tokens=input_tok,
+                    output_tokens=output_tok
                 )
             else:
                 return ProviderResponse(
                     text="",
                     success=False,
                     error="Empty response from Gemini",
-                    model=model
+                    model=model,
+                    input_tokens=input_tok,
+                    output_tokens=output_tok
                 )
 
         except Exception as e:

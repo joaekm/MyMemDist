@@ -280,4 +280,27 @@ class SchemaValidator:
         if t_type not in allowed_targets:
             return False, f"Invalid target type '{t_type}' for relation '{rel_type}'. Allowed: {allowed_targets}"
 
+        # Validera edge properties mot schemat
+        properties_def = edge_def.get("properties", {})
+        for prop_name, prop_def in properties_def.items():
+            # Required check
+            if prop_def.get("required", False) and prop_name not in edge:
+                return False, f"Edge '{rel_type}': missing required property '{prop_name}'"
+
+            # Type and value check
+            if prop_name in edge:
+                value = edge[prop_name]
+
+                # Enum check
+                allowed_values = prop_def.get("values")
+                if allowed_values and value not in allowed_values:
+                    return False, f"Edge '{rel_type}': invalid value for '{prop_name}': '{value}'. Allowed: {allowed_values}"
+
+                # Type check
+                expected_type = prop_def.get("type")
+                if expected_type:
+                    ok, msg = self._validate_type(value, expected_type, f"edge.{prop_name}")
+                    if not ok:
+                        return False, msg
+
         return True, "OK"

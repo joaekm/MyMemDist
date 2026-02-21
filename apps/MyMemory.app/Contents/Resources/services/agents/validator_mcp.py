@@ -110,8 +110,8 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
 
     for attempt in range(max_attempts):
         try:
-            # Använd LLMService.generate_multi_turn() för strukturerad konversation
-            response = llm.generate_multi_turn(messages)
+            # Använd LLMService.generate_multi_turn() med model_fast (Sonnet) för bättre edge properties
+            response = llm.generate_multi_turn(messages, model=llm.models['fast'])
 
             if not response.success:
                 logging.warning(f"LLM generate_multi_turn failed: {response.error}")

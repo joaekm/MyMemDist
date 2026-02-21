@@ -195,6 +195,13 @@ processing:
     - .ogg
     - .mov
 
+  # VectorDB chunking (OBJEKT-100)
+  chunking:
+    chunk_size: 2000             # Mål-storlek per chunk (tecken)
+    chunk_overlap: 200           # Overlap mellan intilliggande chunks
+    chunk_threshold: 4000        # Dokument kortare än detta chunkas inte
+    overview_content_chars: 500  # Tecken råtext i overview-chunk (part_0)
+
 # --- PROCESS-REGLER ---
 processing_policy:
   description: "Styr logiken för skapande och underhåll av grafer."

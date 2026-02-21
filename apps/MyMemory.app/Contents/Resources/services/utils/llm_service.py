@@ -36,7 +36,13 @@ class LLMResponse:
     success: bool
     error: Optional[str] = None
     model: Optional[str] = None
-    tokens_used: Optional[int] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def tokens_used(self) -> int:
+        """Bakåtkompatibilitet."""
+        return self.input_tokens + self.output_tokens
 
 
 class AdaptiveThrottler:
@@ -173,6 +179,10 @@ class LLMService:
         self.retry_attempts = 3
         self.retry_delay = 1.0  # Sekunder mellan retries
 
+        # Token usage tracking — ackumuleras per modell
+        self._token_usage: Dict[str, Dict[str, int]] = {}
+        self._token_lock = threading.Lock()
+
         self._initialized = True
         LOGGER.info(f"LLMService initialized - default: {self.default_provider}, transcription: {self.transcription_provider}")
 
@@ -233,13 +243,17 @@ class LLMService:
         LOGGER.debug(f"Throttlers initialized: {list(self.throttlers.keys())}")
 
     def _load_models(self) -> dict:
-        """Ladda modellnamn från config (används för defaults)."""
+        """Ladda modellnamn från config. HARDFAIL om modeller saknas."""
         models = self.config.get('ai_engine', {}).get('models', {})
+        required = ['model_pro', 'model_fast', 'model_lite', 'model_transcribe']
+        missing = [k for k in required if k not in models]
+        if missing:
+            raise ValueError(f"Missing required model config in ai_engine.models: {missing}")
         return {
-            'pro': models.get('model_pro', 'claude-sonnet-4-5-20250514'),
-            'fast': models.get('model_fast', 'claude-sonnet-4-5-20250514'),
-            'lite': models.get('model_lite', 'claude-haiku-4-5-20250514'),
-            'transcribe': models.get('model_transcribe', 'models/gemini-2.5-flash'),
+            'pro': models['model_pro'],
+            'fast': models['model_fast'],
+            'lite': models['model_lite'],
+            'transcribe': models['model_transcribe'],
         }
 
     def _get_provider(self, provider_name: Optional[str] = None) -> Optional[BaseProvider]:
@@ -270,6 +284,28 @@ class LLMService:
             "too many requests", "rate_limit"
         ])
 
+    def _track_usage(self, model: str, input_tokens: int, output_tokens: int):
+        """Ackumulera token usage per modell. Trådsäker."""
+        if input_tokens == 0 and output_tokens == 0:
+            return
+        with self._token_lock:
+            if model not in self._token_usage:
+                self._token_usage[model] = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+            self._token_usage[model]["input_tokens"] += input_tokens
+            self._token_usage[model]["output_tokens"] += output_tokens
+            self._token_usage[model]["calls"] += 1
+        LOGGER.debug(f"Tokens: {model} +{input_tokens}in/{output_tokens}out")
+
+    def get_token_usage(self) -> Dict[str, Dict[str, int]]:
+        """Hämta ackumulerad token usage per modell sedan start."""
+        with self._token_lock:
+            return {m: dict(v) for m, v in self._token_usage.items()}
+
+    def reset_token_usage(self):
+        """Nollställ token-räknare."""
+        with self._token_lock:
+            self._token_usage.clear()
+
     def generate(
         self,
         prompt: str,
@@ -293,7 +329,7 @@ class LLMService:
 
         # Bestäm modell
         if model is None:
-            model = self.models.get('lite', 'claude-haiku-4-5-20250514')
+            model = self.models['lite']
 
         llm_provider = self._get_provider(provider)
         if not llm_provider:
@@ -308,6 +344,9 @@ class LLMService:
             try:
                 response = llm_provider.generate(prompt=prompt, model=model)
 
+                # Spåra token usage oavsett success
+                self._track_usage(model, response.input_tokens, response.output_tokens)
+
                 # Kontrollera att svaret inte är tomt
                 if not response.success or not response.text or not response.text.strip():
                     LOGGER.warning(f"LLM returnerade tomt svar för modell {model} via {provider}")
@@ -315,7 +354,9 @@ class LLMService:
                         text="",
                         success=False,
                         error=response.error or "LLM returnerade tomt svar",
-                        model=model
+                        model=model,
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens
                     )
 
                 # Rapportera framgång till throttler
@@ -324,7 +365,9 @@ class LLMService:
                 return LLMResponse(
                     text=response.text,
                     success=True,
-                    model=model
+                    model=model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens
                 )
 
             except (ConnectionError, TimeoutError) as e:
@@ -437,20 +480,27 @@ class LLMService:
             try:
                 response = llm_provider.generate_multi_turn(messages=messages, model=model)
 
+                # Spåra token usage oavsett success
+                self._track_usage(model, response.input_tokens, response.output_tokens)
+
                 if not response.success or not response.text or not response.text.strip():
                     LOGGER.warning(f"Multi-turn returnerade tomt svar via {provider}")
                     return LLMResponse(
                         text="",
                         success=False,
                         error=response.error or "LLM returnerade tomt svar",
-                        model=model
+                        model=model,
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens
                     )
 
                 throttler.report_success()
                 return LLMResponse(
                     text=response.text,
                     success=True,
-                    model=model
+                    model=model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens
                 )
 
             except (ConnectionError, TimeoutError) as e:

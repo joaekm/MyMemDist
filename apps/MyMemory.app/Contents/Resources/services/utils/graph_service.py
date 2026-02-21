@@ -203,7 +203,25 @@ class GraphService:
                     raise ValueError(f"Corrupt JSON in existing node {id}") from e
 
                 final_props = current_props.copy()
-                final_props.update(new_props)
+
+                # Append-merge för list-properties (node_context, keywords etc.)
+                # istället för att skriva över med dict.update()
+                for k, v in new_props.items():
+                    if isinstance(v, list) and k in final_props and isinstance(final_props[k], list):
+                        combined = final_props[k] + v
+                        if combined and isinstance(combined[0], dict):
+                            seen = set()
+                            unique_list = []
+                            for item in combined:
+                                item_key = tuple(sorted((ik, str(iv)) for ik, iv in item.items()))
+                                if item_key not in seen:
+                                    seen.add(item_key)
+                                    unique_list.append(item)
+                            final_props[k] = unique_list
+                        else:
+                            final_props[k] = list(set(combined))
+                    else:
+                        final_props[k] = v
 
             else:
                 # Ny nod - Initiera alla required systemfält enligt schema
@@ -366,9 +384,16 @@ class GraphService:
                 [properties_json, node_id]
             )
 
+    @staticmethod
+    def _fold_diacritics(s: str) -> str:
+        """Fold diacritics: Ohlén → ohlen, Björkengren → bjorkengren."""
+        import unicodedata
+        return unicodedata.normalize('NFD', s).encode('ascii', 'ignore').decode().lower()
+
     def find_node_by_name(self, node_type: str, name: str, fuzzy: bool = True) -> str | None:
         """
         Sök efter en nod baserat på namn (exakt eller fuzzy).
+        Använder diakritik-normalisering för att matcha Ohlén/Ohlen etc.
 
         Args:
             node_type: Nodtyp att söka i (Person, Organization, etc.)
@@ -381,6 +406,7 @@ class GraphService:
         import difflib
 
         name_lower = name.strip().lower()
+        name_folded = self._fold_diacritics(name)
 
         with self._lock:
             # Hämta alla noder av typen
@@ -388,8 +414,9 @@ class GraphService:
                 SELECT id, properties FROM nodes WHERE type = ?
             """, [node_type]).fetchall()
 
-        # Bygg namn-index
+        # Bygg namn-index (original lowercase) och folded-index (diakritik-normaliserad)
         name_to_uuid: dict[str, list[str]] = {}
+        folded_to_uuid: dict[str, list[str]] = {}
         for node_id, props_raw in rows:
             props = json.loads(props_raw) if props_raw else {}
             node_name = (props.get('name') or 'Unknown').strip().lower()
@@ -397,6 +424,11 @@ class GraphService:
                 if node_name not in name_to_uuid:
                     name_to_uuid[node_name] = []
                 name_to_uuid[node_name].append(node_id)
+
+                node_folded = self._fold_diacritics(node_name)
+                if node_folded not in folded_to_uuid:
+                    folded_to_uuid[node_folded] = []
+                folded_to_uuid[node_folded].append(node_id)
 
             # Kolla även aliases
             aliases_raw = props.get('aliases', [])
@@ -407,22 +439,35 @@ class GraphService:
                         name_to_uuid[alias_lower] = []
                     name_to_uuid[alias_lower].append(node_id)
 
-        # 1. Exakt matchning
+                    alias_folded = self._fold_diacritics(alias)
+                    if alias_folded not in folded_to_uuid:
+                        folded_to_uuid[alias_folded] = []
+                    folded_to_uuid[alias_folded].append(node_id)
+
+        # 1. Exakt matchning (original)
         if name_lower in name_to_uuid:
             hits = name_to_uuid[name_lower]
             if len(hits) == 1:
                 return hits[0]
-            # Flera träffar - returnera första (eller None om osäkert)
             LOGGER.warning(f"find_node_by_name: Flera träffar för '{name}' ({node_type}): {hits}")
             return hits[0]
 
-        # 2. Fuzzy matchning (om aktiverat)
+        # 2. Exakt matchning (diakritik-normaliserad)
+        if name_folded in folded_to_uuid:
+            hits = folded_to_uuid[name_folded]
+            if len(hits) == 1:
+                LOGGER.info(f"find_node_by_name: Diacritics fold '{name}' -> {hits[0]}")
+                return hits[0]
+            LOGGER.warning(f"find_node_by_name: Flera träffar (folded) för '{name}' ({node_type}): {hits}")
+            return hits[0]
+
+        # 3. Fuzzy matchning (diakritik-normaliserad)
         if fuzzy:
-            candidates = list(name_to_uuid.keys())
-            matches = difflib.get_close_matches(name_lower, candidates, n=1, cutoff=0.85)
+            candidates = list(folded_to_uuid.keys())
+            matches = difflib.get_close_matches(name_folded, candidates, n=1, cutoff=0.85)
             if matches:
                 matched_name = matches[0]
-                hits = name_to_uuid[matched_name]
+                hits = folded_to_uuid[matched_name]
                 LOGGER.info(f"find_node_by_name: Fuzzy '{name}' ~= '{matched_name}' -> {hits[0]}")
                 return hits[0]
 

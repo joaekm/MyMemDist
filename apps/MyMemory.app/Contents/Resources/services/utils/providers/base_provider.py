@@ -14,6 +14,8 @@ class ProviderResponse:
     success: bool
     error: Optional[str] = None
     model: Optional[str] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class BaseProvider(ABC):

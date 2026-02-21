@@ -23,6 +23,7 @@ import logging
 import datetime
 import threading
 import re
+import copy
 import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -146,6 +147,17 @@ RICH_TRANSCRIBER_PATTERN = re.compile(
 PROCESSED_FILES = set()
 PROCESS_LOCK = threading.Lock()
 
+# Last ingestion critic results (for quality reporting)
+_last_critic_approved = []
+_last_critic_rejected = []
+
+# Last ingestion payload after post_process_edges (for write-through verification)
+_last_ingestion_payload = []
+
+# Last raw text and semantic metadata (for quality reporting)
+_last_raw_text = ""
+_last_semantic_metadata = {}
+
 # Dreamer state lock (OBJEKT-76)
 DREAMER_STATE_LOCK = threading.Lock()
 
@@ -226,6 +238,91 @@ def _get_schema_validator():
             LOGGER.error(f"Could not load SchemaValidator: {e}")
             raise
     return _SCHEMA_VALIDATOR
+
+
+# Default source type profile (used if source type not in schema)
+_DEFAULT_SOURCE_PROFILE = {
+    "allow_create": ["Person", "Organization", "Group", "Project", "Event", "Roles"],
+    "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE"],
+    "skip_critic": False,
+    "prompt_key": None
+}
+
+
+def get_source_profile(source_type: str) -> Dict[str, Any]:
+    """
+    Load extraction profile for a source type from graph schema.
+
+    Returns profile dict with keys:
+        allow_create: list of node types allowed to CREATE
+        allow_edges: list of edge types allowed to create
+        skip_critic: bool — skip critic LLM call entirely
+        prompt_key: str — key in services_prompts.yaml for source context instruction
+    """
+    schema = _get_schema_validator().schema
+    profiles = schema.get('source_type_profiles', {})
+    profile = profiles.get(source_type)
+    if not profile:
+        LOGGER.warning(f"No source_type_profile for '{source_type}', using default (full access)")
+        return dict(_DEFAULT_SOURCE_PROFILE)
+    return {
+        "allow_create": profile.get("allow_create", []),
+        "allow_edges": profile.get("allow_edges", []),
+        "skip_critic": profile.get("skip_critic", False),
+        "prompt_key": profile.get("prompt_key")
+    }
+
+
+def apply_source_profile(ingestion_payload: List[Dict], profile: Dict[str, Any]) -> List[Dict]:
+    """
+    Filter ingestion_payload based on source type profile.
+
+    - CREATE mentions: keep only if node type is in allow_create
+    - CREATE_EDGE mentions: keep only if edge type is in allow_edges
+      AND both endpoints survive filtering
+    - LINK mentions: always kept (linking to existing nodes is always allowed)
+
+    Returns filtered payload.
+    """
+    allow_create = set(profile.get("allow_create", []))
+    allow_edges = set(profile.get("allow_edges", []))
+
+    # Pass 1: filter nodes
+    filtered = []
+    removed_uuids = set()
+    for m in ingestion_payload:
+        action = m.get("action")
+        if action == "CREATE":
+            node_type = m.get("type")
+            if node_type not in allow_create:
+                removed_uuids.add(m.get("target_uuid"))
+                LOGGER.debug(f"Profile blocked CREATE: {m.get('label')} ({node_type}) — not in allow_create")
+                continue
+        if action == "CREATE_EDGE":
+            continue  # Handle edges in pass 2
+        filtered.append(m)
+
+    # Pass 2: filter edges
+    for m in ingestion_payload:
+        if m.get("action") != "CREATE_EDGE":
+            continue
+        edge_type = m.get("edge_type")
+        if edge_type not in allow_edges:
+            LOGGER.debug(f"Profile blocked edge: {edge_type} — not in allow_edges")
+            continue
+        if m.get("source_uuid") in removed_uuids or m.get("target_uuid") in removed_uuids:
+            LOGGER.debug(f"Profile dropped edge: {edge_type} — endpoint removed by profile")
+            continue
+        filtered.append(m)
+
+    blocked_nodes = len([m for m in ingestion_payload if m.get("action") == "CREATE"]) - \
+                    len([m for m in filtered if m.get("action") == "CREATE"])
+    blocked_edges = len([m for m in ingestion_payload if m.get("action") == "CREATE_EDGE"]) - \
+                    len([m for m in filtered if m.get("action") == "CREATE_EDGE"])
+    if blocked_nodes > 0 or blocked_edges > 0:
+        LOGGER.info(f"Source profile filtered: {blocked_nodes} CREATE nodes, {blocked_edges} edges removed")
+
+    return filtered
 
 
 # MCP Server Configuration
@@ -391,7 +488,25 @@ def extract_entities_mcp(text: str, source_hint: str = "") -> Dict[str, Any]:
         desc = v.get('description', '')
         sources = set(v.get('source_type', []))
         targets = set(v.get('target_type', []))
-        whitelist.append(f"- {k}: [{', '.join(sources)}] -> [{', '.join(targets)}]  // {desc}")
+        line = f"- {k}: [{', '.join(sources)}] -> [{', '.join(targets)}]  // {desc}"
+
+        # Include edge properties in context (skip confidence — always present)
+        edge_props = v.get('properties', {})
+        prop_info = []
+        for prop_name, prop_def in edge_props.items():
+            if prop_name == 'confidence':
+                continue
+            req_marker = " (*)" if prop_def.get('required', False) else ""
+            p_type = prop_def.get('type', 'string')
+            vals = prop_def.get('values')
+            if vals:
+                prop_info.append(f"{prop_name}{req_marker} ({p_type}: {vals})")
+            else:
+                prop_info.append(f"{prop_name}{req_marker} ({p_type})")
+        if prop_info:
+            line += f" | Properties: {', '.join(prop_info)}"
+
+        whitelist.append(line)
 
         forbidden_sources = valid_graph_nodes - sources
         forbidden_targets = valid_graph_nodes - targets
@@ -406,11 +521,18 @@ def extract_entities_mcp(text: str, source_hint: str = "") -> Dict[str, Any]:
         f"FORBIDDEN CONNECTIONS (BLACKLIST - AUTO-GENERATED):\n" + "\n".join(blacklist)
     )
 
+    # Load source context instruction from profile → prompts
     source_context_instruction = ""
-    if "Slack" in source_hint:
-        source_context_instruction = "CONTEXT: This is a Slack chat. Format is often 'Name: Message'. Treat senders as strong Person candidates."
-    elif "Mail" in source_hint:
-        source_context_instruction = "CONTEXT: This is an email. Sender (From) and recipients (To) are important Person nodes."
+    profile = get_source_profile(source_hint) if source_hint else {}
+    prompt_key = profile.get("prompt_key")
+    if prompt_key:
+        source_context_instruction = get_prompt('doc_converter', prompt_key) or ""
+    if not source_context_instruction:
+        # Fallback for unknown source types
+        if "Slack" in source_hint:
+            source_context_instruction = "CONTEXT: This is a Slack chat. Format is often 'Name: Message'. Treat senders as strong Person candidates."
+        elif "Mail" in source_hint:
+            source_context_instruction = "CONTEXT: This is an email. Sender (From) and recipients (To) are important Person nodes."
 
     final_prompt = raw_prompt.format(
         text_chunk=text[:25000],
@@ -429,31 +551,26 @@ def extract_entities_mcp(text: str, source_hint: str = "") -> Dict[str, Any]:
         raise RuntimeError(f"MCP Entity Extraction failed: {e}") from e
 
 
-def critic_filter_entities(nodes: List[Dict]) -> List[Dict]:
+def _call_critic_llm(entities_for_review: List[Dict]) -> Dict:
     """
-    LLM-baserad filtrering av extraherade entiteter.
-    Returnerar endast godkända noder.
+    Skicka entiteter till critic-LLM för kvalitetsfiltrering.
 
-    Fallback: Returnerar alla noder om prompt saknas eller LLM misslyckas.
+    Args:
+        entities_for_review: [{"name": "...", "type": "...", "confidence": 0.x}]
+
+    Returns:
+        {"approved": [{"name", "type", "reason"}], "rejected": [{"name", "type", "reason"}]}
+        Vid fel: {"approved": entities_for_review, "rejected": []}
     """
     import json
 
-    if not nodes:
-        return []
-
-    # Förbered för granskning
-    entities_for_review = [
-        {"name": n.get("name"), "type": n.get("type"), "confidence": n.get("confidence", 0.5)}
-        for n in nodes if n.get("name") and n.get("type")
-    ]
-
     if not entities_for_review:
-        return []
+        return {"approved": [], "rejected": []}
 
     prompt_template = get_prompt('doc_converter', 'entity_critic')
     if not prompt_template:
         LOGGER.warning("entity_critic prompt saknas - hoppar över Critic-steget")
-        return nodes  # Fallback: returnera alla
+        return {"approved": entities_for_review, "rejected": []}
 
     # Bygg typdefinitioner från schemat (dynamisk injektion)
     validator = _get_schema_validator()
@@ -477,9 +594,31 @@ def critic_filter_entities(nodes: List[Dict]) -> List[Dict]:
 
     if not response.success:
         LOGGER.error(f"Critic LLM failed: {response.error}")
-        return nodes  # Fallback vid fel
+        return {"approved": entities_for_review, "rejected": []}
 
     result = parse_llm_json(response.text)
+    return result
+
+
+def critic_filter_entities(nodes: List[Dict]) -> List[Dict]:
+    """
+    LLM-baserad filtrering av extraherade entiteter (pre-resolve).
+    Returnerar endast godkända noder.
+
+    Fallback: Returnerar alla noder om prompt saknas eller LLM misslyckas.
+    """
+    if not nodes:
+        return [], [], []
+
+    entities_for_review = [
+        {"name": n.get("name"), "type": n.get("type"), "confidence": n.get("confidence", 0.5)}
+        for n in nodes if n.get("name") and n.get("type")
+    ]
+
+    if not entities_for_review:
+        return [], [], []
+
+    result = _call_critic_llm(entities_for_review)
     approved_names = {e["name"] for e in result.get("approved", [])}
 
     # Logga statistik
@@ -490,7 +629,320 @@ def critic_filter_entities(nodes: List[Dict]) -> List[Dict]:
             LOGGER.debug(f"  Avvisad: {rej.get('name')} ({rej.get('type')}) - {rej.get('reason', 'N/A')}")
 
     # Filtrera original-noder baserat på godkända namn
-    return [n for n in nodes if n.get("name") in approved_names]
+    approved_nodes = [n for n in nodes if n.get("name") in approved_names]
+    return approved_nodes, result.get("approved", []), result.get("rejected", [])
+
+
+def critic_filter_resolved(ingestion_payload: List[Dict]) -> List[Dict]:
+    """
+    LLM-baserad kvalitetsfiltrering av resolvade entiteter.
+
+    LINK-entiteter auto-godkänns (grafen bekräftar existens).
+    CREATE-entiteter skickas till critic-LLM för filtrering.
+    Edges som refererar avvisade CREATE-noder tas bort.
+
+    Populerar _last_critic_approved och _last_critic_rejected globals.
+
+    Returns:
+        Filtrerad ingestion_payload.
+    """
+    global _last_critic_approved, _last_critic_rejected
+
+    if not ingestion_payload:
+        _last_critic_approved = []
+        _last_critic_rejected = []
+        return []
+
+    # Separera per action-typ
+    link_mentions = [m for m in ingestion_payload if m.get("action") == "LINK"]
+    create_mentions = [m for m in ingestion_payload if m.get("action") == "CREATE"]
+    edge_mentions = [m for m in ingestion_payload if m.get("action") == "CREATE_EDGE"]
+
+    # Auto-godkänn alla LINK-mentions
+    link_approved = [
+        {"name": m["label"], "type": m["type"], "reason": "LINK (auto-approved)"}
+        for m in link_mentions
+    ]
+
+    if not create_mentions:
+        # Inget att granska — alla är LINK
+        _last_critic_approved = link_approved
+        _last_critic_rejected = []
+        LOGGER.info(f"Critic: {len(link_mentions)} LINK (auto), 0 CREATE")
+        return link_mentions + edge_mentions
+
+    # Skicka CREATE-mentions till critic-LLM
+    entities_for_review = [
+        {"name": m["label"], "type": m["type"], "confidence": m.get("confidence", 0.5)}
+        for m in create_mentions
+    ]
+
+    result = _call_critic_llm(entities_for_review)
+    approved_names = {e["name"] for e in result.get("approved", [])}
+
+    # Filtrera CREATE-mentions
+    approved_creates = [m for m in create_mentions if m["label"] in approved_names]
+    rejected_creates = [m for m in create_mentions if m["label"] not in approved_names]
+
+    # Samla UUID:n från avvisade noder för edge-cleanup
+    rejected_uuids = {m["target_uuid"] for m in rejected_creates}
+
+    # Filtrera bort edges som refererar avvisade noder
+    if rejected_uuids:
+        filtered_edges = [
+            e for e in edge_mentions
+            if e.get("source_uuid") not in rejected_uuids
+            and e.get("target_uuid") not in rejected_uuids
+        ]
+        edges_removed = len(edge_mentions) - len(filtered_edges)
+        if edges_removed > 0:
+            LOGGER.info(f"Critic: Removed {edges_removed} edges referencing rejected nodes")
+    else:
+        filtered_edges = edge_mentions
+
+    # Populera globals för testkompatibilitet (test_ingestion_cycle.py)
+    _last_critic_approved = link_approved + result.get("approved", [])
+    _last_critic_rejected = result.get("rejected", [])
+
+    # Logga statistik
+    LOGGER.info(
+        f"Critic: {len(link_mentions)} LINK (auto), "
+        f"{len(approved_creates)} CREATE approved, "
+        f"{len(rejected_creates)} CREATE rejected"
+    )
+    for rej in result.get("rejected", [])[:5]:
+        LOGGER.debug(f"  Avvisad: {rej.get('name')} ({rej.get('type')}) - {rej.get('reason', 'N/A')}")
+
+    return link_mentions + approved_creates + filtered_edges
+
+
+# --- Post-processing: deterministic edge properties ---
+
+# Calendar event block: ## HH:MM-HH:MM: Title
+_CALENDAR_EVENT_RE = re.compile(r'^## (\d{2}:\d{2})-(\d{2}:\d{2}): (.+)$', re.MULTILINE)
+
+# Calendar all-day event: ## Heldag: Title (no ATTENDED)
+_CALENDAR_ALLDAY_RE = re.compile(r'^## Heldag: ', re.MULTILINE)
+
+
+def _parse_calendar_events(raw_text: str) -> List[Dict]:
+    """
+    Parse calendar text into structured event blocks.
+
+    Returns list of:
+    {
+        "title": str,
+        "start": "HH:MM",
+        "end": "HH:MM",
+        "duration_minutes": int,
+        "accepted_attendees": [str, ...]  # lowercase email-prefix names
+    }
+    """
+    events = []
+
+    # Split text into sections by ## headers
+    sections = re.split(r'^(?=## )', raw_text, flags=re.MULTILINE)
+
+    for section in sections:
+        match = _CALENDAR_EVENT_RE.match(section)
+        if not match:
+            continue
+
+        start_str, end_str, title = match.group(1), match.group(2), match.group(3).strip()
+
+        # Skip all-day sentinel (00:00-00:00)
+        if start_str == "00:00" and end_str == "00:00":
+            continue
+
+        # Calculate duration
+        try:
+            start_dt = datetime.datetime.strptime(start_str, "%H:%M")
+            end_dt = datetime.datetime.strptime(end_str, "%H:%M")
+            delta = (end_dt - start_dt).total_seconds() / 60
+            if delta < 0:
+                delta += 1440  # Midnight crossing
+            duration_minutes = int(delta)
+        except ValueError as e:
+            LOGGER.warning(f"Post-process: Could not parse calendar time '{start_str}-{end_str}': {e}")
+            duration_minutes = 0
+
+        # Parse accepted attendees from **Deltagare:** line
+        accepted = []
+        att_match = re.search(r'\*\*Deltagare:\*\*\s*(.+?)(?:\n\n|\n\*\*|\n##|\Z)', section, re.DOTALL)
+        if att_match:
+            att_text = att_match.group(1)
+            # Each attendee: "name (status)" separated by commas
+            for part in att_text.split(','):
+                part = part.strip()
+                if '(accepterat)' in part:
+                    name = part.replace('(accepterat)', '').strip()
+                    if name:
+                        accepted.append(name.lower())
+
+        events.append({
+            "title": title,
+            "start": start_str,
+            "end": end_str,
+            "duration_minutes": duration_minutes,
+            "accepted_attendees": accepted,
+        })
+
+    return events
+
+
+def _normalize_name_for_match(name: str) -> str:
+    """Normalize a name for fuzzy calendar matching.
+
+    Converts "Joakim Ekman" -> "joakim.ekman" style and
+    "joakim.ekman" stays as-is, for matching against calendar
+    attendee names (email-prefix format).
+    """
+    name = name.lower().strip()
+    # If already dotted email-prefix format
+    if '.' in name and ' ' not in name:
+        return name
+    # Convert "Förnamn Efternamn" -> "förnamn.efternamn"
+    return name.replace(' ', '.')
+
+
+def _build_calendar_attended(ingestion_payload: List[Dict], raw_text: str) -> None:
+    """
+    Build ATTENDED edges deterministically for Calendar Events.
+
+    1. Parse calendar event blocks from raw_text
+    2. Match accepted attendees to Person nodes in payload
+    3. Match event titles to Event nodes in payload
+    4. Remove any LLM-generated ATTENDED edges
+    5. Create deterministic ATTENDED edges with duration_minutes
+    """
+    cal_events = _parse_calendar_events(raw_text)
+    if not cal_events:
+        return
+
+    # Build lookups from ingestion_payload
+    # Person: normalized_name -> {uuid, label, type}
+    person_lookup = {}
+    for m in ingestion_payload:
+        if m.get("action") in ("CREATE", "LINK") and m.get("type") == "Person":
+            norm = _normalize_name_for_match(m["label"])
+            person_lookup[norm] = m
+
+    # Event: title (lowered) -> {uuid, label, type}
+    event_lookup = {}
+    for m in ingestion_payload:
+        if m.get("action") in ("CREATE", "LINK") and m.get("type") == "Event":
+            event_lookup[m["label"].lower().strip()] = m
+
+    # Remove all LLM-generated ATTENDED edges (we replace them)
+    original_len = len(ingestion_payload)
+    ingestion_payload[:] = [
+        m for m in ingestion_payload
+        if not (m.get("action") == "CREATE_EDGE" and m.get("edge_type") == "ATTENDED")
+    ]
+    removed = original_len - len(ingestion_payload)
+    if removed > 0:
+        LOGGER.info(f"Post-process: Removed {removed} LLM-generated ATTENDED edges (replaced by deterministic)")
+
+    # Create deterministic ATTENDED edges
+    created = 0
+    for cal_event in cal_events:
+        # Find matching Event node
+        event_title_lower = cal_event["title"].lower().strip()
+        event_mention = event_lookup.get(event_title_lower)
+        if not event_mention:
+            # Try partial match (event node name might be shortened)
+            for key, em in event_lookup.items():
+                if key in event_title_lower or event_title_lower in key:
+                    event_mention = em
+                    break
+
+        if not event_mention:
+            LOGGER.debug(f"Post-process: No Event node for '{cal_event['title']}', skipping ATTENDED")
+            continue
+
+        event_uuid = event_mention["target_uuid"]
+
+        for attendee_name in cal_event["accepted_attendees"]:
+            # Find matching Person node
+            person_mention = person_lookup.get(attendee_name)
+            if not person_mention:
+                # Try matching parts (e.g. "cenk.bisgen" vs "cenk bisgen" in payload)
+                for pkey, pm in person_lookup.items():
+                    if attendee_name.replace('.', ' ') == pkey.replace('.', ' '):
+                        person_mention = pm
+                        break
+
+            if not person_mention:
+                LOGGER.debug(f"Post-process: No Person node for attendee '{attendee_name}', skipping ATTENDED")
+                continue
+
+            person_uuid = person_mention["target_uuid"]
+            person_label = person_mention.get("canonical_name", person_mention["label"])
+            event_label = event_mention.get("canonical_name", event_mention["label"])
+
+            edge_props = {}
+            if cal_event["duration_minutes"] > 0:
+                edge_props["duration_minutes"] = cal_event["duration_minutes"]
+
+            attended_edge = {
+                "action": "CREATE_EDGE",
+                "source_uuid": person_uuid,
+                "target_uuid": event_uuid,
+                "edge_type": "ATTENDED",
+                "confidence": 1.0,
+                "source_text": f"{person_label} -> {event_label}",
+                "source_name": person_label,
+                "source_type": "Person",
+                "target_name": event_label,
+                "target_type": "Event",
+            }
+            if edge_props:
+                attended_edge["edge_properties"] = edge_props
+
+            ingestion_payload.append(attended_edge)
+            created += 1
+
+    if created > 0:
+        LOGGER.info(f"Post-process: Created {created} deterministic ATTENDED edges with duration_minutes")
+
+
+def _validate_required_edge_properties(ingestion_payload: List[Dict]) -> None:
+    """
+    Validate REQUIRED edge properties. HARDFAIL (log ERROR) if missing.
+    Does NOT set defaults — the edge is written as-is and the gap is visible in tests.
+    """
+    for m in ingestion_payload:
+        if m.get("action") != "CREATE_EDGE":
+            continue
+
+        edge_type = m.get("edge_type")
+        edge_props = m.get("edge_properties", {})
+
+        if edge_type == "HAS_BUSINESS_RELATION" and not edge_props.get("relation_type"):
+            source_name = m.get("source_name", "?")
+            target_name = m.get("target_name", "?")
+            LOGGER.error(
+                f"Post-process: HAS_BUSINESS_RELATION missing REQUIRED relation_type "
+                f"({source_name} -> {target_name}). LLM failed to extract — no fallback applied."
+            )
+
+
+def post_process_edges(ingestion_payload: List[Dict], source_type: str, raw_text: str) -> List[Dict]:
+    """
+    Post-process edges with deterministic property computation.
+
+    For Calendar Events: builds ATTENDED edges deterministically from
+    parsed attendee data (only accepted attendees get ATTENDED).
+
+    For all source types: validates REQUIRED edge properties and logs
+    errors if missing (no fallback — HARDFAIL principle).
+    """
+    if source_type == "Calendar Event":
+        _build_calendar_attended(ingestion_payload, raw_text)
+
+    _validate_required_edge_properties(ingestion_payload)
+
+    return ingestion_payload
 
 
 def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, filename: str) -> List[Dict]:
@@ -502,6 +954,11 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
     - LINK: canonical_name from graph (the authoritative name)
     - CREATE: canonical_name = input name
     """
+    # Load schema to identify type-specific properties
+    validator = _get_schema_validator()
+    schema = validator.schema
+    base_prop_names = set(schema.get('base_properties', {}).get('properties', {}).keys())
+
     mentions = []
     name_to_uuid = {}
     name_to_canonical = {}  # Maps input name -> canonical name
@@ -563,7 +1020,14 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
         name_to_canonical[name] = canonical_name
         name_to_type[name] = type_str
 
-        mentions.append({
+        # Extract type-specific properties from LLM output
+        type_specific_props = {}
+        node_type_def = schema.get('nodes', {}).get(type_str, {})
+        allowed_type_props = set(node_type_def.get('properties', {}).keys()) - base_prop_names
+        for prop_name in allowed_type_props:
+            if prop_name in node and prop_name != 'name':
+                type_specific_props[prop_name] = node[prop_name]
+        mention = {
             "action": action,
             "target_uuid": target_uuid,
             "type": type_str,
@@ -571,7 +1035,11 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
             "canonical_name": canonical_name,
             "node_context_text": node_context_text,
             "confidence": confidence
-        })
+        }
+        if type_specific_props:
+            mention["properties"] = type_specific_props
+
+        mentions.append(mention)
 
     if graph is not None:
         graph.close()
@@ -593,7 +1061,15 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
             source_type = name_to_type.get(source_name, "?")
             target_type = name_to_type.get(target_name, "?")
 
-            mentions.append({
+            # Extract type-specific edge properties from LLM output
+            edge_props = {}
+            edge_type_def = schema.get('edges', {}).get(rel_type, {})
+            allowed_edge_props = set(edge_type_def.get('properties', {}).keys()) - {'confidence'}
+            for prop_name in allowed_edge_props:
+                if prop_name in edge:
+                    edge_props[prop_name] = edge[prop_name]
+
+            edge_mention = {
                 "action": "CREATE_EDGE",
                 "source_uuid": source_uuid,
                 "target_uuid": target_uuid,
@@ -604,7 +1080,14 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
                 "source_type": source_type,
                 "target_name": target_canonical,
                 "target_type": target_type
-            })
+            }
+            if edge_props:
+                edge_mention["edge_properties"] = edge_props
+
+            mentions.append(edge_mention)
+        else:
+            missing = [x for x in [source_name, target_name] if x not in name_to_uuid]
+            LOGGER.debug(f"Dropped edge ({rel_type}): endpoint(s) {missing} not resolved")
 
     return mentions
 
@@ -614,6 +1097,11 @@ def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
     """Write document to Lake with frontmatter."""
     base_name = os.path.splitext(filename)[0]
     lake_file = os.path.join(LAKE_STORE, f"{base_name}.md")
+
+    # HARDFAIL if semantic metadata is incomplete — Lake is the commit receipt
+    ai_model = semantic_metadata.get("ai_model")
+    if not ai_model:
+        raise RuntimeError(f"HARDFAIL: write_lake({filename}) — semantic_metadata missing 'ai_model'. metadata_service likely failed.")
 
     timestamp_content = extract_content_date(raw_text, filename)
     default_access_level = CONFIG.get('security', {}).get('default_access_level', 5)
@@ -631,7 +1119,7 @@ def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
         "context_summary": semantic_metadata.get("context_summary", ""),
         "relations_summary": semantic_metadata.get("relations_summary", ""),
         "document_keywords": semantic_metadata.get("document_keywords", []),
-        "ai_model": semantic_metadata.get("ai_model", "unknown"),
+        "ai_model": ai_model,
     }
 
     fm_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
@@ -669,11 +1157,14 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_ser
         if action in ["CREATE", "LINK"]:
             target_uuid = entity.get("target_uuid")
             node_type = entity.get("type")
-            label = entity.get("label", "")
+            label = entity.get("label")
             confidence = entity.get("confidence", 0.5)
             node_context_text = entity.get("node_context_text", "")
 
             if not target_uuid or not node_type:
+                continue
+            if not label:
+                LOGGER.error(f"HARDFAIL: Entity missing label: {entity}")
                 continue
 
             node_context_entry = {
@@ -688,6 +1179,11 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_ser
                 "node_context": [node_context_entry],
                 "source_system": "IngestionEngine"
             }
+
+            # Add type-specific properties from LLM extraction
+            type_props = entity.get("properties", {})
+            if type_props:
+                props.update(type_props)
 
             graph.upsert_node(
                 id=target_uuid,
@@ -719,11 +1215,28 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_ser
             edge_conf = entity.get("confidence", 0.5)
 
             if source_uuid and target_uuid and edge_type:
+                edge_props = {"confidence": edge_conf}
+                extra_edge_props = entity.get("edge_properties", {})
+                if extra_edge_props:
+                    edge_props.update(extra_edge_props)
+
+                # Quality gate: drop edges with no semantic properties (only confidence)
+                # ATTENDED undantagen — deltagarkopplingen är värdefull utan duration_minutes
+                semantic_keys = set(edge_props.keys()) - {"confidence"}
+                if not semantic_keys and edge_type != "ATTENDED":
+                    source_name = entity.get("source_name", "?")
+                    target_name = entity.get("target_name", "?")
+                    LOGGER.warning(
+                        f"Edge dropped (no semantic properties): "
+                        f"{source_name} -[{edge_type}]-> {target_name}"
+                    )
+                    continue
+
                 graph.upsert_edge(
                     source=source_uuid,
                     target=target_uuid,
                     edge_type=edge_type,
-                    properties={"confidence": edge_conf}
+                    properties=edge_props
                 )
                 edges_written += 1
 
@@ -987,6 +1500,10 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
 
     def _do_process(vector_service=None):
         """Inner processing logic."""
+        # Reset token counter for per-document tracking
+        if _LLM_SERVICE:
+            _LLM_SERVICE.reset_token_usage()
+
         # 0. Clean stale data before re-ingestion
         if is_reingest:
             terminal_status("ingestion", filename, "re-ingest cleanup")
@@ -1012,17 +1529,43 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
         elif "transcripts" in filepath.lower():
             source_type = "Transcript"
 
+        # 2b. Load source type extraction profile from schema
+        profile = get_source_profile(source_type)
+        LOGGER.info(f"Source profile: {source_type} — create={profile['allow_create']}, edges={profile['allow_edges']}, skip_critic={profile['skip_critic']}")
+
         # 3. Extract entities via MCP
         entity_data = extract_entities_mcp(raw_text, source_hint=source_type)
         nodes = entity_data.get('nodes', [])
         edges = entity_data.get('edges', [])
 
-        # 4. Critic-filtrering (LLM filtrerar brus)
-        filtered_nodes = critic_filter_entities(nodes)
-        LOGGER.info(f"Critic: {len(nodes)} → {len(filtered_nodes)} noder")
+        # 4. Resolve ALLA noder mot graf FÖRST (edges behöver alla för UUID-lookup)
+        ingestion_payload = resolve_entities(nodes, edges, source_type, filename)
 
-        # 5. Resolve entities against graph (returnerar canonical_name)
-        ingestion_payload = resolve_entities(filtered_nodes, edges, source_type, filename)
+        # 4b. Apply source type profile (filter CREATE/edges based on profile)
+        ingestion_payload = apply_source_profile(ingestion_payload, profile)
+
+        # 5. Critic EFTER resolve (bara CREATE, LINK auto-godkänd)
+        if profile.get("skip_critic"):
+            # Profile says skip critic — all surviving entries are accepted
+            global _last_critic_approved, _last_critic_rejected
+            link_count = len([m for m in ingestion_payload if m.get("action") == "LINK"])
+            create_count = len([m for m in ingestion_payload if m.get("action") == "CREATE"])
+            _last_critic_approved = [
+                {"name": m["label"], "type": m["type"], "reason": f"{m.get('action')} (critic skipped by profile)"}
+                for m in ingestion_payload if m.get("action") in ("LINK", "CREATE")
+            ]
+            _last_critic_rejected = []
+            LOGGER.info(f"Critic: skipped by profile ({link_count} LINK, {create_count} CREATE)")
+        else:
+            ingestion_payload = critic_filter_resolved(ingestion_payload)
+
+        # 5b. Post-processing: deterministiska edge properties
+        ingestion_payload = post_process_edges(ingestion_payload, source_type, raw_text)
+
+        # Expose payload for test write-through verification
+        global _last_ingestion_payload, _last_raw_text
+        _last_ingestion_payload = copy.deepcopy(ingestion_payload)
+        _last_raw_text = raw_text
 
         # 6. Generate semantic metadata MED graf-berikning (via metadata_service)
         semantic_metadata = generate_semantic_metadata(
@@ -1031,6 +1574,9 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
             current_meta=None,  # Nygenering
             filename=filename
         )
+
+        global _last_semantic_metadata
+        _last_semantic_metadata = copy.deepcopy(semantic_metadata) if semantic_metadata else {}
 
         # 7. Write to Graph
         nodes_written, edges_written = write_graph(unit_id, filename, ingestion_payload, vector_service=vector_service)
@@ -1045,8 +1591,14 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
         # 9. Write to Lake (SIST - fungerar som "commit" att allt lyckades)
         write_lake(unit_id, filename, raw_text, source_type, semantic_metadata, ingestion_payload)
 
-        # Done - log and terminal
+        # Done - log token usage and terminal
         action = "Re-ingested" if is_reingest else "Completed"
+        token_usage = _get_llm_service().get_token_usage() if _LLM_SERVICE else {}
+        if token_usage:
+            usage_parts = []
+            for m, u in token_usage.items():
+                usage_parts.append(f"{m}: {u['input_tokens']}in/{u['output_tokens']}out ({u['calls']} calls)")
+            LOGGER.info(f"Token usage for {filename}: {', '.join(usage_parts)}")
         LOGGER.info(f"{action}: {filename}")
         detail = f"{nodes_written} noder, {edges_written} relationer"
         if is_reingest:

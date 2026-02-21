@@ -1,9 +1,10 @@
 {
 "meta": {
-    "version": "2.3",
+    "version": "2.4",
     "description": "Strikt schema för MyMemory med stöd för Self-Healing Graph (Provisional/Verified) samt Declarative Healing.",
     "strict_mode": true,
     "changelog": {
+      "2.4": "source_type_profiles: extraktionsprofil per source type (allow_create, allow_edges, skip_critic, prompt_key). Transcript = LINK-only.",
       "2.3": "Borttagen Business_relation nodtyp. HAS_BUSINESS_RELATION går nu direkt Organization → Organization med relation_type som edge property."
     }
   },
@@ -345,6 +346,44 @@
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
         "context": { "required": false, "type": "string" }
       }
+    }
+  },
+  "source_type_profiles": {
+    "description": "Extraktionsprofil per source type. Styr vad pipelinen får göra i grafen för varje typ av källa.",
+    "Email Thread": {
+      "description": "Formell källa — fullständiga namn, explicita relationer, organisationsdata.",
+      "allow_create": ["Person", "Organization", "Group", "Project", "Event", "Roles"],
+      "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE"],
+      "skip_critic": false,
+      "prompt_key": "source_context_email"
+    },
+    "Document": {
+      "description": "Formell källa — avtal, offerter, rapporter. Rik strukturell data men tekniska dokument kan ge brus.",
+      "allow_create": ["Person", "Organization", "Group", "Project", "Event", "Roles"],
+      "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE"],
+      "skip_critic": false,
+      "prompt_key": "source_context_document"
+    },
+    "Calendar Event": {
+      "description": "Strukturerad källa — deltagare, tider, rum. Person-noder skapas inte (email-format), Events skapas deterministiskt.",
+      "allow_create": ["Event", "Organization", "Group", "Project"],
+      "allow_edges": ["ATTENDED", "BELONGS_TO", "HAS_BUSINESS_RELATION"],
+      "skip_critic": false,
+      "prompt_key": "source_context_calendar"
+    },
+    "Slack Log": {
+      "description": "Semistrukturerad källa — fullständiga Slack-profilnamn, konversationsspråk. Sällan formella relationer.",
+      "allow_create": ["Person", "Organization", "Group", "Project", "Event"],
+      "allow_edges": ["BELONGS_TO", "HAS_BUSINESS_RELATION"],
+      "skip_critic": false,
+      "prompt_key": "source_context_slack"
+    },
+    "Transcript": {
+      "description": "Brusig källa — ovärderlig för kontext men opålitlig för strukturell grafdata. Bara LINK till befintliga noder, aldrig CREATE. Bidraget är node_context, inte grafstruktur.",
+      "allow_create": [],
+      "allow_edges": [],
+      "skip_critic": true,
+      "prompt_key": "source_context_transcript"
     }
   }
 }

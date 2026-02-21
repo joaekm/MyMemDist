@@ -165,7 +165,13 @@ def extract_event_info(event: dict) -> dict:
     # Deltagare med RSVP-status
     attendees = []
     for attendee in event.get('attendees', []):
-        name = attendee.get('displayName') or attendee.get('email', '').split('@')[0]
+        display_name = attendee.get('displayName', '')
+        if not display_name:
+            # Fallback: konvertera email-prefix till namn
+            # fabian.von.tiedemann@digitalist.com → Fabian Von Tiedemann
+            email_prefix = attendee.get('email', '').split('@')[0]
+            display_name = ' '.join(part.capitalize() for part in email_prefix.split('.')) if email_prefix else ''
+        name = display_name
         status = attendee.get('responseStatus', 'needsAction')
         if name:
             status_text = {
@@ -175,11 +181,18 @@ def extract_event_info(event: dict) -> dict:
                 'needsAction': '(ej svarat)'
             }.get(status, '')
             attendees.append(f"{name} {status_text}".strip())
-    
+
     # Beskrivning utan HTML
     description = event.get('description', '')
     clean_description = strip_html(description)
-    
+
+    # Organizer: samma fallback som deltagare
+    organizer_name = event.get('organizer', {}).get('displayName', '')
+    if not organizer_name:
+        org_email = event.get('organizer', {}).get('email', '')
+        org_prefix = org_email.split('@')[0]
+        organizer_name = ' '.join(part.capitalize() for part in org_prefix.split('.')) if org_prefix else ''
+
     return {
         'id': event.get('id', ''),
         'summary': event.get('summary', 'Ingen titel'),
@@ -188,7 +201,7 @@ def extract_event_info(event: dict) -> dict:
         'location': event.get('location', ''),
         'attendees': attendees,
         'description': clean_description,
-        'organizer': event.get('organizer', {}).get('displayName') or event.get('organizer', {}).get('email', ''),
+        'organizer': organizer_name,
         'status': event.get('status', 'confirmed'),
         'html_link': event.get('htmlLink', '')
     }
