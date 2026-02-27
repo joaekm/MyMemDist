@@ -22,13 +22,14 @@ class BaseProvider(ABC):
     """Abstrakt basklass för LLM providers."""
 
     @abstractmethod
-    def generate(self, prompt: str, model: str) -> ProviderResponse:
+    def generate(self, prompt: str, model: str, max_tokens: Optional[int] = None) -> ProviderResponse:
         """
         Generera svar från text-prompt.
 
         Args:
             prompt: Prompten att skicka
             model: Modellnamn
+            max_tokens: Max output tokens (None = provider default)
 
         Returns:
             ProviderResponse med text och status

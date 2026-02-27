@@ -1,9 +1,13 @@
 {
 "meta": {
-    "version": "2.4",
+    "version": "3.3",
     "description": "Strikt schema för MyMemory med stöd för Self-Healing Graph (Provisional/Verified) samt Declarative Healing.",
     "strict_mode": true,
     "changelog": {
+      "3.3": "WORKS_ON edge: Person → Project. Möjliggör strukturella kopplingar mellan personer och projekt.",
+      "3.2": "Schema-driven entity resolution: matching-block per nodtyp styr token_subset, first_token_prefix, fuzzy_cutoff och ambiguity_action. ALWAYS_CREATE-typer hoppar över matching helt.",
+      "3.1": "OBJEKT-106: node_context borttagen. Ersatt av relation_context på kanter (händelser) + context_summary på noder (identitet).",
+      "3.0": "OBJEKT-106: Document→Source, relation_context på kanter, context_summary i base_properties. doc_type och version borttagna från Source.",
       "2.4": "source_type_profiles: extraktionsprofil per source type (allow_create, allow_edges, skip_critic, prompt_key). Transcript = LINK-only.",
       "2.3": "Borttagen Business_relation nodtyp. HAS_BUSINESS_RELATION går nu direkt Organization → Organization med relation_type som edge property."
     }
@@ -90,10 +94,10 @@
       "status": {
         "type": "enum",
         "required": true,
-        "values": ["VERIFIED", "PROVISIONAL"],
+        "values": ["PROVISIONAL"],
         "default": "PROVISIONAL",
         "include_in_vector": false,
-        "description": "Anger om entiteten är bekräftad sanning eller en gissning."
+        "description": "Entitetens status. Alla nya entiteter skapas som PROVISIONAL."
       },
       "confidence": {
         "type": "float",
@@ -104,15 +108,11 @@
         "include_in_vector": false,
         "description": "Schema-Fit Score. 1.0 = Trusted/Verified, <0.3 = Brus."
       },
-      "node_context": {
-        "type": "list",
-        "required": true,
-        "include_in_vector": false,
-        "item_schema": {
-          "text": {"type": "string", "required": true, "description": "Beskrivande mening om entitetens roll i dokumentet"},
-          "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"}
-        },
-        "description": "Beviskedja - lista med objekt {text: string, origin: string} som visar var noden omnämns. Används för Entity Resolution och Dreamer-förädling."
+      "context_summary": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": true,
+        "description": "AI-genererad kompakt identitetsbeskrivning (vem/vad ÄR detta). Genereras av Dreamer."
       },
       "aliases": {
         "type": "list",
@@ -125,19 +125,21 @@
   "nodes": {
     "Person": {
       "description": "En unik fysisk individ.",
-      "healing_policy": {
-        "max_days_as_provisional": 90,
-        "min_connections_to_survive": 2,
-        "required_properties": ["email"]
-      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "name",
       "allowed_sources": ["Slack", "Mail", "Calendar"],
       "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": true,
+        "first_token_prefix": true,
+        "fuzzy_cutoff": 0.85,
+        "ambiguity_action": "CREATE",
+        "_rationale": "26% av Person-noder är bara förnamn. token_subset löser 'Emilia' → 'Emilia Anelli Windahl'. first_token_prefix löser 'Joakim' → 'Joakim Ekman'. Ambiguity guard förhindrar 'David' att matcha fel David."
+      },
       "properties": {
-        "email": { 
-          "required": false, 
-          "type": "string", 
+        "email": {
+          "required": false,
+          "type": "string",
           "regex": "^[\\w.]+@([\\w-]+\\.)+[\\w-]{2,4}$",
           "description": "Unik identifierare (används som ID)"
         },
@@ -155,15 +157,18 @@
     },
     "Organization": {
       "description": "En juridisk person (Bolag, Myndighet) eller en formell, namngiven organisation (t.ex. 'Google', 'Skatteverket'). VIKTIGT: Ad-hoc team, informella grupper eller generella roller (t.ex. 'Kunden', 'Leverantören') är INTE organisationer.",
-      "healing_policy": {
-        "max_days_as_provisional": 90,
-        "min_connections_to_survive": 2
-      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "org_number",
       "fallback_key": "name",
       "allowed_sources": ["Mail", "Calendar"],
       "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": true,
+        "first_token_prefix": false,
+        "fuzzy_cutoff": 0.85,
+        "ambiguity_action": "CREATE",
+        "_rationale": "token_subset löser 'Digitalist' → 'Digitalist Open Tech AB'. first_token_prefix=false förhindrar att 'B3' matchar flera 'B3'-organisationer."
+      },
       "properties": {
         "name": { "required": true, "type": "string" },
         "org_type": { 
@@ -179,14 +184,17 @@
     },
     "Group": {
       "description": "En namngiven, organisatorisk enhet inom en organisation (t.ex. 'HR-avdelningen', 'Ledningsgruppen', 'Team Alpha'). Måste ha en viss beständighet. Tillfälliga möteskonstellationer är inte en Grupp.",
-      "healing_policy": {
-        "max_days_as_provisional": 90,
-        "min_connections_to_survive": 2
-      },
       "primary_key_strategy": "COMPOSITE_KEY",
       "lookup_key": "name",
       "allowed_sources": ["Slack", "Mail", "Calendar"],
       "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": true,
+        "first_token_prefix": false,
+        "fuzzy_cutoff": 0.85,
+        "ambiguity_action": "CREATE",
+        "_rationale": "Få noder (15). token_subset matchar 'Ledningsgruppen' → 'Ledningsgruppen Digitalist'. Ambiguity guard hanterar eventuella dubbletter."
+      },
       "properties": {
         "name": { "required": true, "type": "string" },
         "group_type": { 
@@ -200,15 +208,18 @@
     },
     "Project": {
       "description": "Ett tidsbegränsat, namngivet initiativ med ett tydligt mål, budget eller beställare (t.ex. 'Projekt Y', 'Uppdrag X'). VIKTIGT: Detta är INTE tekniska funktioner, kod-moduler, dokumentrubriker eller generella arbetsprocesser. Om det är en funktion i ett system, ignorera det.",
-      "healing_policy": {
-        "max_days_as_provisional": 90,
-        "min_connections_to_survive": 2
-      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "source_id",
       "fallback_key": "name",
       "allowed_sources": ["Harvest", "Jira", "Manual", "System"],
       "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": false,
+        "first_token_prefix": false,
+        "fuzzy_cutoff": 0.90,
+        "ambiguity_action": "CREATE",
+        "_rationale": "Projekt med liknande namn kan vara helt olika ('Pricer web 2.0' vs 'Pricer Facelift Webb'). Strikt matching — bara exakt/alias + hög fuzzy-tröskel."
+      },
       "properties": {
         "name": { "required": true, "type": "string" },
         "source_id": { "required": false, "type": "string", "description": "Harvest ID, Jira Key" },
@@ -222,10 +233,6 @@
     },
     "Event": {
       "description": "En specifik, tidsbestämd händelse (Möte, Workshop, Konferens) som har ägt rum. Måste ha en tidpunkt eller deltagare. Generella omnämnanden av 'möten' utan detaljer ska ignoreras.",
-      "healing_policy": {
-        "max_days_as_provisional": 30,
-        "min_connections_to_survive": 1
-      },
       "primary_key_strategy": "SOURCE_ID",
       "lookup_key": "source_id",
       "allowed_sources": ["Slack", "Mail", "Calendar"],
@@ -242,26 +249,25 @@
     },
     "Roles": {
       "description": "En funktionell yrkesroll eller titel (t.ex. 'Projektledare', 'Utvecklare'). Beskriver vad någon gör, inte vem de är.",
-      "healing_policy": {
-        "max_days_as_provisional": 90,
-        "min_connections_to_survive": 2
-      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "name",
       "allowed_sources": ["Slack", "Mail", "Calendar"],
       "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": false,
+        "first_token_prefix": false,
+        "fuzzy_cutoff": 0.90,
+        "ambiguity_action": "CREATE",
+        "_rationale": "Rollnamn med delade tokens kan vara helt olika roller ('Arkitekt' ≠ 'Lösningsarkitekt'). Synonymer hanteras via aliases (t.ex. 'Product Owner' → 'Produktägare')."
+      },
       "properties": {
         "name": { "required": true, "type": "string" },
         "category": { "required": false, "type": "enum", "values": ["Funktionell", "Formell"] },
         "skill_level": { "required": false, "type": "string" }
       }
     },
-    "Document": {
-      "description": "Ett ostrukturerat objekt som bär information.",
-      "healing_policy": {
-        "max_days_as_provisional": 365,
-        "min_connections_to_survive": 0
-      },
+    "Source": {
+      "description": "En informationskälla som bär data till systemet (dokument, mail, Slack, kalender, transkript).",
       "primary_key_strategy": "UUID",
       "lookup_key": "uuid",
       "allowed_sources": ["FileRetriever", "DocConverter", "Transcriber"],
@@ -274,16 +280,10 @@
           "type": "enum",
           "values": [".pdf", ".docx", ".txt", ".md", ".json", ".xls", ".xlsx", ".csv"]
         },
-        "doc_type": {
-          "required": false,
-          "type": "enum",
-          "values": ["Avtal", "Beslut", "Specifikation", "Leveransdokument", "Offert", "Uppdragsbeskrivning", "Protokoll", "Faktura", "Rapport"]
-        },
         "created_at": { "required": false, "type": "timestamp" },
-        "version": { "required": false, "type": "string" },
         "timestamp": { "required": false, "type": "timestamp", "description": "Alias för created_at (legacy)" },
         "source_type": {
-          "required": false,
+          "required": true,
           "type": "enum",
           "values": ["Document", "Slack Log", "Email Thread", "Calendar Event", "Transcript"],
           "description": "Typ av källa"
@@ -296,9 +296,9 @@
   },
   "edges": {
     "MENTIONS": {
-      "source_type": ["Document"],
+      "source_type": ["Source"],
       "target_type": ["Person", "Organization", "Group", "Project", "Event"],
-      "description": "Dokumentet nämner en entitet.",
+      "description": "Källan nämner en entitet.",
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0 },
@@ -311,7 +311,18 @@
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
-        "duration_minutes": { "required": false, "type": "integer" }
+        "duration_minutes": { "required": false, "type": "integer" },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
       }
     },
     "BELONGS_TO": {
@@ -323,7 +334,18 @@
         "start_date": { "required": false, "type": "date" },
         "end_date": { "required": false, "type": "date" },
         "job_title": { "required": false, "type": "string" },
-        "job_function": { "required": false, "type": "string" }
+        "job_function": { "required": false, "type": "string" },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
       }
     },
     "HAS_BUSINESS_RELATION": {
@@ -335,7 +357,38 @@
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
         "relation_type": { "required": true, "type": "enum", "values": ["Kund", "Leverantör", "Partner", "Prospekt", "Lead"] },
         "relation_status": { "required": false, "type": "enum", "values": ["Aktiv", "Inaktiv"] },
-        "contract_id": { "required": false, "type": "string" }
+        "contract_id": { "required": false, "type": "string" },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
+      }
+    },
+    "WORKS_ON": {
+      "source_type": ["Person"],
+      "target_type": ["Project"],
+      "description": "Personen arbetar med eller deltar i projektet.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
       }
     },
     "HAS_ROLE": {
@@ -344,7 +397,18 @@
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
-        "context": { "required": false, "type": "string" }
+        "context": { "required": false, "type": "string" },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
       }
     }
   },
@@ -353,33 +417,33 @@
     "Email Thread": {
       "description": "Formell källa — fullständiga namn, explicita relationer, organisationsdata.",
       "allow_create": ["Person", "Organization", "Group", "Project", "Event", "Roles"],
-      "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE"],
+      "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE", "WORKS_ON"],
       "skip_critic": false,
       "prompt_key": "source_context_email"
     },
     "Document": {
       "description": "Formell källa — avtal, offerter, rapporter. Rik strukturell data men tekniska dokument kan ge brus.",
       "allow_create": ["Person", "Organization", "Group", "Project", "Event", "Roles"],
-      "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE"],
+      "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE", "WORKS_ON"],
       "skip_critic": false,
       "prompt_key": "source_context_document"
     },
     "Calendar Event": {
       "description": "Strukturerad källa — deltagare, tider, rum. Person-noder skapas inte (email-format), Events skapas deterministiskt.",
       "allow_create": ["Event", "Organization", "Group", "Project"],
-      "allow_edges": ["ATTENDED", "BELONGS_TO", "HAS_BUSINESS_RELATION"],
+      "allow_edges": ["ATTENDED", "BELONGS_TO", "HAS_BUSINESS_RELATION", "WORKS_ON"],
       "skip_critic": false,
       "prompt_key": "source_context_calendar"
     },
     "Slack Log": {
       "description": "Semistrukturerad källa — fullständiga Slack-profilnamn, konversationsspråk. Sällan formella relationer.",
       "allow_create": ["Person", "Organization", "Group", "Project", "Event"],
-      "allow_edges": ["BELONGS_TO", "HAS_BUSINESS_RELATION"],
+      "allow_edges": ["BELONGS_TO", "HAS_BUSINESS_RELATION", "WORKS_ON"],
       "skip_critic": false,
       "prompt_key": "source_context_slack"
     },
     "Transcript": {
-      "description": "Brusig källa — ovärderlig för kontext men opålitlig för strukturell grafdata. Bara LINK till befintliga noder, aldrig CREATE. Bidraget är node_context, inte grafstruktur.",
+      "description": "Brusig källa — ovärderlig för kontext men opålitlig för strukturell grafdata. Bara LINK till befintliga noder, aldrig CREATE. Bidraget är relation_context på kanter, inte grafstruktur.",
       "allow_create": [],
       "allow_edges": [],
       "skip_critic": true,

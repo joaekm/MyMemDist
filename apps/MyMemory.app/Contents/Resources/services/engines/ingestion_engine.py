@@ -106,10 +106,10 @@ LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 FAILED_FOLDER = os.path.expanduser(CONFIG['paths']['asset_failed'])
 GRAPH_DB_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 
-# Dreamer daemon state file (OBJEKT-76)
-DREAMER_STATE_FILE = os.path.expanduser(
-    CONFIG.get('dreamer', {}).get('daemon', {}).get(
-        'state_file', '~/MyMemory/Index/.dreamer_state.json'
+# Enrichment daemon state file (OBJEKT-76, updated OBJEKT-107)
+ENRICHMENT_STATE_FILE = os.path.expanduser(
+    CONFIG.get('enrichment', {}).get('daemon', {}).get(
+        'state_file', '~/Library/Application Support/MyMemory/enrichment_state.json'
     )
 )
 
@@ -159,64 +159,64 @@ _last_raw_text = ""
 _last_semantic_metadata = {}
 
 # Dreamer state lock (OBJEKT-76)
-DREAMER_STATE_LOCK = threading.Lock()
+ENRICHMENT_STATE_LOCK = threading.Lock()
 
 
-def _increment_dreamer_node_counter(nodes_added: int):
+def _increment_enrichment_node_counter(nodes_added: int):
     """
-    Increment the Dreamer daemon node counter (OBJEKT-76).
+    Increment the Enrichment daemon node counter (OBJEKT-76).
 
     This signals to the daemon that new graph nodes have been created,
-    allowing threshold-based triggering of Dreamer resolution cycles.
+    allowing threshold-based triggering of Enrichment cycles.
     """
     if nodes_added <= 0:
         return
 
     import json
 
-    with DREAMER_STATE_LOCK:
+    with ENRICHMENT_STATE_LOCK:
         try:
             # Load existing state
             state = {'nodes_since_last_run': 0, 'last_run_timestamp': None}
-            if os.path.exists(DREAMER_STATE_FILE):
-                with open(DREAMER_STATE_FILE, 'r') as f:
+            if os.path.exists(ENRICHMENT_STATE_FILE):
+                with open(ENRICHMENT_STATE_FILE, 'r') as f:
                     state = json.load(f)
 
             # Increment counter
             state['nodes_since_last_run'] = state.get('nodes_since_last_run', 0) + nodes_added
 
             # Save state
-            os.makedirs(os.path.dirname(DREAMER_STATE_FILE), exist_ok=True)
-            with open(DREAMER_STATE_FILE, 'w') as f:
+            os.makedirs(os.path.dirname(ENRICHMENT_STATE_FILE), exist_ok=True)
+            with open(ENRICHMENT_STATE_FILE, 'w') as f:
                 json.dump(state, f, indent=2, default=str)
 
-            LOGGER.debug(f"Dreamer counter: +{nodes_added} -> {state['nodes_since_last_run']} total")
+            LOGGER.debug(f"Enrichment counter: +{nodes_added} -> {state['nodes_since_last_run']} total")
 
         except (OSError, json.JSONDecodeError) as e:
-            LOGGER.error(f"HARDFAIL: Could not update Dreamer state: {e}")
-            raise RuntimeError(f"Failed to update Dreamer counter: {e}") from e
+            LOGGER.error(f"HARDFAIL: Could not update Enrichment state: {e}")
+            raise RuntimeError(f"Failed to update Enrichment counter: {e}") from e
 
 
-def reset_dreamer_counter():
+def reset_enrichment_counter():
     """
-    Reset the Dreamer daemon node counter to zero.
+    Reset the Enrichment daemon node counter to zero.
 
     Called by rebuild orchestrator to prevent daemon from triggering
-    during rebuild (since orchestrator runs Dreamer manually after each day).
+    during rebuild (since orchestrator runs Enrichment manually after each day).
     """
     import json
 
-    with DREAMER_STATE_LOCK:
+    with ENRICHMENT_STATE_LOCK:
         try:
             state = {'nodes_since_last_run': 0, 'last_run_timestamp': None}
-            if os.path.exists(DREAMER_STATE_FILE):
-                with open(DREAMER_STATE_FILE, 'r') as f:
+            if os.path.exists(ENRICHMENT_STATE_FILE):
+                with open(ENRICHMENT_STATE_FILE, 'r') as f:
                     state = json.load(f)
 
             state['nodes_since_last_run'] = 0
 
-            os.makedirs(os.path.dirname(DREAMER_STATE_FILE), exist_ok=True)
-            with open(DREAMER_STATE_FILE, 'w') as f:
+            os.makedirs(os.path.dirname(ENRICHMENT_STATE_FILE), exist_ok=True)
+            with open(ENRICHMENT_STATE_FILE, 'w') as f:
                 json.dump(state, f, indent=2, default=str)
 
             LOGGER.info("Dreamer counter reset to 0")
@@ -497,7 +497,8 @@ def extract_entities_mcp(text: str, source_hint: str = "") -> Dict[str, Any]:
             if prop_name == 'confidence':
                 continue
             req_marker = " (*)" if prop_def.get('required', False) else ""
-            p_type = prop_def.get('type', 'string')
+            # extraction_type overrides type for LLM prompt (e.g. list→string)
+            p_type = prop_def.get('extraction_type', prop_def.get('type', 'string'))
             vals = prop_def.get('values')
             if vals:
                 prop_info.append(f"{prop_name}{req_marker} ({p_type}: {vals})")
@@ -954,10 +955,11 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
     - LINK: canonical_name from graph (the authoritative name)
     - CREATE: canonical_name = input name
     """
-    # Load schema to identify type-specific properties
+    # Load schema to identify type-specific properties and matching config
     validator = _get_schema_validator()
     schema = validator.schema
     base_prop_names = set(schema.get('base_properties', {}).get('properties', {}).keys())
+    schema_nodes = schema.get('nodes', {})
 
     mentions = []
     name_to_uuid = {}
@@ -977,13 +979,6 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
         name = node.get('name')
         type_str = node.get('type')
         confidence = node.get('confidence', 0.5)
-        # Extract text from node_context (validator_mcp normalizes to [{text, origin}])
-        nc = node.get('node_context', '')
-        if isinstance(nc, list) and nc and isinstance(nc[0], dict):
-            node_context_text = nc[0].get('text', '')
-        else:
-            node_context_text = normalize_value(nc, 'string') or ''
-
         if not name or not type_str:
             continue
 
@@ -1000,21 +995,39 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
         if source_type in ["Slack Log", "Email Thread"]:
             confidence = max(confidence, 0.8)
 
-        # Entity resolution: LINK if exists, CREATE if new
-        existing_uuid = None
-        if graph is not None:
-            existing_uuid = graph.find_node_by_name(type_str, name, fuzzy=True)
+        # Entity resolution: schema-driven creation_policy
+        node_type_def = schema_nodes.get(type_str, {})
+        creation_policy = node_type_def.get('creation_policy', 'STRICT_LOOKUP')
 
-        if existing_uuid:
-            action = "LINK"
-            target_uuid = existing_uuid
-            # Hämta kanoniskt namn från grafen
-            existing_node = graph.get_node(existing_uuid)
-            canonical_name = existing_node.get("name", name) if existing_node else name
-        else:
+        if creation_policy == 'ALWAYS_CREATE':
+            # Skip graph lookup — always create new node (Event, Source)
             action = "CREATE"
             target_uuid = str(uuid.uuid4())
-            canonical_name = name  # Vid CREATE = input-namn
+            canonical_name = name
+            LOGGER.debug(f"resolve: ALWAYS_CREATE for {type_str} '{name}'")
+        else:
+            # STRICT_LOOKUP: attempt to find existing node with schema-driven matching
+            existing_uuid = None
+            matching_config = node_type_def.get('matching')
+            if graph is not None:
+                existing_uuid = graph.find_node_by_name(
+                    type_str, name, fuzzy=True,
+                    matching_config=matching_config
+                )
+
+            if existing_uuid:
+                action = "LINK"
+                target_uuid = existing_uuid
+                # Hämta kanoniskt namn från grafen
+                existing_node = graph.get_node(existing_uuid)
+                canonical_name = (
+                    existing_node.get("properties", {}).get("name", name)
+                    if existing_node else name
+                )
+            else:
+                action = "CREATE"
+                target_uuid = str(uuid.uuid4())
+                canonical_name = name  # Vid CREATE = input-namn
 
         name_to_uuid[name] = target_uuid
         name_to_canonical[name] = canonical_name
@@ -1033,7 +1046,6 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
             "type": type_str,
             "label": name,
             "canonical_name": canonical_name,
-            "node_context_text": node_context_text,
             "confidence": confidence
         }
         if type_specific_props:
@@ -1044,16 +1056,40 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
     if graph is not None:
         graph.close()
 
+    # Log resolution summary per type (used for iterative tuning)
+    from collections import Counter
+    link_counts = Counter(m['type'] for m in mentions if m.get('action') == 'LINK')
+    create_counts = Counter(m['type'] for m in mentions if m.get('action') == 'CREATE')
+    all_types = sorted(set(list(link_counts.keys()) + list(create_counts.keys())))
+    parts = []
+    for t in all_types:
+        l_count = link_counts.get(t, 0)
+        c_count = create_counts.get(t, 0)
+        parts.append(f"{t}:{l_count}L/{c_count}C")
+    total_link = sum(link_counts.values())
+    total_create = sum(create_counts.values())
+    LOGGER.info(f"Resolve: {total_link} LINK, {total_create} CREATE [{', '.join(parts)}]")
+
     # Handle relations - use canonical names for source_text
     for edge in edges:
         source_name = edge.get('source')
         target_name = edge.get('target')
         rel_type = edge.get('type')
         rel_conf = edge.get('confidence', 0.5)
+        relation_context_text = edge.get('relation_context', '')
 
         if source_name in name_to_uuid and target_name in name_to_uuid:
             source_uuid = name_to_uuid[source_name]
             target_uuid = name_to_uuid[target_name]
+
+            # Self-loop guard: skip edges where source == target
+            if source_uuid == target_uuid:
+                LOGGER.warning(
+                    f"Dropped self-loop edge ({rel_type}): "
+                    f"'{source_name}' -> '{target_name}' (both resolved to {source_uuid[:12]})"
+                )
+                continue
+
             # Använd canonical names i source_text
             source_canonical = name_to_canonical.get(source_name, source_name)
             target_canonical = name_to_canonical.get(target_name, target_name)
@@ -1064,7 +1100,7 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
             # Extract type-specific edge properties from LLM output
             edge_props = {}
             edge_type_def = schema.get('edges', {}).get(rel_type, {})
-            allowed_edge_props = set(edge_type_def.get('properties', {}).keys()) - {'confidence'}
+            allowed_edge_props = set(edge_type_def.get('properties', {}).keys()) - {'confidence', 'relation_context'}
             for prop_name in allowed_edge_props:
                 if prop_name in edge:
                     edge_props[prop_name] = edge[prop_name]
@@ -1079,7 +1115,8 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
                 "source_name": source_canonical,
                 "source_type": source_type,
                 "target_name": target_canonical,
-                "target_type": target_type
+                "target_type": target_type,
+                "relation_context_text": relation_context_text
             }
             if edge_props:
                 edge_mention["edge_properties"] = edge_props
@@ -1130,21 +1167,24 @@ def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
     return lake_file
 
 
-def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_service=None) -> tuple:
+def write_graph(unit_id: str, filename: str, ingestion_payload: List,
+                source_type: str = "Document", timestamp_content: str = "UNKNOWN",
+                vector_service=None) -> tuple:
     """Write entities and edges to graph, and index nodes to vector."""
     graph = GraphService(GRAPH_DB_PATH)
     if vector_service is None:
         from services.utils.vector_service import get_vector_service
         vector_service = get_vector_service("knowledge_base")
 
-    # Skapa Document-nod för källdokumentet (krävs för MENTIONS-kanter)
+    # Skapa Source-nod för källdokumentet (krävs för MENTIONS-kanter)
     graph.upsert_node(
         id=unit_id,
-        type="Document",
+        type="Source",
         properties={
             "name": filename,
             "status": "ACTIVE",
-            "source_system": "IngestionEngine"
+            "source_system": "IngestionEngine",
+            "source_type": source_type
         }
     )
 
@@ -1159,7 +1199,6 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_ser
             node_type = entity.get("type")
             label = entity.get("label")
             confidence = entity.get("confidence", 0.5)
-            node_context_text = entity.get("node_context_text", "")
 
             if not target_uuid or not node_type:
                 continue
@@ -1167,16 +1206,10 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_ser
                 LOGGER.error(f"HARDFAIL: Entity missing label: {entity}")
                 continue
 
-            node_context_entry = {
-                "text": node_context_text or f"Mentioned in {filename}",
-                "origin": unit_id
-            }
-
             props = {
                 "name": label,
                 "status": "PROVISIONAL",
                 "confidence": confidence,
-                "node_context": [node_context_entry],
                 "source_system": "IngestionEngine"
             }
 
@@ -1200,13 +1233,15 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_ser
             })
             nodes_written += 1
 
-            graph.upsert_edge(
-                source=unit_id,
-                target=target_uuid,
-                edge_type="MENTIONS",
-                properties={"confidence": confidence}
-            )
-            edges_written += 1
+            # OBJEKT-107: Filter MENTIONS against schema — Roles should not get MENTIONS edges
+            if node_type != "Roles":
+                graph.upsert_edge(
+                    source=unit_id,
+                    target=target_uuid,
+                    edge_type="MENTIONS",
+                    properties={"confidence": confidence}
+                )
+                edges_written += 1
 
         elif action == "CREATE_EDGE":
             source_uuid = entity.get("source_uuid")
@@ -1215,22 +1250,51 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List, vector_ser
             edge_conf = entity.get("confidence", 0.5)
 
             if source_uuid and target_uuid and edge_type:
+                # Self-loop guard (defense in depth)
+                if source_uuid == target_uuid:
+                    LOGGER.warning(
+                        f"Self-loop blocked in write_graph: "
+                        f"{entity.get('source_name', '?')} -[{edge_type}]-> "
+                        f"{entity.get('target_name', '?')} ({source_uuid[:12]})"
+                    )
+                    continue
+
                 edge_props = {"confidence": edge_conf}
                 extra_edge_props = entity.get("edge_properties", {})
                 if extra_edge_props:
                     edge_props.update(extra_edge_props)
 
-                # Quality gate: drop edges with no semantic properties (only confidence)
-                # ATTENDED undantagen — deltagarkopplingen är värdefull utan duration_minutes
+                # Bygg relation_context entry om text finns
+                rc_text = entity.get("relation_context_text", "")
+                if rc_text:
+                    edge_props["relation_context"] = [{
+                        "text": rc_text,
+                        "origin": unit_id,
+                        "timestamp": timestamp_content
+                    }]
+
+                # Quality gate: drop edges that only have confidence AND require
+                # additional properties to be meaningful.
+                # Schema-driven: edge types with no required properties beyond confidence
+                # are structural (e.g. HAS_ROLE, BELONGS_TO) — valuable on their own.
                 semantic_keys = set(edge_props.keys()) - {"confidence"}
-                if not semantic_keys and edge_type != "ATTENDED":
-                    source_name = entity.get("source_name", "?")
-                    target_name = entity.get("target_name", "?")
-                    LOGGER.warning(
-                        f"Edge dropped (no semantic properties): "
-                        f"{source_name} -[{edge_type}]-> {target_name}"
-                    )
-                    continue
+                if not semantic_keys:
+                    schema = _get_schema_validator().schema
+                    edge_def = schema.get('edges', {}).get(edge_type, {})
+                    schema_props = edge_def.get('properties', {})
+                    extra_required = [
+                        p for p, d in schema_props.items()
+                        if isinstance(d, dict) and d.get('required') and p != 'confidence'
+                    ]
+                    if extra_required:
+                        source_name = entity.get("source_name", "?")
+                        target_name = entity.get("target_name", "?")
+                        LOGGER.warning(
+                            f"Edge dropped (no semantic properties, "
+                            f"missing required: {extra_required}): "
+                            f"{source_name} -[{edge_type}]-> {target_name}"
+                        )
+                        continue
 
                 graph.upsert_edge(
                     source=source_uuid,
@@ -1368,8 +1432,8 @@ def _clean_before_reingest(unit_id: str, filename: str, lake_file: str, vector_s
     """
     Clean stale data from Graph + Vector before re-ingestion.
 
-    Removes old node_context entries (origin == unit_id), deletes orphan entities,
-    removes Document node + MENTIONS edges, and clears vector entries.
+    Deletes orphan entities (no edges besides MENTIONS from this document),
+    removes Source node + MENTIONS edges, and clears vector entries.
 
     Does NOT touch Assets (they're the source of truth for re-ingest).
     Lake file is deleted so write_lake() can recreate it as the final "commit".
@@ -1382,51 +1446,23 @@ def _clean_before_reingest(unit_id: str, filename: str, lake_file: str, vector_s
         vs = vector_service
 
     try:
-        # 1. Clean entity node_context entries from this document
+        # 1. Check for orphan entities (only connected via this document)
         edges = graph.get_edges_from(unit_id)
         mentions = [e for e in edges if e.get("type") == "MENTIONS"]
 
-        entities_cleaned = 0
         entities_deleted = 0
 
         for edge in mentions:
             entity_id = edge["target"]
-            entity = graph.get_node(entity_id)
-            if not entity:
-                continue
+            other_incoming = [e for e in graph.get_edges_to(entity_id) if e["source"] != unit_id]
+            other_outgoing = graph.get_edges_from(entity_id)
 
-            props = entity.get("properties", {})
-            node_context = props.get("node_context", [])
+            if not other_incoming and not other_outgoing:
+                graph.delete_node(entity_id)
+                vs.delete(entity_id)
+                entities_deleted += 1
 
-            # Remove entries originating from this document
-            new_context = [
-                nc for nc in node_context
-                if not (isinstance(nc, dict) and nc.get("origin") == unit_id)
-            ]
-
-            if not new_context:
-                # No context left — check if entity is orphan
-                other_incoming = [e for e in graph.get_edges_to(entity_id) if e["source"] != unit_id]
-                other_outgoing = graph.get_edges_from(entity_id)
-
-                if not other_incoming and not other_outgoing:
-                    graph.delete_node(entity_id)
-                    vs.delete(entity_id)
-                    entities_deleted += 1
-                    continue
-
-            props["node_context"] = new_context
-            graph.update_node_properties(entity_id, props)
-
-            vs.upsert_node({
-                'id': entity_id,
-                'type': entity.get('type'),
-                'properties': props,
-                'aliases': entity.get('aliases', [])
-            })
-            entities_cleaned += 1
-
-        # 2. Delete Document node + MENTIONS edges
+        # 2. Delete Source node + MENTIONS edges
         graph.delete_node(unit_id)
 
         # 3. Delete vector entries (document + transcript chunks)
@@ -1443,8 +1479,7 @@ def _clean_before_reingest(unit_id: str, filename: str, lake_file: str, vector_s
         LOGGER.warning(f"Could not remove Lake file during re-ingest: {e}")
 
     LOGGER.info(
-        f"Re-ingest cleanup: {filename} -> "
-        f"{entities_cleaned} entities cleaned, {entities_deleted} orphans deleted"
+        f"Re-ingest cleanup: {filename} -> {entities_deleted} orphans deleted"
     )
 
 
@@ -1579,10 +1614,16 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
         _last_semantic_metadata = copy.deepcopy(semantic_metadata) if semantic_metadata else {}
 
         # 7. Write to Graph
-        nodes_written, edges_written = write_graph(unit_id, filename, ingestion_payload, vector_service=vector_service)
+        timestamp_content = extract_content_date(raw_text, filename)
+        nodes_written, edges_written = write_graph(
+            unit_id, filename, ingestion_payload,
+            source_type=source_type,
+            timestamp_content=timestamp_content,
+            vector_service=vector_service
+        )
 
-        # 7b. Update Dreamer daemon counter (OBJEKT-76)
-        _increment_dreamer_node_counter(nodes_written)
+        # 7b. Update Enrichment daemon counter (OBJEKT-76)
+        _increment_enrichment_node_counter(nodes_written)
 
         # 8. Write to Vector
         timestamp_ingestion = datetime.datetime.now().isoformat()

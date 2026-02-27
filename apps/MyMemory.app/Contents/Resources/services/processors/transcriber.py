@@ -782,7 +782,7 @@ def step5_enrich_context(
                         person_data = {
                             'node_id': node_id,
                             'person_type': props.get('person_type', ''),
-                            'node_context': props.get('node_context', ''),
+                            'context_summary': props.get('context_summary', ''),
                             'organizations': [],
                             'roles': [],
                             'events_attended': []
@@ -814,7 +814,7 @@ def step5_enrich_context(
                                     'event_id': target_id,
                                     'name': target_name,
                                     'event_type': target_props.get('event_type', ''),
-                                    'node_context': target_props.get('node_context', '')
+                                    'context_summary': target_props.get('context_summary', '')
                                 }
                                 person_data['events_attended'].append(event_info)
 
@@ -830,7 +830,7 @@ def step5_enrich_context(
                         org_data = {
                             'node_id': node_id,
                             'org_type': props.get('org_type', ''),
-                            'node_context': props.get('node_context', ''),
+                            'context_summary': props.get('context_summary', ''),
                             'business_relations': []
                         }
 
@@ -859,7 +859,7 @@ def step5_enrich_context(
                             'node_id': node_id,
                             'project_status': props.get('project_status', ''),
                             'project_type': props.get('project_type', ''),
-                            'node_context': props.get('node_context', '')
+                            'context_summary': props.get('context_summary', '')
                         }
 
         except Exception as e:  # noqa: FALLBACK_DOCUMENTED - graf-berikning är optional

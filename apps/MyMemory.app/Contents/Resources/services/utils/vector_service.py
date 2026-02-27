@@ -144,12 +144,8 @@ class VectorService:
         props = node.get('properties', {})
         if 'role' in props: parts.append(f"Role: {props['role']}")
         if node.get('aliases'): parts.append(f"Aliases: {', '.join(node['aliases'])}")
-        if props.get('node_context'):
-            ctx_list = props['node_context']
-            if isinstance(ctx_list, list):
-                ctx_texts = [c.get('text', '') for c in ctx_list if isinstance(c, dict)]
-                if ctx_texts:
-                    parts.append(f"Context: {' | '.join(ctx_texts)}")
+        if props.get('context_summary'):
+            parts.append(f"Context: {props['context_summary']}")
 
         full_text = ". ".join(parts)
         self.upsert(id=node_id, text=full_text, metadata={

@@ -310,7 +310,8 @@ class LLMService:
         self,
         prompt: str,
         provider: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        max_tokens: Optional[int] = None
     ) -> LLMResponse:
         """
         Generera svar för en prompt.
@@ -319,6 +320,7 @@ class LLMService:
             prompt: Prompten att skicka
             provider: Provider ("anthropic" eller "gemini"). Default: default_provider från config.
             model: Modellnamn. Default: model_lite från config.
+            max_tokens: Max output tokens (None = provider default)
 
         Returns:
             LLMResponse med text eller fel
@@ -342,7 +344,7 @@ class LLMService:
             throttler.wait()
 
             try:
-                response = llm_provider.generate(prompt=prompt, model=model)
+                response = llm_provider.generate(prompt=prompt, model=model, max_tokens=max_tokens)
 
                 # Spåra token usage oavsett success
                 self._track_usage(model, response.input_tokens, response.output_tokens)

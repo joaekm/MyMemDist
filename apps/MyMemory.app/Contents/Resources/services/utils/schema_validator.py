@@ -127,13 +127,6 @@ class SchemaValidator:
             merged_props.update(node_def.get("properties", {}))
             node_def["properties"] = merged_props
             
-            # Healing policy fallback
-            if "healing_policy" not in node_def:
-                node_def["healing_policy"] = {
-                    "max_days_as_provisional": 90,
-                    "min_connections_to_survive": 2
-                }
-
         raw_schema["nodes"] = nodes
         return raw_schema
 
@@ -154,7 +147,7 @@ class SchemaValidator:
         # Validera status mot schema-definierade värden
         status = node_data.get("status")
         status_def = base_props.get("status", {})
-        allowed_statuses = status_def.get("values", ["VERIFIED", "PROVISIONAL"])
+        allowed_statuses = status_def.get("values", ["PROVISIONAL"])
         if status not in allowed_statuses:
             return False, f"Invalid status: '{status}'. Allowed: {allowed_statuses}"
 
@@ -243,9 +236,6 @@ class SchemaValidator:
 
         return True, "OK"
 
-    def get_healing_policy(self, node_type: str) -> Dict[str, Any]:
-        return self.schema["nodes"].get(node_type, {}).get("healing_policy", {})
-
     def validate_edge(self, edge: Dict[str, Any], nodes_map: Dict[str, str]) -> Tuple[bool, str]:
         """
         Validerar en kant mot schemat.
@@ -296,8 +286,8 @@ class SchemaValidator:
                 if allowed_values and value not in allowed_values:
                     return False, f"Edge '{rel_type}': invalid value for '{prop_name}': '{value}'. Allowed: {allowed_values}"
 
-                # Type check
-                expected_type = prop_def.get("type")
+                # Type check — extraction_type overrides type for LLM validation
+                expected_type = prop_def.get("extraction_type", prop_def.get("type"))
                 if expected_type:
                     ok, msg = self._validate_type(value, expected_type, f"edge.{prop_name}")
                     if not ok:

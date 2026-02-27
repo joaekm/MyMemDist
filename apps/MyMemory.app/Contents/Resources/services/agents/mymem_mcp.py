@@ -394,7 +394,7 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
     - Kolla om en organisation finns: query="Acme AB", node_type="Organization"
     - Söka på e-post eller andra properties: query="johan@example.com"
 
-    Söker i: id, aliases, och hela properties (name, email, node_context, etc.)
+    Söker i: id, aliases, och hela properties (name, email, context_summary, etc.)
 
     SKILLNAD MOT query_vector_memory:
     - search_graph_nodes = "Finns noden X?" (exakt matchning)
@@ -442,12 +442,8 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
             aliases = json.loads(aliases_raw) if aliases_raw else []
 
             name = props.get('name', node_id)
-            node_context = props.get('node_context', [])
-            if node_context and isinstance(node_context, list):
-                ctx_texts = [c.get('text', '') for c in node_context if isinstance(c, dict)]
-                ctx_str = f"Context: {' | '.join(ctx_texts[:3])}" if ctx_texts else "No context"
-            else:
-                ctx_str = "No context"
+            ctx_summary = props.get('context_summary', '')
+            ctx_str = f"Identitet: {ctx_summary}" if ctx_summary else "Identitet: SAKNAS"
             alias_str = f"Aliases: {len(aliases)}" if aliases else ""
 
             output.append(f"• [{n_type}] {name}")
@@ -470,15 +466,14 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
     """
     Semantisk sökning i kunskapsgrafen – hittar entiteter baserat på MENING, inte bara nyckelord.
 
-    Varje entitet har en narrativ "node_context" som beskriver:
-    - Varför entiteten är relevant
-    - I vilket sammanhang den dök upp
-    - Relationer till personer och händelser
+    Varje entitet har en "context_summary" som beskriver:
+    - Vem/vad entiteten ÄR (kompakt identitet)
+    - Relationer och kontext via relation_context på kanter
 
-    EXEMPEL PÅ NODE_CONTEXT:
-    - "Företag som [person] hade samtal med angående AI-connector"
-    - "Projekt som genererade många ofakturerbara timmar"
-    - "Customer Manager, ansvarig för dialog med kunden"
+    EXEMPEL PÅ CONTEXT_SUMMARY:
+    - "IT-konsultbolag specialiserat på digital transformation"
+    - "Projektledare på Digitalist, ansvarig för AI-initiativ"
+    - "Internt projekt för kunskapshantering"
 
     SÖK PÅ KONCEPT, INTE NAMN:
     ✅ "vem arbetar med upphandlingar"
@@ -722,10 +717,45 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
         _log_tool_time("search_lake_metadata", _t0)
 
 
+# --- HELPERS: TEMPORAL FILTERING ---
+
+def _in_date_range(timestamp: str, start_date: str = None, end_date: str = None) -> bool:
+    """Check if an ISO timestamp prefix falls within a date range.
+
+    Handles both YYYY-MM-DD and YYYY-MM formats.
+    UNKNOWN timestamps are excluded when filtering.
+    """
+    if not timestamp or timestamp == "UNKNOWN":
+        return False
+    ts = timestamp[:10]  # YYYY-MM-DD or YYYY-MM
+    if start_date and ts < start_date:
+        return False
+    if end_date and ts > end_date:
+        return False
+    return True
+
+
+def _format_relation_context(rc_entries: list, start_date: str = None,
+                              end_date: str = None, max_entries: int = 3) -> list:
+    """Format relation_context entries as output lines, optionally filtered by date."""
+    if not rc_entries:
+        return []
+    if start_date or end_date:
+        rc_entries = [e for e in rc_entries if _in_date_range(
+            e.get("timestamp", ""), start_date, end_date)]
+    lines = []
+    for entry in rc_entries[-max_entries:]:
+        ts = entry.get("timestamp", "?")
+        text = entry.get("text", "")
+        if text:
+            lines.append(f"      [{ts}] {text}")
+    return lines
+
+
 # --- TOOL 5: RELATIONSHIP EXPLORER ---
 
 @mcp.tool()
-def get_neighbor_network(node_id: str) -> str:
+def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = None) -> str:
     """
     Kartlägg relationerna kring en entitet – vem/vad är den kopplad till?
 
@@ -778,18 +808,26 @@ def get_neighbor_network(node_id: str) -> str:
         c_name = c_props.get('name', node_id)
 
         output = [f"=== NÄTVERK: {c_name} ({center_node['type']}) ==="]
+        if start_date or end_date:
+            output.append(f"Tidsfilter: {start_date or '...'} → {end_date or '...'}")
 
         if out_edges:
             output.append("\n--> UTGÅENDE:")
             for e in out_edges:
                 target_name = neighbor_map.get(e['target'], e['target'])
                 output.append(f"   [{e['type']}] -> {target_name}")
+                rc = e.get("properties", {}).get("relation_context", [])
+                rc_lines = _format_relation_context(rc, start_date, end_date)
+                output.extend(rc_lines)
 
         if in_edges:
             output.append("\n<-- INKOMMANDE:")
             for e in in_edges:
                 source_name = neighbor_map.get(e['source'], e['source'])
                 output.append(f"   {source_name} -> [{e['type']}]")
+                rc = e.get("properties", {}).get("relation_context", [])
+                rc_lines = _format_relation_context(rc, start_date, end_date)
+                output.extend(rc_lines)
 
         if not out_edges and not in_edges:
             output.append("   (Inga kopplingar - Isolerad nod)")
@@ -807,16 +845,16 @@ def get_neighbor_network(node_id: str) -> str:
 # --- TOOL 6: ENTITY SUMMARY ---
 
 @mcp.tool()
-def get_entity_summary(node_id: str) -> str:
+def get_entity_summary(node_id: str, start_date: str = None, end_date: str = None) -> str:
     """
     Djupdyk i EN entitet – hämtar allt systemet vet om den.
 
     RETURNERAR:
-    - node_context: Narrativ beskrivning av entitetens roll och sammanhang
+    - context_summary: Kompakt identitetsbeskrivning
+    - relation_context: Kronologiska händelser per relation
     - Relationer: Vilka andra entiteter den är kopplad till
     - Metadata: Typ, alias, properties
     - Konfidens: Hur säker systemet är på informationen
-    - Bevis: Källhänvisningar till ursprungliga dokument/meddelanden
 
     ANVÄNDNING:
     1. Hitta entitet med search_graph_nodes: "Johan" → node_id="abc123"
@@ -837,13 +875,38 @@ def get_entity_summary(node_id: str) -> str:
             props = node.get('properties', {})
             name = props.get('name', node_id)
             aliases = node.get('aliases', [])
-            ctx = props.get('node_context', [])
+            # Fetch edges for relation_context display
+            out_edges = graph.get_edges_from(node_id)
+            in_edges = graph.get_edges_to(node_id)
+
+            # Build neighbor name map
+            neighbor_map = {}
+            for e in out_edges:
+                nid = e['target']
+                if nid not in neighbor_map:
+                    n = graph.get_node(nid)
+                    neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
+            for e in in_edges:
+                nid = e['source']
+                if nid not in neighbor_map:
+                    n = graph.get_node(nid)
+                    neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
+
             graph.close()
 
         output = [f"=== SUMMERING: {name} ==="]
         output.append(f"Typ: {node['type']}")
         output.append(f"ID: {node_id}")
-        output.append(f"Konfidens: {props.get('confidence', 'N/A')}")
+        if start_date or end_date:
+            output.append(f"Tidsfilter: {start_date or '...'} \u2192 {end_date or '...'}")
+
+        # Identity section (context_summary)
+        ctx_summary = props.get('context_summary', '')
+        if ctx_summary:
+            output.append(f"\n--- IDENTITET ---")
+            output.append(ctx_summary)
+
+        output.append(f"\nKonfidens: {props.get('confidence', 'N/A')}")
         output.append(f"Status: {props.get('status', 'N/A')}")
 
         retrieved = props.get('retrieved_times', 0)
@@ -853,22 +916,20 @@ def get_entity_summary(node_id: str) -> str:
         if aliases:
             output.append(f"Aliases: {', '.join(aliases[:5])}" + (" ..." if len(aliases) > 5 else ""))
 
-        output.append("\n--- KONTEXT & BEVIS ---")
-        if ctx:
-            seen_txt = set()
-            count = 0
-            for item in ctx:
-                if isinstance(item, dict):
-                    txt = item.get('text', '').replace('\n', ' ')
-                    origin = item.get('origin', 'Okänd')
-                    if txt and txt not in seen_txt:
-                        output.append(f"• \"{txt[:120]}...\" [Källa: {origin}]")
-                        seen_txt.add(txt)
-                        count += 1
-                if count >= 10:
-                    break
-        else:
-            output.append("(Ingen kontext lagrad)")
+        # Relation context from edges
+        non_mentions = [e for e in out_edges + in_edges if e.get('type') != 'MENTIONS']
+        has_rc = False
+        for e in non_mentions:
+            rc = e.get("properties", {}).get("relation_context", [])
+            rc_lines = _format_relation_context(rc, start_date, end_date, max_entries=5)
+            if rc_lines:
+                if not has_rc:
+                    output.append("\n--- HÄNDELSER (relation_context) ---")
+                    has_rc = True
+                other_id = e['target'] if e.get('source') == node_id else e['source']
+                other_name = neighbor_map.get(other_id, other_id)
+                output.append(f"  [{e['type']}] {other_name}:")
+                output.extend(rc_lines)
 
         return "\n".join(output)
 

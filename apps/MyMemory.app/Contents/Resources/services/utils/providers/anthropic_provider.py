@@ -33,23 +33,27 @@ class AnthropicProvider(BaseProvider):
     def name(self) -> str:
         return "anthropic"
 
-    def generate(self, prompt: str, model: str) -> ProviderResponse:
+    def generate(self, prompt: str, model: str, max_tokens: Optional[int] = None) -> ProviderResponse:
         """
         Generera svar via Claude.
 
         Args:
             prompt: Prompten att skicka
             model: Modellnamn (t.ex. "claude-sonnet-4-5-20250514")
+            max_tokens: Max output tokens (default 16384)
 
         Returns:
             ProviderResponse med text och status
         """
         try:
-            response = self.client.messages.create(
+            resolved_max = max_tokens or 16384
+
+            with self.client.messages.stream(
                 model=model,
-                max_tokens=8192,
+                max_tokens=resolved_max,
                 messages=[{"role": "user", "content": prompt}]
-            )
+            ) as stream:
+                response = stream.get_final_message()
 
             # Extrahera text och token usage från response
             input_tok = getattr(response.usage, 'input_tokens', 0) if response.usage else 0
@@ -101,7 +105,7 @@ class AnthropicProvider(BaseProvider):
                 model=model
             )
 
-    def generate_multi_turn(self, messages: list, model: str) -> ProviderResponse:
+    def generate_multi_turn(self, messages: list, model: str, max_tokens: Optional[int] = None) -> ProviderResponse:
         """
         Generera svar via Claude med multi-turn konversation.
 
@@ -113,16 +117,20 @@ class AnthropicProvider(BaseProvider):
                     {"role": "user", "content": "..."},
                 ]
             model: Modellnamn (t.ex. "claude-sonnet-4-5-20250514")
+            max_tokens: Max output tokens (default 16384)
 
         Returns:
             ProviderResponse med text och status
         """
         try:
-            response = self.client.messages.create(
+            resolved_max = max_tokens or 16384
+
+            with self.client.messages.stream(
                 model=model,
-                max_tokens=8192,
+                max_tokens=resolved_max,
                 messages=messages
-            )
+            ) as stream:
+                response = stream.get_final_message()
 
             input_tok = getattr(response.usage, 'input_tokens', 0) if response.usage else 0
             output_tok = getattr(response.usage, 'output_tokens', 0) if response.usage else 0

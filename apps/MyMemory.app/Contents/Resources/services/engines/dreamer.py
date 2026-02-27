@@ -1,33 +1,43 @@
 #!/usr/bin/env python3
 """
-Dreamer Engine (v2.0)
+Dreamer Engine (OBJEKT-107)
 
-Batch refinement of the knowledge graph.
-Phase 3 of the pipeline: Collect & Normalize -> Ingestion -> DREAMING
+Systematic structural analysis of the entire knowledge graph.
+Phase 3 of the pipeline: Collect & Normalize -> Ingestion -> Enrichment -> DREAMER
 
-Responsibilities:
-- Scan candidates for refinement (80/20 strategy)
-- Structural analysis (SPLIT, RENAME, DELETE, RE-CATEGORIZE)
-- Entity resolution (MERGE duplicates)
-- Propagate changes back to Lake/Vector
+Pass order:
+  1. DETERMINISTIC — schema-invalid edges, self-aliases, UUID-aliases (free, no LLM)
+  2. MERGE — name-based discovery → LLM evaluation → skip-cache
+  3. RENAME — regex discovery → LLM evaluation → flag-as-state
+  4. SPLIT/RECAT — reads quality_flags from enrichment → LLM evaluation → clear flag
 """
 
-import logging
+import difflib
+import hashlib
 import json
+import logging
 import os
 import re
-import yaml
-from typing import List, Dict, Any
+import unicodedata
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 from services.utils.graph_service import GraphService
 from services.utils.vector_service import VectorService
-from services.utils.lake_service import LakeService
 from services.utils.llm_service import LLMService
 from services.utils.schema_validator import SchemaValidator
-from services.utils.metadata_service import generate_semantic_metadata
-
-# Load config for logging
 from services.utils.config_loader import get_config
+
+# Import shared utilities from enrichment
+from services.engines.enrichment import (
+    Enrichment,
+    _short_id,
+    _node_name,
+    get_schema_validator,
+    ENRICHMENT_CONFIG,
+)
+
+# Load config
 try:
     _CONFIG = get_config()
 except FileNotFoundError:
@@ -37,843 +47,961 @@ LOG_FILE = os.path.expanduser(_CONFIG.get('logging', {}).get('system_log', '~/My
 log_dir = os.path.dirname(LOG_FILE)
 os.makedirs(log_dir, exist_ok=True)
 
-# Configure root logger: file only, no console
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-for handler in root_logger.handlers[:]:
-    root_logger.removeHandler(handler)
-file_handler = logging.FileHandler(LOG_FILE)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - DREAMER - %(levelname)s - %(message)s'))
-root_logger.addHandler(file_handler)
-
-# Tysta tredjepartsloggers
-for _name in ['httpx', 'httpcore', 'google', 'google_genai', 'anyio']:
-    logging.getLogger(_name).setLevel(logging.WARNING)
-
 LOGGER = logging.getLogger('Dreamer')
 
-# Terminal status (visual feedback)
+# Terminal status
 from services.utils.terminal_status import status as terminal_status
 
-
-def _short_id(node_id: str) -> str:
-    """Shorten UUID for terminal display: 'a2453abe-...' """
-    if node_id and len(node_id) > 12 and '-' in node_id:
-        return f"{node_id[:8]}-..."
-    return node_id
-
-
-def _node_name(node: dict) -> str:
-    """Get node name from properties."""
-    return node.get("properties", {}).get("name", node.get("id", "?"))
-
-_SCHEMA_VALIDATOR = None
-
-def _get_schema_validator():
-    """Get cached SchemaValidator instance."""
-    global _SCHEMA_VALIDATOR
-    if _SCHEMA_VALIDATOR is None:
-        _SCHEMA_VALIDATOR = SchemaValidator()
-    return _SCHEMA_VALIDATOR
-
-
-def get_schema_validator():
-    """Public accessor for schema validator (used in _prepare_node_for_llm)."""
-    return _get_schema_validator()
-
-
+# Config
 DREAMER_CONFIG = _CONFIG.get('dreamer', {})
+THRESHOLDS = DREAMER_CONFIG.get('thresholds', {})
+
+
+# =====================================================================
+# DISCOVERY HELPERS (deterministic, no LLM)
+# =====================================================================
+
+def _fold_diacritics(s: str) -> str:
+    """Fold diacritics: Ohlén → ohlen, Björkengren → bjorkengren."""
+    return unicodedata.normalize('NFD', s).encode('ascii', 'ignore').decode().lower()
+
+
+def _tokenize(name: str) -> set:
+    """Split name into lowercase folded tokens."""
+    return set(_fold_diacritics(name).split())
+
+
+def _is_single_token(name: str) -> bool:
+    """Check if name is a single word."""
+    return len(name.strip().split()) == 1
+
+
+def _is_weak_name(name: str) -> bool:
+    """Identify UUIDs, generic placeholders, or single-token names."""
+    patterns = [
+        r'^[0-9a-f]{8}-[0-9a-f]{4}',
+        r'^(Talare|Speaker) \d+$',
+        r'^Unknown$',
+        r'^Unit_.*$',
+    ]
+    if _is_single_token(name):
+        return True
+    return any(re.match(p, name, re.I) for p in patterns)
 
 
 class Dreamer:
-    """
-    Dreamer Engine: Responsible for identity resolution and graph maintenance.
-    Uses VectorService for semantic duplicate detection and LLM for evaluation.
-    """
+    """Systematic structural analysis of the entire knowledge graph."""
 
     def __init__(self, graph_service: GraphService, vector_service: VectorService,
-                 config_path: str = "config/services_prompts.yaml"):
+                 prompts_path: str = "config/services_prompts.yaml"):
         self.graph_service = graph_service
         self.vector_service = vector_service
         self.llm_service = LLMService()
-        self.prompts = self._load_prompts(config_path)
+        self.prompts = self._load_prompts(prompts_path)
+        self.schema = get_schema_validator().schema
 
     def _load_prompts(self, path: str) -> dict:
         try:
+            import yaml
             with open(path, "r") as f:
                 data = yaml.safe_load(f)
-                # Merge dreamer and entity_resolver sections
-                prompts = data.get("dreamer", {})
-                prompts.update(data.get("entity_resolver", {}))
-                return prompts
+                return data.get("dreamer", {})
         except Exception as e:
-            LOGGER.error(f"Failed to load prompts from {path}: {e}")
+            LOGGER.error(f"Failed to load dreamer prompts from {path}: {e}")
             return {}
 
-    def _get_node_type_description(self, node_type: str) -> str:
-        """Get schema description for a node type."""
-        schema = get_schema_validator().schema
-        node_def = schema.get("nodes", {}).get(node_type, {})
-        description = node_def.get("description", "")
-        if not description:
-            return f"(Ingen beskrivning tillgänglig för '{node_type}')"
-        return description
+    # =====================================================================
+    # SHARED: NODE CONTEXT BUILDER
+    # =====================================================================
 
-    def _validate_edges_for_recategorize(self, node_id: str, new_type: str) -> tuple:
-        """
-        Validate edges for hypothetical type change.
-
-        Returns:
-            (valid_edges: list of edge dicts, invalid_edges: list of edge dicts)
-        """
+    def _build_edges_text(self, node_id: str) -> str:
+        """Build human-readable edge summary for a node."""
         edges_out = self.graph_service.get_edges_from(node_id)
         edges_in = self.graph_service.get_edges_to(node_id)
-        all_edges = edges_out + edges_in
+        # Filter out MENTIONS/DEALS_WITH
+        edges_out = [e for e in edges_out if e["type"] not in ("MENTIONS", "DEALS_WITH")]
+        edges_in = [e for e in edges_in if e["type"] not in ("MENTIONS", "DEALS_WITH")]
 
-        if not all_edges:
-            return ([], [])
+        lines = []
+        for e in edges_out:
+            other = self.graph_service.get_node(e["target"])
+            if other:
+                name = other.get("properties", {}).get("name", e["target"])
+                lines.append(f"→[{e['type']}]→ {name} ({other.get('type', '?')})")
+                rc = e.get("properties", {}).get("relation_context", [])
+                for entry in rc[-3:]:
+                    text = entry.get("text", "") if isinstance(entry, dict) else str(entry)
+                    if text:
+                        lines.append(f"    {text}")
+        for e in edges_in:
+            other = self.graph_service.get_node(e["source"])
+            if other:
+                name = other.get("properties", {}).get("name", e["source"])
+                lines.append(f"←[{e['type']}]← {name} ({other.get('type', '?')})")
+                rc = e.get("properties", {}).get("relation_context", [])
+                for entry in rc[-3:]:
+                    text = entry.get("text", "") if isinstance(entry, dict) else str(entry)
+                    if text:
+                        lines.append(f"    {text}")
 
-        validator = get_schema_validator()
-        valid_edges = []
-        invalid_edges = []
+        return "\n".join(lines) if lines else "(Inga relationer)"
 
-        for edge in all_edges:
-            # Build nodes_map with the NEW type for this node
-            source_type = new_type if edge["source"] == node_id else self._get_node_type_for_id(edge["source"])
-            target_type = new_type if edge["target"] == node_id else self._get_node_type_for_id(edge["target"])
+    def _get_edge_count(self, node_id: str) -> int:
+        """Count non-MENTIONS edges for a node."""
+        edges_out = self.graph_service.get_edges_from(node_id)
+        edges_in = self.graph_service.get_edges_to(node_id)
+        return len([e for e in edges_out + edges_in if e["type"] not in ("MENTIONS", "DEALS_WITH")])
 
-            nodes_map = {edge["source"]: source_type, edge["target"]: target_type}
-            ok, msg = validator.validate_edge(edge, nodes_map)
+    # =====================================================================
+    # SKIP-CACHE (MERGE only)
+    # =====================================================================
 
-            if ok:
-                valid_edges.append(edge)
-            else:
-                invalid_edges.append(edge)
-
-        return (valid_edges, invalid_edges)
-
-    def _get_node_type_for_id(self, node_id: str) -> str:
-        """Get type for a node from the graph."""
-        node = self.graph_service.get_node(node_id)
-        if node:
-            return node.get("type", "Unknown")
-        return "Unknown"
-
-    def scan_candidates(self) -> List[Dict]:
-        """
-        Get candidates for refinement using 80/20 strategy.
-        Delegates logic to GraphService to capture both 'Heat' (Relevance) and 'Deep Sleep' (Maintenance).
-        """
-        candidate_limit = DREAMER_CONFIG.get('candidate_limit', 50)
-        candidates = self.graph_service.get_refinement_candidates(limit=candidate_limit)
-
-        if candidates:
-            LOGGER.info(f"Dreamer selected {len(candidates)} candidates via Relevance/Maintenance strategy.")
-
-        return candidates
-
-    def ensure_node_indexed(self, node: Dict):
-        """Ensure node exists in vector index before searching."""
-        self.vector_service.upsert_node(node)
-
-    def find_potential_matches(self, node: Dict) -> List[Dict]:
-        """Find potential duplicates for a given node using SEMANTIC SEARCH."""
-        self.ensure_node_indexed(node)
-
-        name = node.get("properties", {}).get("name", "")
-        if not name:
-            return []
-
-        # Build search string (Name + Type + Context)
-        search_text = f"{name} {node.get('type')}"
-        node_context = node.get("properties", {}).get("node_context", [])
-        if node_context and isinstance(node_context, list):
-            ctx_texts = [c.get('text', '') for c in node_context if isinstance(c, dict)]
-            search_text += " " + " ".join(ctx_texts)
-
-        # Semantic search
-        vector_limit = DREAMER_CONFIG.get('vector_search_limit', 10)
-        results = self.vector_service.search(search_text, limit=vector_limit)
-
-        valid_matches = []
-        for res in results:
-            match_id = res['id']
-            if match_id == node["id"]:
-                continue
-
-            match_node = self.graph_service.get_node(match_id)
-            if not match_node:
-                continue
-
-            if match_node["type"] != node["type"]:
-                continue
-
-            valid_matches.append(match_node)
-
-        return valid_matches
-
-    def _prepare_node_for_llm(self, node: Dict) -> Dict:
-        """Clean node from technical metadata before sending to LLM."""
-        if not node:
+    def _load_merge_skip_cache(self) -> dict:
+        """Load skip-cache from JSON file."""
+        cache_file = os.path.expanduser(
+            DREAMER_CONFIG.get('merge', {}).get(
+                'skip_cache_file', '~/Library/Application Support/MyMemory/merge_skip_cache.json')
+        )
+        if not os.path.exists(cache_file):
+            return {}
+        try:
+            with open(cache_file, 'r') as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            LOGGER.warning(f"Could not load merge skip-cache: {e}")
             return {}
 
-        clean_node = {
-            "type": node.get("type"),
-            "aliases": node.get("aliases", []),
-            "properties": node.get("properties", {}).copy()
-        }
-
-        # Remove system properties
-        props = clean_node["properties"]
-        schema = get_schema_validator().schema
-        base_props = schema.get("base_properties", {}).get("properties", {})
-        for key, key_def in base_props.items():
-            if not key_def.get("include_in_vector", True):
-                props.pop(key, None)
-
-        return clean_node
-
-    def _build_merge_prompt(self, primary: Dict, secondary: Dict) -> str:
-        """Build prompt for merge evaluation."""
-        prompt_template = self.prompts.get("entity_resolution_prompt", "")
-        if not prompt_template:
-            LOGGER.error("Missing entity_resolution_prompt")
-            return ""
-
-        p_clean = self._prepare_node_for_llm(primary)
-        s_clean = self._prepare_node_for_llm(secondary)
-
-        return prompt_template.format(
-            node_a_json=json.dumps(p_clean, indent=2, ensure_ascii=False),
-            node_b_json=json.dumps(s_clean, indent=2, ensure_ascii=False)
+    def _save_merge_skip_cache(self, cache: dict):
+        """Save skip-cache to JSON file."""
+        cache_file = os.path.expanduser(
+            DREAMER_CONFIG.get('merge', {}).get(
+                'skip_cache_file', '~/Library/Application Support/MyMemory/merge_skip_cache.json')
         )
-
-    def _parse_merge_response(self, response_text: str) -> Dict:
-        """Parse LLM response for merge evaluation."""
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         try:
-            cleaned_text = response_text.replace("```json", "").replace("```", "").strip()
-            result = json.loads(cleaned_text)
+            with open(cache_file, 'w') as f:
+                json.dump(cache, f, indent=2, ensure_ascii=False)
+        except OSError as e:
+            LOGGER.error(f"Could not save merge skip-cache: {e}")
 
-            if isinstance(result, list):
-                if result:
-                    result = result[0]
-                else:
-                    return {"decision": "IGNORE", "confidence": 0.0, "reason": "Empty list from LLM"}
+    def _compute_node_hash(self, node: dict) -> str:
+        """Compute hash for a node based on context_summary + edge_count."""
+        props = node.get("properties", {})
+        ctx = props.get("context_summary", "")
+        edge_count = self._get_edge_count(node["id"])
+        raw = f"{ctx}|{edge_count}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-            if not isinstance(result, dict):
-                return {"decision": "IGNORE", "confidence": 0.0, "reason": "Invalid format from LLM"}
+    def _compute_pair_key(self, id_a: str, id_b: str) -> str:
+        """Compute deterministic pair key (sorted)."""
+        return "|".join(sorted([id_a, id_b]))
 
-            return result
-        except Exception as e:
-            LOGGER.error(f"LLM Evaluation parse failed: {e}")
-            return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Parse Error"}
+    # =====================================================================
+    # DISCOVERY: MERGE CANDIDATES
+    # =====================================================================
 
-    def batch_evaluate_merges(self, pairs: List[tuple]) -> List[Dict]:
+    def _discover_merge_candidates(self, max_candidates: int = None) -> List[Tuple[dict, dict, str]]:
+        """Find merge candidates using name-based strategies.
+
+        Returns list of (node_a, node_b, strategy) tuples.
+        max_candidates=None means use config default. 0 means unlimited.
         """
-        Evaluate multiple merge candidates in parallel using batch_generate.
-
-        Args:
-            pairs: List of (primary_node, secondary_node) tuples
-
-        Returns:
-            List of merge evaluation results in same order as input pairs
-        """
-        if not pairs:
+        merge_config = DREAMER_CONFIG.get('merge', {})
+        if not merge_config.get('enabled', True):
             return []
 
-        prompts = []
-        valid_indices = []
+        strategies = merge_config.get('strategies', ['token_subset', 'diacritics_fold', 'fuzzy'])
+        fuzzy_cutoff = merge_config.get('fuzzy_cutoff', 0.80)
+        if max_candidates is None:
+            max_candidates = merge_config.get('max_candidates_per_run', 20)
 
-        for i, (primary, secondary) in enumerate(pairs):
-            prompt = self._build_merge_prompt(primary, secondary)
-            if prompt:
-                prompts.append(prompt)
-                valid_indices.append(i)
+        # Load all entity nodes (skip Source + Event — events have dates in names, never merge)
+        valid_types = set(self.schema.get("nodes", {}).keys())
+        rows = self.graph_service.conn.execute(
+            "SELECT id, type, properties FROM nodes WHERE type NOT IN ('Source', 'Event')"
+        ).fetchall()
 
-        if not prompts:
-            LOGGER.warning("No valid merge prompts could be built")
-            return [{"decision": "IGNORE", "confidence": 0.0, "reason": "No prompt"} for _ in pairs]
+        nodes_by_type = {}
+        for r in rows:
+            if r[1] not in valid_types:
+                continue
+            node = self.graph_service.get_node(r[0])
+            if node:
+                node_type = node.get("type", "")
+                if node_type not in nodes_by_type:
+                    nodes_by_type[node_type] = []
+                nodes_by_type[node_type].append(node)
 
-        LOGGER.info(f"Running batch merge evaluation for {len(prompts)} pairs...")
+        candidates = []
+        seen_pairs = set()
 
-        # Anthropic Sonnet för entity resolution (OBJEKT-85)
-        responses = self.llm_service.batch_generate(prompts, provider='anthropic', model=self.llm_service.models['fast'])
+        for node_type, nodes in nodes_by_type.items():
+            for i, node_a in enumerate(nodes):
+                name_a = _node_name(node_a)
+                tokens_a = _tokenize(name_a)
+                folded_a = _fold_diacritics(name_a)
 
-        # Build results list maintaining original order
-        results = [{"decision": "IGNORE", "confidence": 0.0, "reason": "No prompt"} for _ in pairs]
+                for node_b in nodes[i+1:]:
+                    if max_candidates and len(candidates) >= max_candidates:
+                        break
 
-        for idx, response in zip(valid_indices, responses):
-            if not response.success:
-                LOGGER.error(f"Merge evaluation LLM failed: {response.error}")
-                results[idx] = {"decision": "IGNORE", "confidence": 0.0, "reason": f"LLM error: {response.error}"}
-            else:
-                results[idx] = self._parse_merge_response(response.text)
+                    name_b = _node_name(node_b)
+                    pair_key = self._compute_pair_key(node_a["id"], node_b["id"])
+                    if pair_key in seen_pairs:
+                        continue
 
-        return results
+                    matched_strategy = None
+                    tokens_b = _tokenize(name_b)
+                    folded_b = _fold_diacritics(name_b)
 
-    def evaluate_merge(self, primary: Dict, secondary: Dict) -> Dict:
-        """Ask LLM: Are these the same entity? Single-pair version for backwards compatibility."""
-        prompt = self._build_merge_prompt(primary, secondary)
+                    # Strategy 1: Token subset
+                    if 'token_subset' in strategies:
+                        if tokens_a and tokens_b:
+                            smaller, larger = (tokens_a, tokens_b) if len(tokens_a) <= len(tokens_b) else (tokens_b, tokens_a)
+                            if smaller.issubset(larger) and smaller != larger:
+                                matched_strategy = "token_subset"
 
-        if not prompt:
-            return {"decision": "IGNORE", "confidence": 0.0}
+                    # Strategy 2: Diacritics fold
+                    if not matched_strategy and 'diacritics_fold' in strategies:
+                        if folded_a == folded_b and name_a != name_b:
+                            matched_strategy = "diacritics_fold"
 
-        # Anthropic Sonnet för entity resolution (OBJEKT-85)
-        response = self.llm_service.generate(prompt, provider='anthropic', model=self.llm_service.models['fast'])
+                    # Strategy 3a: Fuzzy first-token (single-token vs multi-token)
+                    if not matched_strategy and 'fuzzy' in strategies:
+                        if len(tokens_a) == 1 and len(tokens_b) > 1:
+                            first_b = folded_b.split()[0]
+                            ratio = difflib.SequenceMatcher(None, folded_a, first_b).ratio()
+                            if ratio >= fuzzy_cutoff:
+                                matched_strategy = "fuzzy_first_token"
+                        elif len(tokens_b) == 1 and len(tokens_a) > 1:
+                            first_a = folded_a.split()[0]
+                            ratio = difflib.SequenceMatcher(None, folded_b, first_a).ratio()
+                            if ratio >= fuzzy_cutoff:
+                                matched_strategy = "fuzzy_first_token"
+
+                    # Strategy 3b: Fuzzy full name (same token count, >=2 tokens)
+                    if not matched_strategy and 'fuzzy' in strategies:
+                        if len(tokens_a) == len(tokens_b) and len(tokens_a) >= 2:
+                            ratio = difflib.SequenceMatcher(None, folded_a, folded_b).ratio()
+                            if ratio >= fuzzy_cutoff and name_a != name_b:
+                                matched_strategy = "fuzzy_full"
+
+                    if matched_strategy:
+                        seen_pairs.add(pair_key)
+                        candidates.append((node_a, node_b, matched_strategy))
+
+                if max_candidates and len(candidates) >= max_candidates:
+                    break
+
+        LOGGER.info(f"Merge discovery: {len(candidates)} candidates from {sum(len(v) for v in nodes_by_type.values())} nodes")
+        return candidates
+
+    # =====================================================================
+    # DISCOVERY: RENAME CANDIDATES
+    # =====================================================================
+
+    def _discover_rename_candidates(self, max_candidates: int = None) -> List[Tuple[dict, str, str]]:
+        """Find rename candidates: single-token names with full name in context.
+
+        Returns list of (node, suggested_name, reason) tuples.
+        max_candidates=None means use config default. 0 means unlimited.
+        """
+        rename_config = DREAMER_CONFIG.get('rename', {})
+        if not rename_config.get('enabled', True):
+            return []
+
+        if max_candidates is None:
+            max_candidates = rename_config.get('max_candidates_per_run', 30)
+
+        rows = self.graph_service.conn.execute(
+            "SELECT id, type, properties FROM nodes WHERE type = 'Person'"
+        ).fetchall()
+
+        candidates = []
+        for r in rows:
+            if max_candidates and len(candidates) >= max_candidates:
+                break
+
+            props = json.loads(r[2]) if r[2] else {}
+            name = props.get("name", r[0])
+
+            if not _is_single_token(name):
+                continue
+
+            ctx = props.get("context_summary", "")
+            if not ctx:
+                continue
+
+            # Regex: find "Name Lastname" pattern in context
+            pattern = re.compile(
+                rf'\b{re.escape(name)}\s+([A-ZÅÄÖ][a-zåäöé]+(?:\s+[A-ZÅÄÖ][a-zåäöé]+)*)',
+                re.UNICODE
+            )
+            match = pattern.search(ctx)
+            if match:
+                suggested = f"{name} {match.group(1)}"
+                node = self.graph_service.get_node(r[0])
+                if node:
+                    candidates.append((node, suggested, "single_token_with_full_name_in_context"))
+
+        LOGGER.info(f"Rename discovery: {len(candidates)} candidates")
+        return candidates
+
+    # =====================================================================
+    # DETERMINISTIC CLEANUP (no LLM)
+    # =====================================================================
+
+    def _count_deterministic_issues(self) -> dict:
+        """Count deterministic issues without modifying the graph (for dry-run)."""
+        result = {"invalid_edges": 0, "self_aliases": 0, "uuid_aliases": 0}
+
+        # Count invalid edges
+        if DREAMER_CONFIG.get('deterministic', {}).get('invalid_edge_cleanup', True):
+            validator = get_schema_validator()
+            rows = self.graph_service.conn.execute(
+                "SELECT source, target, edge_type FROM edges WHERE edge_type != 'MENTIONS' AND edge_type != 'DEALS_WITH'"
+            ).fetchall()
+            for source_id, target_id, edge_type in rows:
+                source_node = self.graph_service.get_node(source_id)
+                target_node = self.graph_service.get_node(target_id)
+                if not source_node or not target_node:
+                    result["invalid_edges"] += 1
+                    continue
+                nodes_map = {
+                    source_id: source_node.get("type", "Unknown"),
+                    target_id: target_node.get("type", "Unknown"),
+                }
+                edge = {"source": source_id, "target": target_id, "type": edge_type}
+                ok, msg = validator.validate_edge(edge, nodes_map)
+                if not ok:
+                    result["invalid_edges"] += 1
+
+            mentions_rows = self.graph_service.conn.execute(
+                "SELECT source, target, edge_type FROM edges WHERE edge_type = 'MENTIONS'"
+            ).fetchall()
+            for source_id, target_id, edge_type in mentions_rows:
+                target_node = self.graph_service.get_node(target_id)
+                if not target_node or target_node.get("type") == "Roles":
+                    result["invalid_edges"] += 1
+
+        # Count self-aliases
+        if DREAMER_CONFIG.get('deterministic', {}).get('self_alias_cleanup', True):
+            rows = self.graph_service.conn.execute(
+                "SELECT id, aliases, properties FROM nodes WHERE aliases IS NOT NULL AND aliases != '[]'"
+            ).fetchall()
+            for node_id, aliases_str, props_str in rows:
+                aliases = json.loads(aliases_str) if aliases_str else []
+                props = json.loads(props_str) if props_str else {}
+                name = props.get("name", node_id)
+                result["self_aliases"] += sum(1 for a in aliases if a == name)
+
+        # Count UUID-aliases
+        if DREAMER_CONFIG.get('deterministic', {}).get('uuid_alias_cleanup', True):
+            uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+            rows = self.graph_service.conn.execute(
+                "SELECT id, aliases FROM nodes WHERE aliases IS NOT NULL AND aliases != '[]'"
+            ).fetchall()
+            for node_id, aliases_str in rows:
+                aliases = json.loads(aliases_str) if aliases_str else []
+                result["uuid_aliases"] += sum(1 for a in aliases if uuid_pattern.match(a))
+
+        return result
+
+    def _cleanup_invalid_edges(self) -> int:
+        """Remove edges that violate the schema. Returns count removed."""
+        if not DREAMER_CONFIG.get('deterministic', {}).get('invalid_edge_cleanup', True):
+            return 0
+
+        validator = get_schema_validator()
+        rows = self.graph_service.conn.execute(
+            "SELECT source, target, edge_type FROM edges WHERE edge_type != 'MENTIONS' AND edge_type != 'DEALS_WITH'"
+        ).fetchall()
+
+        removed = 0
+        for source_id, target_id, edge_type in rows:
+            source_node = self.graph_service.get_node(source_id)
+            target_node = self.graph_service.get_node(target_id)
+            if not source_node or not target_node:
+                # Orphaned edge — remove
+                self.graph_service.delete_edge(source_id, target_id, edge_type)
+                removed += 1
+                continue
+
+            nodes_map = {
+                source_id: source_node.get("type", "Unknown"),
+                target_id: target_node.get("type", "Unknown"),
+            }
+            edge = {"source": source_id, "target": target_id, "type": edge_type}
+            ok, msg = validator.validate_edge(edge, nodes_map)
+            if not ok:
+                self.graph_service.delete_edge(source_id, target_id, edge_type)
+                removed += 1
+
+        # Also check MENTIONS edges: only valid targets (not Roles)
+        mentions_rows = self.graph_service.conn.execute(
+            "SELECT source, target, edge_type FROM edges WHERE edge_type = 'MENTIONS'"
+        ).fetchall()
+        for source_id, target_id, edge_type in mentions_rows:
+            target_node = self.graph_service.get_node(target_id)
+            if not target_node:
+                self.graph_service.delete_edge(source_id, target_id, edge_type)
+                removed += 1
+                continue
+            target_type = target_node.get("type", "")
+            # MENTIONS should not point to Roles (FINDING-1 from PoC)
+            if target_type == "Roles":
+                self.graph_service.delete_edge(source_id, target_id, edge_type)
+                removed += 1
+
+        if removed:
+            LOGGER.info(f"Deterministic: removed {removed} invalid edges")
+        return removed
+
+    def _cleanup_self_aliases(self) -> int:
+        """Remove aliases where alias == name. Returns count cleaned."""
+        if not DREAMER_CONFIG.get('deterministic', {}).get('self_alias_cleanup', True):
+            return 0
+
+        rows = self.graph_service.conn.execute(
+            "SELECT id, aliases, properties FROM nodes WHERE aliases IS NOT NULL AND aliases != '[]'"
+        ).fetchall()
+
+        cleaned = 0
+        for node_id, aliases_str, props_str in rows:
+            aliases = json.loads(aliases_str) if aliases_str else []
+            props = json.loads(props_str) if props_str else {}
+            name = props.get("name", node_id)
+
+            new_aliases = [a for a in aliases if a != name]
+            if len(new_aliases) < len(aliases):
+                self.graph_service.upsert_node(node_id, None, new_aliases, {})
+                cleaned += len(aliases) - len(new_aliases)
+
+        if cleaned:
+            LOGGER.info(f"Deterministic: removed {cleaned} self-aliases")
+        return cleaned
+
+    def _cleanup_uuid_aliases(self) -> int:
+        """Remove UUID-like aliases. Returns count cleaned."""
+        if not DREAMER_CONFIG.get('deterministic', {}).get('uuid_alias_cleanup', True):
+            return 0
+
+        uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+
+        rows = self.graph_service.conn.execute(
+            "SELECT id, aliases, properties FROM nodes WHERE aliases IS NOT NULL AND aliases != '[]'"
+        ).fetchall()
+
+        cleaned = 0
+        for node_id, aliases_str, props_str in rows:
+            aliases = json.loads(aliases_str) if aliases_str else []
+            new_aliases = [a for a in aliases if not uuid_pattern.match(a)]
+            if len(new_aliases) < len(aliases):
+                self.graph_service.upsert_node(node_id, None, new_aliases, {})
+                cleaned += len(aliases) - len(new_aliases)
+
+        if cleaned:
+            LOGGER.info(f"Deterministic: removed {cleaned} UUID aliases")
+        return cleaned
+
+    # =====================================================================
+    # LLM EVALUATION
+    # =====================================================================
+
+    def _call_llm_json(self, prompt: str, step_name: str) -> Optional[Dict]:
+        """Call LLM and return parsed JSON. Reuses Dreamer's repair logic."""
+        model_key = DREAMER_CONFIG.get('model', 'fast')
+        model_id = self.llm_service.models.get(model_key, self.llm_service.models['fast'])
+        max_output_tokens = DREAMER_CONFIG.get('max_output_tokens', 32768)
+
+        response = self.llm_service.generate(
+            prompt=prompt,
+            provider='anthropic',
+            model=model_id,
+            max_tokens=max_output_tokens
+        )
+
         if not response.success:
-            LOGGER.error(f"LLM Evaluation failed: {response.error}")
-            return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Error"}
+            LOGGER.error(f"LLM {step_name} failed: {response.error}")
+            return None
 
-        return self._parse_merge_response(response.text)
+        try:
+            cleaned = response.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            LOGGER.error(f"LLM {step_name} JSON parse failed: {e}")
+            # Try truncated JSON repair
+            try:
+                for i in range(len(cleaned) - 1, 0, -1):
+                    if cleaned[i] == "}":
+                        attempt = cleaned[:i+1]
+                        open_b = attempt.count("[") - attempt.count("]")
+                        open_c = attempt.count("{") - attempt.count("}")
+                        suffix = "]" * open_b + "}" * open_c
+                        try:
+                            result = json.loads(attempt + suffix)
+                            LOGGER.warning(f"LLM {step_name}: repaired truncated JSON")
+                            return result
+                        except json.JSONDecodeError:
+                            continue
+            except Exception:
+                pass
+            return None
 
-    def prune_context(self, node_id: str):
-        """Condense node_context for a node if list is too long."""
+    def _evaluate_merge(self, node_a: dict, node_b: dict) -> Optional[Dict]:
+        """Evaluate a merge candidate pair via LLM."""
+        template = self.prompts.get("merge_evaluation", "")
+        if not template:
+            LOGGER.error("Missing merge_evaluation prompt")
+            return None
+
+        props_a = node_a.get("properties", {})
+        props_b = node_b.get("properties", {})
+
+        prompt = template.format(
+            name_a=props_a.get("name", node_a["id"]),
+            type_a=node_a.get("type", "?"),
+            context_a=props_a.get("context_summary", "(saknas)"),
+            edges_a=self._build_edges_text(node_a["id"]),
+            aliases_a=node_a.get("aliases", []),
+            name_b=props_b.get("name", node_b["id"]),
+            type_b=node_b.get("type", "?"),
+            context_b=props_b.get("context_summary", "(saknas)"),
+            edges_b=self._build_edges_text(node_b["id"]),
+            aliases_b=node_b.get("aliases", []),
+        )
+
+        return self._call_llm_json(prompt, f"merge_eval({_short_id(node_a['id'])}↔{_short_id(node_b['id'])})")
+
+    def _evaluate_rename(self, node: dict, suggested_name: str, reason: str) -> Optional[Dict]:
+        """Evaluate a rename candidate via LLM."""
+        template = self.prompts.get("rename_evaluation", "")
+        if not template:
+            LOGGER.error("Missing rename_evaluation prompt")
+            return None
+
+        props = node.get("properties", {})
+        prompt = template.format(
+            current_name=props.get("name", node["id"]),
+            node_type=node.get("type", "?"),
+            context_summary=props.get("context_summary", "(saknas)"),
+            suggested_name=suggested_name,
+            reason=reason,
+            edges_text=self._build_edges_text(node["id"]),
+        )
+
+        return self._call_llm_json(prompt, f"rename_eval({_short_id(node['id'])})")
+
+    def _evaluate_split(self, node: dict, flag_reason: str) -> Optional[Dict]:
+        """Evaluate a split candidate via LLM."""
+        template = self.prompts.get("split_evaluation", "")
+        if not template:
+            LOGGER.error("Missing split_evaluation prompt")
+            return None
+
+        props = node.get("properties", {})
+        prompt = template.format(
+            node_name=props.get("name", node["id"]),
+            node_type=node.get("type", "?"),
+            context_summary=props.get("context_summary", "(saknas)"),
+            aliases=node.get("aliases", []),
+            edges_text=self._build_edges_text(node["id"]),
+            flag_reason=flag_reason,
+        )
+
+        return self._call_llm_json(prompt, f"split_eval({_short_id(node['id'])})")
+
+    def _evaluate_recategorize(self, node: dict, flag_reason: str) -> Optional[Dict]:
+        """Evaluate a recategorize candidate via LLM."""
+        template = self.prompts.get("recategorize_evaluation", "")
+        if not template:
+            LOGGER.error("Missing recategorize_evaluation prompt")
+            return None
+
+        props = node.get("properties", {})
+        allowed_types = list(self.schema.get("nodes", {}).keys())
+
+        prompt = template.format(
+            node_name=props.get("name", node["id"]),
+            current_type=node.get("type", "?"),
+            context_summary=props.get("context_summary", "(saknas)"),
+            edges_text=self._build_edges_text(node["id"]),
+            allowed_types=", ".join(allowed_types),
+            flag_reason=flag_reason,
+        )
+
+        return self._call_llm_json(prompt, f"recat_eval({_short_id(node['id'])})")
+
+    # =====================================================================
+    # EXECUTION (uses graph_service methods)
+    # =====================================================================
+
+    def _execute_merge(self, primary_id: str, secondary_id: str) -> bool:
+        """Execute a merge operation."""
+        try:
+            units = self.graph_service.get_related_unit_ids(secondary_id)
+            self.graph_service.merge_nodes(primary_id, secondary_id)
+            self.vector_service.delete(secondary_id)
+            merged_node = self.graph_service.get_node(primary_id)
+            if merged_node:
+                self.vector_service.upsert_node(merged_node)
+            # Propagate to affected Lake files
+            if units:
+                enrichment = Enrichment(self.graph_service, self.vector_service)
+                enrichment.propagate_changes(list(units))
+            return True
+        except Exception as e:
+            LOGGER.error(f"Merge execution failed: {e}")
+            return False
+
+    def _execute_rename(self, node_id: str, new_name: str) -> bool:
+        """Execute a rename operation."""
+        try:
+            units = self.graph_service.get_related_unit_ids(node_id)
+            self.graph_service.rename_node(node_id, new_name)
+            # rename_node may auto-merge if new_name exists
+            renamed_node = self.graph_service.get_node(new_name)
+            if renamed_node:
+                self.vector_service.upsert_node(renamed_node)
+            if units:
+                enrichment = Enrichment(self.graph_service, self.vector_service)
+                enrichment.propagate_changes(list(units))
+            return True
+        except Exception as e:
+            LOGGER.error(f"Rename execution failed: {e}")
+            return False
+
+    def _execute_split(self, node_id: str, clusters: list) -> bool:
+        """Execute a split operation."""
+        try:
+            units = self.graph_service.get_related_unit_ids(node_id)
+            new_nodes = self.graph_service.split_node(node_id, clusters)
+            if new_nodes:
+                for new_nid in new_nodes:
+                    new_node = self.graph_service.get_node(new_nid)
+                    if new_node:
+                        self.vector_service.upsert_node(new_node)
+            if units:
+                enrichment = Enrichment(self.graph_service, self.vector_service)
+                enrichment.propagate_changes(list(units))
+            return True
+        except Exception as e:
+            LOGGER.error(f"Split execution failed: {e}")
+            return False
+
+    def _execute_recategorize(self, node_id: str, new_type: str) -> bool:
+        """Execute a recategorize operation."""
+        try:
+            # Validate edges before changing type
+            enrichment = Enrichment(self.graph_service, self.vector_service)
+            valid_edges, invalid_edges = enrichment._validate_edges_for_recategorize(node_id, new_type)
+            for edge in invalid_edges:
+                self.graph_service.delete_edge(edge["source"], edge["target"], edge["type"])
+
+            units = self.graph_service.get_related_unit_ids(node_id)
+            self.graph_service.recategorize_node(node_id, new_type)
+            recat_node = self.graph_service.get_node(node_id)
+            if recat_node:
+                self.vector_service.upsert_node(recat_node)
+            if units:
+                enrichment.propagate_changes(list(units))
+            if invalid_edges:
+                LOGGER.info(f"Recategorize {_short_id(node_id)} → {new_type}: "
+                            f"removed {len(invalid_edges)} invalid edges")
+            return True
+        except Exception as e:
+            LOGGER.error(f"Recategorize execution failed: {e}")
+            return False
+
+    def _clear_quality_flag(self, node_id: str, flag: str):
+        """Remove a specific quality flag from a node."""
         node = self.graph_service.get_node(node_id)
         if not node:
             return
+        props = node.get("properties", {})
+        flags = props.get("quality_flags", [])
+        if flag in flags:
+            flags.remove(flag)
+            props["quality_flags"] = flags
+            if not flags:
+                props.pop("quality_flags", None)
+                props.pop("quality_flag_reason", None)
+            self.graph_service.update_node_properties(node_id, props)
 
-        node_context = node.get('properties', {}).get('node_context', [])
-        if not isinstance(node_context, list) or len(node_context) < 15:
-            return
+    # =====================================================================
+    # MAIN SWEEP
+    # =====================================================================
 
-        LOGGER.info(f"Pruning node_context for {node_id} ({len(node_context)} entries)...")
-
-        ctx_texts = [c.get('text', '') for c in node_context if isinstance(c, dict)]
-
-        prompt_template = self.prompts.get("context_pruning_prompt", "")
-        if not prompt_template:
-            LOGGER.warning("Missing context_pruning_prompt")
-            return
-
-        prompt = prompt_template.format(keywords=json.dumps(ctx_texts, ensure_ascii=False))
-
-        # Anthropic Sonnet för context pruning (OBJEKT-85)
-        response = self.llm_service.generate(prompt, provider='anthropic', model=self.llm_service.models['fast'])
-        if not response.success:
-            LOGGER.error(f"Context pruning LLM failed: {response.error}")
-            return
-
-        try:
-            cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-
-            try:
-                result = json.loads(cleaned_text)
-            except json.JSONDecodeError:
-                match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
-                if match:
-                    result = json.loads(match.group(0))
-                else:
-                    raise
-
-            if isinstance(result, dict) and "pruned_keywords" in result:
-                pruned_texts = set(result["pruned_keywords"])
-                new_context = [c for c in node_context if c.get('text') in pruned_texts]
-
-                props = node.get('properties', {})
-                props['node_context'] = new_context
-                self.graph_service.upsert_node(node['id'], node['type'], node.get('aliases'), props)
-                LOGGER.info(f"Pruned to {len(new_context)} context entries.")
-
-        except Exception as e:
-            LOGGER.error(f"Context pruning parse failed: {e}")
-
-    def _is_weak_name(self, name: str) -> bool:
-        """Identify UUIDs or generic placeholders."""
-        patterns = [
-            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-            r'^Talare \d+$',
-            r'^Speaker \d+$',
-            r'^Unknown$',
-            r'^Unit_.*$'
-        ]
-        return any(re.match(p, name, re.I) for p in patterns)
-
-    def run_resolution_cycle(self, dry_run: bool = False) -> Dict[str, int]:
+    def run_sweep(self, dry_run: bool = False, passes: Optional[List[str]] = None,
+                  limit: int = 0) -> Dict:
         """
-        Main loop for cognitive maintenance with causal updates.
+        Run a full graph sweep.
 
-        Uses batch LLM calls for parallel processing:
-        - Phase 1: Batch structural analysis for all candidates
-        - Phase 2: Batch merge evaluation for all candidate-match pairs
+        Args:
+            dry_run: Show candidates without executing.
+            passes: Optional list of passes to run (default: all).
+                    Options: 'deterministic', 'merge', 'rename', 'split', 'recategorize'
+            limit: Max candidates per pass (0 = use config defaults).
+
+        Returns:
+            Dict with stats per pass.
         """
-        candidates = self.scan_candidates()
-        stats = {"merged": 0, "split": 0, "renamed": 0, "recat": 0, "deleted": 0}
-        affected_units = set()
+        all_passes = ['deterministic', 'merge', 'rename', 'split', 'recategorize']
+        active_passes = passes or all_passes
 
-        if not candidates:
-            LOGGER.info("No candidates for resolution cycle")
-            return stats
+        stats = {
+            "deterministic": {"invalid_edges": 0, "self_aliases": 0, "uuid_aliases": 0},
+            "merge": {"candidates": 0, "merged": 0, "skipped": 0, "cached": 0},
+            "rename": {"candidates": 0, "renamed": 0, "skipped": 0},
+            "split": {"candidates": 0, "split": 0, "skipped": 0},
+            "recategorize": {"candidates": 0, "recategorized": 0, "skipped": 0},
+        }
 
-        thresholds = DREAMER_CONFIG.get('thresholds', {})
-        THRESHOLD_DELETE = thresholds.get('delete', 0.95)
-        THRESHOLD_SPLIT = thresholds.get('split', 0.90)
-        THRESHOLD_RENAME_NORMAL = thresholds.get('rename_normal', 0.95)
-        THRESHOLD_RENAME_WEAK = thresholds.get('rename_weak', 0.70)
-        THRESHOLD_RECATEGORIZE = thresholds.get('recategorize', 0.90)
-        THRESHOLD_MERGE = thresholds.get('merge', 0.90)
+        LOGGER.info(f"Graph Sweep starting (dry_run={dry_run}, passes={active_passes})")
+        terminal_status("dreamer", "Starting sweep", "processing")
 
-        # === PHASE 1: Batch Structural Analysis ===
-        LOGGER.info(f"Phase 1: Structural analysis for {len(candidates)} candidates...")
-        structural_results = self.batch_structural_analysis(candidates)
-
-        # Track which nodes to skip in merge phase (deleted/split)
-        skip_merge_ids = set()
-        LOGGER.info(f"Phase 1: Applying structural actions to {len(candidates)} candidates...")
-
-        for i, node in enumerate(candidates):
-            node_id = node.get("id")
-            node_type = node.get("type", "Unknown")
-            analysis = structural_results.get(node_id, {"action": "KEEP", "confidence": 0.0})
-            action = analysis.get("action", "KEEP")
-            conf = analysis.get("confidence", 0.0)
-            reason = analysis.get("reason", "")
-
-            # Utökad logg för RE-CATEGORIZE
-            if action == "RE-CATEGORIZE":
-                new_type = analysis.get("new_type", "?")
-                LOGGER.info(f"  [{i+1}/{len(candidates)}] {node_id}: {node_type} -> {new_type} ({reason})")
+        # --- Pass 1: DETERMINISTIC ---
+        if 'deterministic' in active_passes:
+            LOGGER.info("Pass 1: DETERMINISTIC cleanup")
+            terminal_status("dreamer", "Deterministic cleanup", "processing")
+            if not dry_run:
+                stats["deterministic"]["invalid_edges"] = self._cleanup_invalid_edges()
+                stats["deterministic"]["self_aliases"] = self._cleanup_self_aliases()
+                stats["deterministic"]["uuid_aliases"] = self._cleanup_uuid_aliases()
             else:
-                LOGGER.info(f"  [{i+1}/{len(candidates)}] {node_id}: action={action}")
+                det = self._count_deterministic_issues()
+                stats["deterministic"] = det
+                LOGGER.info(f"  [DRY] Deterministic: {det['invalid_edges']} invalid edges, "
+                            f"{det['self_aliases']} self-aliases, {det['uuid_aliases']} UUID-aliases")
 
-            # --- HEURISTIC GUARDS ---
-            if action == "DELETE":
-                if self.graph_service.get_node_degree(node_id) > 0:
-                    action = "KEEP"
-                elif conf < THRESHOLD_DELETE:
-                    action = "KEEP"
+        # --- Pass 2: MERGE ---
+        if 'merge' in active_passes:
+            LOGGER.info("Pass 2: MERGE")
+            terminal_status("dreamer", "Merge analysis", "processing")
+            # dry-run: discover ALL candidates. execution: respect config/limit cap.
+            if dry_run:
+                candidates = self._discover_merge_candidates(max_candidates=limit if limit else 0)
+            else:
+                candidates = self._discover_merge_candidates(max_candidates=limit if limit else None)
+            stats["merge"]["candidates"] = len(candidates)
 
-            elif action == "RENAME":
-                is_weak = self._is_weak_name(node_id)
-                target_threshold = THRESHOLD_RENAME_WEAK if is_weak else THRESHOLD_RENAME_NORMAL
-                if conf < target_threshold:
-                    action = "KEEP"
+            if not dry_run and candidates:
+                skip_cache = self._load_merge_skip_cache()
+                threshold = THRESHOLDS.get('merge', 0.90)
 
-            # --- EXECUTION ---
-            if action == "DELETE" and not dry_run:
-                node_name = _node_name(node)
-                self.graph_service.delete_node(node_id)
-                self.vector_service.delete(node_id)
-                stats["deleted"] += 1
-                skip_merge_ids.add(node_id)
-                terminal_status("dreamer", f"DELETE: [{_short_id(node_id)}] '{node_name}'", "done")
+                for node_a, node_b, strategy in candidates:
+                    pair_key = self._compute_pair_key(node_a["id"], node_b["id"])
+                    hash_a = self._compute_node_hash(node_a)
+                    hash_b = self._compute_node_hash(node_b)
 
-            elif action == "RENAME" and not dry_run:
-                old_name = _node_name(node)
-                new_name = analysis.get("new_name")
-                units = self.graph_service.get_related_unit_ids(node_id)
-                self.graph_service.rename_node(node_id, new_name)
-                affected_units.update(units)
-                stats["renamed"] += 1
-                terminal_status("dreamer", f"RENAME: [{_short_id(node_id)}] '{old_name}' → '{new_name}'", "done")
-                # Update node reference for merge phase
-                node["id"] = new_name
-                node.update(self.graph_service.get_node(new_name) or {})
+                    # Check skip-cache
+                    cached = skip_cache.get(pair_key)
+                    if cached:
+                        if cached.get("hash_a") == hash_a and cached.get("hash_b") == hash_b:
+                            stats["merge"]["cached"] += 1
+                            continue
 
-            elif action == "RE-CATEGORIZE" and not dry_run:
-                if conf >= THRESHOLD_RECATEGORIZE:
-                    new_type = analysis.get("new_type")
-                    valid_edges, invalid_edges = self._validate_edges_for_recategorize(node_id, new_type)
+                    result = self._evaluate_merge(node_a, node_b)
+                    if not result:
+                        continue
 
-                    # Remove invalid edges first
-                    for edge in invalid_edges:
-                        self.graph_service.delete_edge(edge["source"], edge["target"], edge["type"])
+                    decision = result.get("decision", "SKIP")
+                    conf = result.get("confidence", 0)
+                    reason = result.get("reason", "")
 
-                    self.graph_service.recategorize_node(node_id, new_type)
-                    affected_units.update(self.graph_service.get_related_unit_ids(node_id))
-                    stats["recat"] += 1
-                    terminal_status("dreamer", f"RECAT: [{_short_id(node_id)}] '{_node_name(node)}' → {new_type}", "done")
+                    if decision == "MERGE" and conf >= threshold:
+                        primary = result.get("primary_node_id", node_a["id"])
+                        secondary = result.get("secondary_node_id", node_b["id"])
+                        LOGGER.info(f"MERGE: {_short_id(secondary)} → {_short_id(primary)} "
+                                    f"(conf={conf:.2f}, strategy={strategy}) {reason}")
+                        terminal_status("dreamer",
+                                        f"MERGE: {_short_id(secondary)} → {_short_id(primary)}", "done")
+                        self._execute_merge(primary, secondary)
+                        stats["merge"]["merged"] += 1
+                        # Remove from cache (nodes changed)
+                        skip_cache.pop(pair_key, None)
+                    else:
+                        LOGGER.info(f"MERGE SKIP: {_node_name(node_a)} ↔ {_node_name(node_b)} "
+                                    f"(conf={conf:.2f}) {reason}")
+                        # Add to skip-cache
+                        skip_cache[pair_key] = {
+                            "hash_a": hash_a, "hash_b": hash_b,
+                            "decision": decision, "confidence": conf,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                        stats["merge"]["skipped"] += 1
 
-                    if invalid_edges:
-                        LOGGER.info(
-                            f"RE-CATEGORIZE {node_id} -> {new_type}: "
-                            f"removed {len(invalid_edges)} invalid edges, kept {len(valid_edges)}"
-                        )
+                self._save_merge_skip_cache(skip_cache)
+            elif dry_run and candidates:
+                details = []
+                for node_a, node_b, strategy in candidates:
+                    details.append({
+                        "a": _node_name(node_a), "b": _node_name(node_b),
+                        "type": node_a.get("type", "?"), "strategy": strategy,
+                    })
+                    LOGGER.info(f"  [DRY] MERGE candidate: {_node_name(node_a)} ↔ {_node_name(node_b)} ({strategy})")
+                stats["merge"]["details"] = details
 
-            elif action == "SPLIT" and not dry_run:
-                if conf >= THRESHOLD_SPLIT:
-                    units = self.graph_service.get_related_unit_ids(node_id)
-                    clusters = analysis.get("split_clusters", [])
-                    new_names = [c.get("name", "?") for c in clusters]
-                    self.graph_service.split_node(node_id, clusters)
-                    affected_units.update(units)
-                    stats["split"] += 1
-                    skip_merge_ids.add(node_id)
-                    terminal_status("dreamer", f"SPLIT: [{_short_id(node_id)}] '{_node_name(node)}' → {new_names}", "done")
+        # --- Pass 3: RENAME ---
+        if 'rename' in active_passes:
+            LOGGER.info("Pass 3: RENAME")
+            terminal_status("dreamer", "Rename analysis", "processing")
+            if dry_run:
+                candidates = self._discover_rename_candidates(max_candidates=limit if limit else 0)
+            else:
+                candidates = self._discover_rename_candidates(max_candidates=limit if limit else None)
+            stats["rename"]["candidates"] = len(candidates)
 
-        # === PHASE 2: Batch Merge Evaluation ===
-        # Collect all (candidate, match) pairs first
-        candidates_for_merge = len(candidates) - len(skip_merge_ids)
-        LOGGER.info(f"Phase 2: Collecting merge candidates from {candidates_for_merge} nodes...")
-        merge_pairs = []
-        pair_metadata = []  # Track (node, match) for each pair
+            if not dry_run and candidates:
+                threshold_normal = THRESHOLDS.get('rename_normal', 0.95)
+                threshold_weak = THRESHOLDS.get('rename_weak', 0.70)
 
-        for i, node in enumerate(candidates):
-            node_id = node.get("id")
-            if node_id in skip_merge_ids:
-                continue
+                for node, suggested, reason in candidates:
+                    result = self._evaluate_rename(node, suggested, reason)
+                    if not result:
+                        continue
 
-            if (i + 1) % 10 == 0:
-                LOGGER.info(f"  Finding matches for node {i + 1}/{len(candidates)}...")
+                    decision = result.get("decision", "SKIP")
+                    conf = result.get("confidence", 0)
+                    new_name = result.get("new_name")
 
-            matches = self.find_potential_matches(node)
-            for match in matches:
-                merge_pairs.append((match, node))
-                pair_metadata.append({"node": node, "match": match})
+                    is_weak = _is_weak_name(_node_name(node))
+                    threshold = threshold_weak if is_weak else threshold_normal
 
-        LOGGER.info(f"Phase 2: Found {len(merge_pairs)} potential merge pairs")
-        if merge_pairs:
-            LOGGER.info(f"Phase 2: Merge evaluation for {len(merge_pairs)} pairs...")
-            merge_results = self.batch_evaluate_merges(merge_pairs)
+                    if decision == "RENAME" and conf >= threshold and new_name:
+                        LOGGER.info(f"RENAME: {_node_name(node)} → {new_name} (conf={conf:.2f})")
+                        terminal_status("dreamer", f"RENAME: {_node_name(node)} → {new_name}", "done")
+                        self._execute_rename(node["id"], new_name)
+                        stats["rename"]["renamed"] += 1
+                    else:
+                        LOGGER.info(f"RENAME SKIP: {_node_name(node)} (conf={conf:.2f}) {result.get('reason', '')}")
+                        stats["rename"]["skipped"] += 1
+            elif dry_run and candidates:
+                details = []
+                for node, suggested, reason in candidates:
+                    details.append({
+                        "current": _node_name(node), "suggested": suggested, "reason": reason,
+                    })
+                    LOGGER.info(f"  [DRY] RENAME candidate: {_node_name(node)} → {suggested} ({reason})")
+                stats["rename"]["details"] = details
 
-            # Track already-merged nodes to avoid double merges
-            merged_nodes = set()
+        # --- Pass 4: SPLIT (from quality_flags) ---
+        if 'split' in active_passes:
+            LOGGER.info("Pass 4: SPLIT (quality_flags)")
+            terminal_status("dreamer", "Split analysis", "processing")
+            split_config = DREAMER_CONFIG.get('split', {})
+            max_split = limit or split_config.get('max_candidates_per_run', 10)
 
-            for meta, merge_eval in zip(pair_metadata, merge_results):
-                node = meta["node"]
-                match = meta["match"]
-                node_id = node.get("id")
+            # Find flagged nodes
+            rows = self.graph_service.conn.execute(
+                "SELECT id, properties FROM nodes WHERE "
+                "json_extract(properties, '$.quality_flags') IS NOT NULL"
+            ).fetchall()
 
-                if node_id in merged_nodes:
-                    continue
+            split_candidates = []
+            for node_id, props_str in rows:
+                if len(split_candidates) >= max_split:
+                    break
+                props = json.loads(props_str) if props_str else {}
+                flags = props.get("quality_flags", [])
+                if "possible_split" in flags:
+                    node = self.graph_service.get_node(node_id)
+                    if node:
+                        flag_reason = props.get("quality_flag_reason", {}).get("possible_split", "Flagged by enrichment")
+                        split_candidates.append((node, flag_reason))
 
-                if merge_eval.get("decision") == "MERGE" and merge_eval.get("confidence", 0) >= THRESHOLD_MERGE:
-                    if not dry_run:
-                        source_name = _node_name(node)
-                        target_name = _node_name(match)
-                        units = self.graph_service.get_related_unit_ids(node_id)
-                        self.graph_service.merge_nodes(match["id"], node_id)
-                        affected_units.update(units)
-                        self.prune_context(match["id"])
-                        terminal_status("dreamer", f"MERGE: [{_short_id(node_id)}] '{source_name}' → '{target_name}'", "done")
-                    stats["merged"] += 1
-                    merged_nodes.add(node_id)
+            stats["split"]["candidates"] = len(split_candidates)
 
-        # === PHASE 3: Causal Semantic Update ===
-        if affected_units and not dry_run:
-            LOGGER.info(f"Phase 3: Semantic update for {len(affected_units)} files...")
-            self.propagate_changes(list(affected_units))
+            if not dry_run and split_candidates:
+                threshold = THRESHOLDS.get('split', 0.90)
+
+                for node, flag_reason in split_candidates:
+                    result = self._evaluate_split(node, flag_reason)
+                    if not result:
+                        continue
+
+                    decision = result.get("decision", "SKIP")
+                    conf = result.get("confidence", 0)
+
+                    if decision == "SPLIT" and conf >= threshold:
+                        clusters = result.get("split_clusters", [])
+                        if clusters:
+                            LOGGER.info(f"SPLIT: {_node_name(node)} → {len(clusters)} clusters (conf={conf:.2f})")
+                            terminal_status("dreamer",
+                                            f"SPLIT: {_node_name(node)} → {len(clusters)}", "done")
+                            self._execute_split(node["id"], clusters)
+                            stats["split"]["split"] += 1
+                    else:
+                        stats["split"]["skipped"] += 1
+
+                    # Clear flag regardless of decision
+                    self._clear_quality_flag(node["id"], "possible_split")
+            elif dry_run and split_candidates:
+                details = []
+                for node, flag_reason in split_candidates:
+                    details.append({"name": _node_name(node), "reason": flag_reason})
+                    LOGGER.info(f"  [DRY] SPLIT candidate: {_node_name(node)} — {flag_reason}")
+                stats["split"]["details"] = details
+
+        # --- Pass 5: RECATEGORIZE (from quality_flags) ---
+        if 'recategorize' in active_passes:
+            LOGGER.info("Pass 5: RECATEGORIZE (quality_flags)")
+            terminal_status("dreamer", "Recategorize analysis", "processing")
+            recat_config = DREAMER_CONFIG.get('recategorize', {})
+            max_recat = limit or recat_config.get('max_candidates_per_run', 10)
+
+            rows = self.graph_service.conn.execute(
+                "SELECT id, properties FROM nodes WHERE "
+                "json_extract(properties, '$.quality_flags') IS NOT NULL"
+            ).fetchall()
+
+            recat_candidates = []
+            for node_id, props_str in rows:
+                if len(recat_candidates) >= max_recat:
+                    break
+                props = json.loads(props_str) if props_str else {}
+                flags = props.get("quality_flags", [])
+                if "wrong_type" in flags:
+                    node = self.graph_service.get_node(node_id)
+                    if node:
+                        flag_reason = props.get("quality_flag_reason", {}).get("wrong_type", "Flagged by enrichment")
+                        recat_candidates.append((node, flag_reason))
+
+            stats["recategorize"]["candidates"] = len(recat_candidates)
+
+            if not dry_run and recat_candidates:
+                threshold = THRESHOLDS.get('recategorize', 0.90)
+
+                for node, flag_reason in recat_candidates:
+                    result = self._evaluate_recategorize(node, flag_reason)
+                    if not result:
+                        continue
+
+                    decision = result.get("decision", "SKIP")
+                    conf = result.get("confidence", 0)
+                    new_type = result.get("new_type")
+
+                    if decision == "RECATEGORIZE" and conf >= threshold and new_type:
+                        LOGGER.info(f"RECAT: {_node_name(node)} {node.get('type')} → {new_type} (conf={conf:.2f})")
+                        terminal_status("dreamer",
+                                        f"RECAT: {_node_name(node)} → {new_type}", "done")
+                        self._execute_recategorize(node["id"], new_type)
+                        stats["recategorize"]["recategorized"] += 1
+                    else:
+                        stats["recategorize"]["skipped"] += 1
+
+                    # Clear flag regardless
+                    self._clear_quality_flag(node["id"], "wrong_type")
+            elif dry_run and recat_candidates:
+                details = []
+                for node, flag_reason in recat_candidates:
+                    details.append({"name": _node_name(node), "type": node.get("type", "?"), "reason": flag_reason})
+                    LOGGER.info(f"  [DRY] RECAT candidate: {_node_name(node)} ({node.get('type')}) — {flag_reason}")
+                stats["recategorize"]["details"] = details
+
+        # --- Summary ---
+        LOGGER.info(f"Graph Sweep complete: {json.dumps(stats, indent=2)}")
+        terminal_status("dreamer", "Sweep complete", "done",
+                        detail=f"merged={stats['merge']['merged']} renamed={stats['rename']['renamed']}")
 
         return stats
-
-    def _build_structural_prompt(self, node: Dict) -> str:
-        """Build prompt for structural analysis. Returns empty string if node has no context."""
-        context_list = node.get("properties", {}).get("node_context", [])
-
-        if not context_list:
-            return ""
-
-        formatted_context = ""
-        for i, ctx in enumerate(context_list[:40]):
-            text = ctx.get("text", "No content")
-            origin = ctx.get("origin", "Unknown source")
-            formatted_context += f"[{i}] {text} (Source: {origin})\n"
-
-        prompt_template = self.prompts.get("structural_analysis", "")
-        if not prompt_template:
-            LOGGER.error("Missing structural_analysis prompt in config")
-            return ""
-
-        node_type = node.get("type", "Unknown")
-        return prompt_template.format(
-            id=node.get("id"),
-            type=node_type,
-            node_type_description=self._get_node_type_description(node_type),
-            context_list=formatted_context,
-            taxonomy_nodes="Person, Project, Organization, Group, Event, Roles, Business_relation"
-        )
-
-    def _parse_structural_response(self, response_text: str, node_id: str) -> Dict:
-        """Parse LLM response for structural analysis."""
-        try:
-            cleaned_json = response_text.replace("```json", "").replace("```", "").strip()
-            result = json.loads(cleaned_json)
-
-            if "action" not in result:
-                result["action"] = "KEEP"
-            if "confidence" not in result:
-                result["confidence"] = 0.0
-
-            return result
-
-        except Exception as e:
-            LOGGER.error(f"Structural analysis parse failed for {node_id}: {e}")
-            return {"action": "KEEP", "confidence": 0.0, "reason": f"Parse error: {str(e)}"}
-
-    def batch_structural_analysis(self, nodes: List[Dict]) -> Dict[str, Dict]:
-        """
-        Run structural analysis for multiple nodes in parallel using batch_generate.
-
-        Returns:
-            Dict mapping node_id -> analysis result
-        """
-        # Build prompts for nodes that have context
-        prompts = []
-        node_ids = []
-        skip_results = {}
-
-        for node in nodes:
-            node_id = node.get("id", "unknown")
-            prompt = self._build_structural_prompt(node)
-
-            if not prompt:
-                skip_results[node_id] = {"action": "KEEP", "confidence": 1.0, "reason": "No context available"}
-            else:
-                prompts.append(prompt)
-                node_ids.append(node_id)
-
-        if not prompts:
-            LOGGER.info("No nodes with context for structural analysis")
-            return skip_results
-
-        LOGGER.info(f"Running batch structural analysis for {len(prompts)} nodes...")
-
-        # Anthropic Sonnet för strukturell analys (OBJEKT-85)
-        responses = self.llm_service.batch_generate(prompts, provider='anthropic', model=self.llm_service.models['fast'])
-
-        results = dict(skip_results)
-        for node_id, response in zip(node_ids, responses):
-            if not response.success:
-                LOGGER.error(f"Structural analysis LLM failed for {node_id}: {response.error}")
-                results[node_id] = {"action": "KEEP", "confidence": 0.0, "reason": f"LLM error: {response.error}"}
-            else:
-                results[node_id] = self._parse_structural_response(response.text, node_id)
-
-        return results
-
-    def check_structural_changes(self, node: Dict) -> Dict:
-        """
-        Call LLM to analyze if node requires structural changes.
-        Single-node version for backwards compatibility.
-
-        Actions:
-        - KEEP: No change needed
-        - DELETE: Node is noise and should be removed
-        - RENAME: Node has weak name, change to suggested name
-        - SPLIT: Node contains multiple distinct entities
-        - RE-CATEGORIZE: Node type doesn't match content
-        """
-        prompt = self._build_structural_prompt(node)
-
-        if not prompt:
-            return {"action": "KEEP", "confidence": 1.0, "reason": "No context available for analysis"}
-
-        # Anthropic Sonnet för strukturell analys (OBJEKT-85)
-        response = self.llm_service.generate(prompt, provider='anthropic', model=self.llm_service.models['fast'])
-        if not response.success:
-            LOGGER.error(f"Structural analysis LLM failed for {node.get('id')}: {response.error}")
-            return {"action": "KEEP", "confidence": 0.0, "reason": f"LLM error: {response.error}"}
-
-        return self._parse_structural_response(response.text, node.get("id", "unknown"))
-
-    def propagate_changes(self, unit_ids: List[str]) -> int:
-        """
-        Regenerate semantic metadata for Lake files affected by graph changes.
-
-        Triggered after MERGE, SPLIT, RENAME, RE-CATEGORIZE operations.
-        Updates context_summary, relations_summary and document_keywords
-        based on new graph structure.
-
-        Args:
-            unit_ids: List of unit_id for files that need updating
-
-        Returns:
-            Number of files updated
-        """
-        if not unit_ids:
-            return 0
-
-        lake_path = self._get_lake_path()
-        if not lake_path:
-            LOGGER.error("Could not find Lake path in config")
-            return 0
-
-        lake_service = LakeService(lake_path)
-        updated_count = 0
-
-        for unit_id in unit_ids:
-            filepath = self._find_lake_file(lake_path, unit_id)
-            if not filepath:
-                LOGGER.warning(f"Could not find Lake file for unit_id: {unit_id}")
-                continue
-
-            try:
-                current_meta = lake_service.read_metadata(filepath)
-                if not current_meta:
-                    continue
-
-                file_content = self._read_file_content(filepath)
-                if not file_content:
-                    continue
-
-                # Hämta entiteter som dokumentet MENTIONS och konvertera till resolved_entities-format
-                resolved_entities = self._get_resolved_entities_for_unit(unit_id)
-
-                # Använd metadata_service för förädling (current_meta != None)
-                new_semantics = generate_semantic_metadata(
-                    text=file_content,
-                    resolved_entities=resolved_entities,
-                    current_meta={
-                        "context_summary": current_meta.get('context_summary', ''),
-                        "relations_summary": current_meta.get('relations_summary', ''),
-                        "document_keywords": current_meta.get('document_keywords', [])
-                    },
-                    filename=os.path.basename(filepath)
-                )
-
-                if new_semantics.get('ai_model') in ['FAILED', 'SKIPPED']:
-                    continue
-
-                success = lake_service.update_semantics(
-                    filepath,
-                    context_summary=new_semantics.get('context_summary'),
-                    relations_summary=new_semantics.get('relations_summary'),
-                    document_keywords=new_semantics.get('document_keywords'),
-                    set_timestamp_updated=True
-                )
-
-                if success:
-                    updated_count += 1
-                    LOGGER.info(f"Semantic update: {os.path.basename(filepath)}")
-
-            except Exception as e:
-                LOGGER.error(f"Error during semantic update of {unit_id}: {e}")
-
-        LOGGER.info(f"Semantic update complete: {updated_count}/{len(unit_ids)} files")
-        return updated_count
-
-    def _get_lake_path(self) -> str:
-        """Get Lake path from config."""
-        try:
-            config = get_config()
-            return os.path.expanduser(config['paths']['lake_store'])
-        except Exception as e:
-            LOGGER.error(f"Could not read config: {e}")
-            return ""
-
-    def _find_lake_file(self, lake_path: str, unit_id: str) -> str:
-        """Find Lake file based on unit_id."""
-        try:
-            for filename in os.listdir(lake_path):
-                if unit_id in filename and filename.endswith('.md'):
-                    return os.path.join(lake_path, filename)
-        except Exception as e:
-            LOGGER.error(f"Error searching for Lake file: {e}")
-        return ""
-
-    def _read_file_content(self, filepath: str) -> str:
-        """Read content from Lake file (excluding frontmatter)."""
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            if content.startswith('---'):
-                parts = content.split('---', 2)
-                if len(parts) >= 3:
-                    return parts[2].strip()
-            return content
-        except Exception as e:
-            LOGGER.error(f"Could not read file {filepath}: {e}")
-            return ""
-
-    def _get_resolved_entities_for_unit(self, unit_id: str) -> List[Dict]:
-        """
-        Get entities that the document MENTIONS, formatted as resolved_entities.
-
-        Returns list in format expected by metadata_service:
-        [{"action": "LINK", "target_uuid": "...", "type": "Person", "canonical_name": "..."}]
-        """
-        try:
-            mentions = self.graph_service.get_nodes_mentioning_unit(unit_id)
-
-            if not mentions:
-                return []
-
-            resolved_entities = []
-            for node in mentions:
-                resolved_entities.append({
-                    "action": "LINK",
-                    "target_uuid": node.get('id', ''),
-                    "type": node.get('type', 'Unknown'),
-                    "canonical_name": node.get('properties', {}).get('name', '')
-                })
-
-            return resolved_entities
-        except Exception as e:
-            LOGGER.warning(f"Could not get entities for {unit_id}: {e}")
-            return []
-
-    # DEPRECATED: Ersatt av metadata_service.generate_semantic_metadata()
-    def _get_graph_context_for_unit(self, unit_id: str) -> str:
-        """
-        Get graph context for a specific unit.
-        Returns a string with relevant entities and relations.
-        NOTE: Kept for backwards compatibility, but _get_resolved_entities_for_unit is preferred.
-        """
-        try:
-            mentions = self.graph_service.get_nodes_mentioning_unit(unit_id)
-
-            if not mentions:
-                return "No known entities connected to this document."
-
-            context_lines = ["KNOWN ENTITIES IN DOCUMENT:"]
-            for node in mentions:
-                node_type = node.get('type', 'Unknown')
-                name = node.get('properties', {}).get('name', node.get('id'))
-                context_lines.append(f"- [{node_type}] {name}")
-
-            return "\n".join(context_lines)
-        except Exception as e:
-            LOGGER.warning(f"Could not get graph context for {unit_id}: {e}")
-            return ""
-
-    # DEPRECATED: Ersatt av metadata_service.generate_semantic_metadata()
-    def _regenerate_semantics_llm(self, file_content: str, current_meta: Dict, graph_context: str) -> Dict:
-        """
-        Call LLM to regenerate semantic metadata.
-
-        Args:
-            file_content: Document content
-            current_meta: Current frontmatter
-            graph_context: Context from graph (known entities)
-
-        Returns:
-            Dict with context_summary, relations_summary, document_keywords
-            or None on error
-        """
-        prompt_template = self.prompts.get("semantic_regeneration", "")
-        if not prompt_template:
-            LOGGER.warning("Missing semantic_regeneration prompt - using current metadata")
-            return None
-
-        truncated_content = file_content[:15000]
-
-        prompt = prompt_template.format(
-            file_content=truncated_content,
-            current_summary=current_meta.get('context_summary', ''),
-            current_relations=current_meta.get('relations_summary', ''),
-            current_keywords=json.dumps(current_meta.get('document_keywords', []), ensure_ascii=False),
-            graph_context=graph_context
-        )
-
-        # Anthropic Sonnet för enrichment (OBJEKT-85)
-        response = self.llm_service.generate(prompt, provider='anthropic', model=self.llm_service.models['fast'])
-        if not response.success:
-            LOGGER.error(f"Semantic regeneration LLM failed: {response.error}")
-            return None
-
-        try:
-            cleaned_json = response.text.replace("```json", "").replace("```", "").strip()
-            result = json.loads(cleaned_json)
-
-            if not isinstance(result, dict):
-                return None
-
-            return {
-                'context_summary': result.get('context_summary'),
-                'relations_summary': result.get('relations_summary'),
-                'document_keywords': result.get('document_keywords')
-            }
-
-        except Exception as e:
-            LOGGER.error(f"Semantic regeneration parse failed: {e}")
-            return None

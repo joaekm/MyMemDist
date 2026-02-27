@@ -6,8 +6,8 @@ Används av:
 - test_ingestion_cycle.py (E2E-test)
 
 Logik:
-    1. Graph — rensa node_context entries med origin == unit_id, orphan-entities tas bort helt
-    2. Graph — delete Document-nod + MENTIONS-kanter
+    1. Graph — rensa orphan-entities (inga kanter till andra Source-noder)
+    2. Graph — delete Source-nod + MENTIONS-kanter
     3. Vector — delete dokument + transcript-chunks
     4. Lake — ta bort .md-fil
     5. Assets — flytta till Rejected/
@@ -54,7 +54,10 @@ def _get_asset_folders(paths):
 
 
 def _get_rejected_dir(paths):
-    return os.path.expanduser(paths.get('asset_rejected', '~/MyMemory/Assets/Rejected'))
+    rejected = paths.get('asset_rejected')
+    if not rejected:
+        raise RuntimeError("HARDFAIL: 'asset_rejected' saknas i config paths")
+    return os.path.expanduser(rejected)
 
 
 def parse_frontmatter(file_path: str) -> dict:
@@ -168,30 +171,20 @@ def collect_impact(unit_id: str, graph: GraphService) -> dict:
         props = entity.get("properties", {})
         name = props.get("name", entity_id)
         node_type = entity.get("type", "Unknown")
-        node_context = props.get("node_context", [])
 
-        origins = set()
-        for nc in node_context:
-            if isinstance(nc, dict):
-                origin = nc.get("origin", "")
-                if origin:
-                    origins.add(origin)
-
-        other_sources = len(origins - {unit_id})
-
+        # Check if entity has edges from other Source-nods (non-orphan detection)
         other_incoming = graph.get_edges_to(entity_id)
         other_outgoing = graph.get_edges_from(entity_id)
         non_doc_edges = len([e for e in other_incoming if e["source"] != unit_id])
         non_doc_edges += len(other_outgoing)
 
-        will_delete = (other_sources == 0 and non_doc_edges == 0)
+        will_delete = (non_doc_edges == 0)
 
         impact["entities_affected"].append({
             "id": entity_id,
             "name": name,
             "type": node_type,
             "will_delete": will_delete,
-            "other_sources": other_sources,
         })
 
     try:
@@ -264,7 +257,7 @@ def execute_deletion(doc_id: str) -> dict:
             graph = GraphService(graph_db_path)
 
             try:
-                # 1. Rensa entity node_context
+                # 1. Rensa orphan entities
                 edges = graph.get_edges_from(unit_id)
                 mentions = [e for e in edges if e.get("type") == "MENTIONS"]
 
@@ -277,40 +270,22 @@ def execute_deletion(doc_id: str) -> dict:
                     if not entity:
                         continue
 
-                    props = entity.get("properties", {})
-                    node_context = props.get("node_context", [])
+                    # Check if entity is orphan (no edges from other sources)
+                    other_incoming = [e for e in graph.get_edges_to(entity_id) if e["source"] != unit_id]
+                    other_outgoing = graph.get_edges_from(entity_id)
 
-                    new_context = [
-                        nc for nc in node_context
-                        if not (isinstance(nc, dict) and nc.get("origin") == unit_id)
-                    ]
-
-                    if not new_context:
-                        other_incoming = [e for e in graph.get_edges_to(entity_id) if e["source"] != unit_id]
-                        other_outgoing = graph.get_edges_from(entity_id)
-
-                        if not other_incoming and not other_outgoing:
-                            graph.delete_node(entity_id)
-                            vs.delete(entity_id)
-                            entities_deleted += 1
-                            continue
-
-                    props["node_context"] = new_context
-                    graph.update_node_properties(entity_id, props)
-
-                    vs.upsert_node({
-                        'id': entity_id,
-                        'type': entity.get('type'),
-                        'properties': props,
-                        'aliases': entity.get('aliases', [])
-                    })
-                    entities_cleaned += 1
+                    if not other_incoming and not other_outgoing:
+                        graph.delete_node(entity_id)
+                        vs.delete(entity_id)
+                        entities_deleted += 1
+                    else:
+                        entities_cleaned += 1
 
                 result["actions"].append(
                     f"Entities: {entities_cleaned} cleaned, {entities_deleted} deleted"
                 )
 
-                # 2. Ta bort Document-noden (+ kvarvarande MENTIONS-kanter)
+                # 2. Ta bort Source-noden (+ kvarvarande MENTIONS-kanter)
                 doc_deleted = graph.delete_node(unit_id)
                 result["actions"].append(
                     f"Document node: {'deleted' if doc_deleted else 'not found'}"

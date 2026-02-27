@@ -204,7 +204,7 @@ class GraphService:
 
                 final_props = current_props.copy()
 
-                # Append-merge för list-properties (node_context, keywords etc.)
+                # Append-merge för list-properties (keywords, relation_context etc.)
                 # istället för att skriva över med dict.update()
                 for k, v in new_props.items():
                     if isinstance(v, list) and k in final_props and isinstance(final_props[k], list):
@@ -368,7 +368,7 @@ class GraphService:
     def update_node_properties(self, node_id: str, properties: dict):
         """
         Direkt överskrivning av properties (inte merge som upsert_node).
-        Används vid cleanup, t.ex. borttag av enskilda node_context-entries.
+        Används vid cleanup, t.ex. direkt överskrivning av properties.
 
         Args:
             node_id: ID på noden att uppdatera
@@ -390,15 +390,28 @@ class GraphService:
         import unicodedata
         return unicodedata.normalize('NFD', s).encode('ascii', 'ignore').decode().lower()
 
-    def find_node_by_name(self, node_type: str, name: str, fuzzy: bool = True) -> str | None:
+    def find_node_by_name(self, node_type: str, name: str, fuzzy: bool = True,
+                          matching_config: dict = None) -> str | None:
         """
-        Sök efter en nod baserat på namn (exakt eller fuzzy).
-        Använder diakritik-normalisering för att matcha Ohlén/Ohlen etc.
+        Sök efter en nod baserat på namn. Schema-driven matching.
+
+        Matchningsordning:
+        1. Exakt match (lowercase + aliases)
+        2. Exakt match (diakritik-normaliserad)
+        3. Token-subset match (om matching_config.token_subset)
+        4. First-token prefix match (om matching_config.first_token_prefix)
+        5. Ambiguity guard (om steg 3/4 matchar >1 kandidat)
+        6. Fuzzy match (difflib, configurable cutoff)
 
         Args:
             node_type: Nodtyp att söka i (Person, Organization, etc.)
             name: Namnet att söka efter
-            fuzzy: Om True, använd fuzzy matching (difflib, 85% likhet)
+            fuzzy: Om True, använd fuzzy matching
+            matching_config: Schema-driven matching-parametrar (optional). Dict med:
+                - token_subset (bool): Matcha om alla tokens i kortare namn finns i längre
+                - first_token_prefix (bool): Matcha om single-token query = first token av kandidat
+                - fuzzy_cutoff (float): difflib cutoff-tröskel (default 0.85)
+                - ambiguity_action (str): "CREATE" = returnera None vid flertydig matchning
 
         Returns:
             UUID om matchning hittas, annars None
@@ -461,14 +474,66 @@ class GraphService:
             LOGGER.warning(f"find_node_by_name: Flera träffar (folded) för '{name}' ({node_type}): {hits}")
             return hits[0]
 
-        # 3. Fuzzy matchning (diakritik-normaliserad)
+        # Läs matching-config (schema-driven) eller använd defaults
+        mc = matching_config or {}
+        do_token_subset = mc.get('token_subset', False)
+        do_first_token = mc.get('first_token_prefix', False)
+        fuzzy_cutoff = mc.get('fuzzy_cutoff', 0.85)
+        ambiguity_action = mc.get('ambiguity_action', 'CREATE')
+
+        # 3-4. Token-subset och first-token prefix matching
+        if do_token_subset or do_first_token:
+            query_tokens = set(name_folded.split())
+            token_matches: list[str] = []
+
+            for candidate_folded, uuids in folded_to_uuid.items():
+                candidate_tokens = set(candidate_folded.split())
+
+                # 3. Token-subset: alla tokens i kortare namn finns i längre
+                if do_token_subset:
+                    shorter, longer = (query_tokens, candidate_tokens) \
+                        if len(query_tokens) <= len(candidate_tokens) \
+                        else (candidate_tokens, query_tokens)
+                    if shorter and shorter.issubset(longer) and shorter != longer:
+                        token_matches.extend(uuids)
+                        continue
+
+                # 4. First-token prefix: single-token query = first token av multi-token kandidat
+                if do_first_token and len(query_tokens) == 1:
+                    query_token = next(iter(query_tokens))
+                    candidate_list = candidate_folded.split()
+                    if len(candidate_list) > 1 and candidate_list[0] == query_token:
+                        token_matches.extend(uuids)
+                        continue
+
+            # Deduplicera (behåll ordning)
+            unique_matches = list(dict.fromkeys(token_matches))
+
+            if len(unique_matches) == 1:
+                LOGGER.info(
+                    f"find_node_by_name: Token match '{name}' ({node_type}) -> {unique_matches[0]}"
+                )
+                return unique_matches[0]
+            elif len(unique_matches) > 1:
+                # 5. Ambiguity guard
+                LOGGER.warning(
+                    f"find_node_by_name: Ambiguous token match for '{name}' ({node_type}): "
+                    f"{len(unique_matches)} candidates -> {ambiguity_action}"
+                )
+                if ambiguity_action == "CREATE":
+                    return None
+
+        # 6. Fuzzy matchning (diakritik-normaliserad, configurable cutoff)
         if fuzzy:
             candidates = list(folded_to_uuid.keys())
-            matches = difflib.get_close_matches(name_folded, candidates, n=1, cutoff=0.85)
+            matches = difflib.get_close_matches(name_folded, candidates, n=1, cutoff=fuzzy_cutoff)
             if matches:
                 matched_name = matches[0]
                 hits = folded_to_uuid[matched_name]
-                LOGGER.info(f"find_node_by_name: Fuzzy '{name}' ~= '{matched_name}' -> {hits[0]}")
+                LOGGER.info(
+                    f"find_node_by_name: Fuzzy '{name}' ~= '{matched_name}' "
+                    f"(cutoff={fuzzy_cutoff}) -> {hits[0]}"
+                )
                 return hits[0]
 
         return None
@@ -524,19 +589,86 @@ class GraphService:
     def upsert_edge(self, source: str, target: str, edge_type: str, properties: dict = None):
         """
         Skapa eller uppdatera en kant.
+        Listproperties (t.ex. relation_context) appendas och dedupliceras.
+        Skalärproperties skrivs över.
+
+        OBJEKT-107: Schema guard — validates source/target types against schema.
+        Invalid edges are rejected with HARDFAIL (logged warning, edge not written).
 
         Args:
             source: Käll-nod ID
             target: Mål-nod ID
-            edge_type: Typ av relation (DEALS_WITH, CREATED_BY, etc.)
+            edge_type: Typ av relation
             properties: Extra egenskaper
         """
         if self.read_only:
             raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
 
-        properties_json = json.dumps(properties or {}, ensure_ascii=False)
+        # Schema guard: validate source/target types (OBJEKT-107)
+        source_node = self.get_node(source)
+        target_node = self.get_node(target)
+        if source_node and target_node:
+            try:
+                from services.utils.schema_validator import SchemaValidator
+                validator = SchemaValidator()
+                nodes_map = {
+                    source: source_node.get("type", "Unknown"),
+                    target: target_node.get("type", "Unknown"),
+                }
+                edge_dict = {"source": source, "target": target, "type": edge_type}
+                # Include scalar properties for required-property validation (e.g. confidence).
+                # Complex types (list, dict) excluded — validated at extraction time,
+                # and extraction_type vs runtime type mismatch would cause false rejections.
+                if properties:
+                    for k, v in properties.items():
+                        if not isinstance(v, (list, dict)):
+                            edge_dict[k] = v
+                ok, msg = validator.validate_edge(edge_dict, nodes_map)
+                if not ok:
+                    LOGGER.warning(
+                        f"Schema guard REJECTED edge: {source_node.get('type')}→{target_node.get('type')} "
+                        f"via {edge_type} — {msg}"
+                    )
+                    return
+            except ImportError:
+                LOGGER.debug("SchemaValidator not available — skipping edge validation")
+
+        new_props = properties or {}
 
         with self._lock:
+            existing = self.conn.execute(
+                "SELECT properties FROM edges WHERE source = ? AND target = ? AND edge_type = ?",
+                [source, target, edge_type]
+            ).fetchone()
+
+            if existing:
+                try:
+                    current_props = json.loads(existing[0]) if existing[0] else {}
+                except json.JSONDecodeError as e:
+                    LOGGER.error(f"Corrupt JSON in edge {source}->{target} ({edge_type}): {e}")
+                    raise ValueError(f"Corrupt JSON in edge {source}->{target}") from e
+
+                final_props = current_props.copy()
+                for k, v in new_props.items():
+                    if isinstance(v, list) and k in final_props and isinstance(final_props[k], list):
+                        combined = final_props[k] + v
+                        if combined and isinstance(combined[0], dict):
+                            seen = set()
+                            unique_list = []
+                            for item in combined:
+                                item_key = tuple(sorted((ik, str(iv)) for ik, iv in item.items()))
+                                if item_key not in seen:
+                                    seen.add(item_key)
+                                    unique_list.append(item)
+                            final_props[k] = unique_list
+                        else:
+                            final_props[k] = list(set(combined))
+                    else:
+                        final_props[k] = v
+            else:
+                final_props = new_props
+
+            properties_json = json.dumps(final_props, ensure_ascii=False)
             self.conn.execute("""
                 INSERT INTO edges (source, target, edge_type, properties)
                 VALUES (?, ?, ?, ?)
@@ -640,7 +772,7 @@ class GraphService:
             results = self.conn.execute("""
                 SELECT DISTINCT source
                 FROM edges
-                WHERE target = ? AND edge_type = 'UNIT_MENTIONS'
+                WHERE target = ? AND edge_type = 'MENTIONS'
                 LIMIT ?
             """, [entity_id, limit]).fetchall()
 
@@ -678,12 +810,55 @@ class GraphService:
 
             LOGGER.info(f"Saved pending review: {entity} vs {master_node} ({score})")
 
+    def _merge_edge_relation_context(self, source: str, target: str, edge_type: str, donor_props_raw: str):
+        """
+        Interfoliera relation_context från en donator-kant till en befintlig kant.
+        Sorterar kronologiskt. Anropas under merge_nodes för konflikterande kanter.
+        Förutsätter att self._lock redan hålls.
+        """
+        try:
+            donor_props = json.loads(donor_props_raw) if donor_props_raw else {}
+        except json.JSONDecodeError:
+            return
+        donor_rc = donor_props.get('relation_context', [])
+        if not donor_rc:
+            return
+
+        existing = self.conn.execute(
+            "SELECT properties FROM edges WHERE source = ? AND target = ? AND edge_type = ?",
+            [source, target, edge_type]
+        ).fetchone()
+        if not existing:
+            return
+
+        try:
+            existing_props = json.loads(existing[0]) if existing[0] else {}
+        except json.JSONDecodeError:
+            return
+        existing_rc = existing_props.get('relation_context', [])
+
+        combined = existing_rc + donor_rc
+        seen = set()
+        unique_rc = []
+        for entry in combined:
+            key = (entry.get('text', ''), entry.get('origin', ''))
+            if key not in seen:
+                seen.add(key)
+                unique_rc.append(entry)
+        unique_rc.sort(key=lambda e: e.get('timestamp', '9999'))
+
+        existing_props['relation_context'] = unique_rc
+        self.conn.execute(
+            "UPDATE edges SET properties = ? WHERE source = ? AND target = ? AND edge_type = ?",
+            [json.dumps(existing_props, ensure_ascii=False), source, target, edge_type]
+        )
+
     def merge_nodes(self, target_id: str, source_id: str):
         """
         Slå ihop source_id in i target_id (ROBUST & ATOMÄR).
 
         Process:
-        1. Aggregera properties (hanterar listor och node_context korrekt).
+        1. Aggregera properties (hanterar listor korrekt).
         2. Flytta alla relationer.
         3. Flytta alias.
         4. Radera källnoden.
@@ -711,11 +886,11 @@ class GraphService:
             merged_props = props_t.copy()
 
             for k, v in props_s.items():
-                # Om det är en lista (t.ex. keywords, evidence, node_context)
+                # Om det är en lista (t.ex. keywords, evidence, relation_context)
                 if isinstance(v, list) and k in merged_props and isinstance(merged_props[k], list):
                     combined = merged_props[k] + v
 
-                    # SPECIALHANTERING: List of Dicts (t.ex. node_context)
+                    # SPECIALHANTERING: List of Dicts (t.ex. relation_context)
                     if combined and isinstance(combined[0], dict):
                         # Deduplicera baserat på innehåll genom serialisering
                         seen = set()
@@ -762,6 +937,27 @@ class GraphService:
                     WHERE e2.source = edges.source AND e2.target = ? AND e2.edge_type = edges.edge_type
                 )
             """, [target_id, source_id, target_id])
+
+            # 4b. INTERFOLIERA relation_context för konfliktande kanter
+            # Kanter som inte kunde flyttas (PK-konflikt) har relation_context
+            # som ska mergas in i target-nods motsvarande kanter
+            remaining_out = self.conn.execute(
+                "SELECT target, edge_type, properties FROM edges WHERE source = ?",
+                [source_id]
+            ).fetchall()
+            remaining_in = self.conn.execute(
+                "SELECT source, edge_type, properties FROM edges WHERE target = ?",
+                [source_id]
+            ).fetchall()
+
+            for other_id, etype, props_raw in remaining_out:
+                self._merge_edge_relation_context(
+                    target_id, other_id, etype, props_raw
+                )
+            for other_id, etype, props_raw in remaining_in:
+                self._merge_edge_relation_context(
+                    other_id, target_id, etype, props_raw
+                )
 
             # 5. STÄDA KANTER (Ta bort dubbletter som uppstod vid flytt eller self-loops)
             self.conn.execute("DELETE FROM edges WHERE source = ? OR target = ?", [source_id, source_id])
@@ -871,13 +1067,10 @@ class GraphService:
                 LOGGER.error(f"Corrupt JSON in node {original_id}: {e}")
                 raise ValueError(f"Corrupt JSON in node {original_id}") from e
 
-            node_context = orig_props.get("node_context", [])
-
             # 2. Skapa nya noder med UUID
             created_nodes = []
             for item in split_map:
                 new_name = item.get("name")
-                indices = item.get("context_indices", [])
 
                 if not new_name: continue
 
@@ -887,11 +1080,6 @@ class GraphService:
                 # Bygg properties för den nya noden
                 new_props = orig_props.copy()
                 new_props["name"] = new_name  # Spara namnet i properties
-
-                # Filtrera node_context baserat på index
-                if node_context:
-                    specific_context = [ctx for i, ctx in enumerate(node_context) if i in indices]
-                    new_props["node_context"] = specific_context
 
                 props_json = json.dumps(new_props, ensure_ascii=False)
 
@@ -955,7 +1143,7 @@ class GraphService:
             res = self.conn.execute("""
                 SELECT count(*) FROM edges
                 WHERE (source = ? OR target = ?)
-                AND edge_type NOT IN ('UNIT_MENTIONS', 'DEALS_WITH')
+                AND edge_type NOT IN ('MENTIONS', 'DEALS_WITH')
             """, [node_id, node_id]).fetchone()
             return res[0] if res else 0
 
@@ -964,6 +1152,59 @@ class GraphService:
         with self._lock:
             rows = self.conn.execute("""
                 SELECT DISTINCT source FROM edges
-                WHERE target = ? AND edge_type IN ('UNIT_MENTIONS', 'DEALS_WITH')
+                WHERE target = ? AND edge_type IN ('MENTIONS', 'DEALS_WITH')
             """, [node_id]).fetchall()
             return [r[0] for r in rows]
+
+    def get_nodes_mentioning_unit(self, unit_id: str) -> list[dict]:
+        """
+        Hämta alla entitetsnoder som ett dokument (unit) MENTIONS.
+
+        Reverse lookup: givet unit_id, hitta alla targets i MENTIONS-edges.
+
+        Args:
+            unit_id: Document unit ID (source i MENTIONS-edge)
+
+        Returns:
+            Lista med noder (dict med id, type, aliases, properties)
+        """
+        with self._lock:
+            rows = self.conn.execute("""
+                SELECT DISTINCT target FROM edges
+                WHERE source = ? AND edge_type = 'MENTIONS'
+            """, [unit_id]).fetchall()
+
+        nodes = []
+        for row in rows:
+            node = self.get_node(row[0])
+            if node:
+                nodes.append(node)
+        return nodes
+
+    def get_edge(self, source: str, target: str, edge_type: str) -> dict | None:
+        """
+        Hämta en specifik edge med dess properties.
+
+        Args:
+            source: Käll-nod ID
+            target: Mål-nod ID
+            edge_type: Typ av relation
+
+        Returns:
+            dict med {source, target, type, properties} eller None
+        """
+        with self._lock:
+            result = self.conn.execute(
+                "SELECT source, target, edge_type, properties FROM edges WHERE source = ? AND target = ? AND edge_type = ?",
+                [source, target, edge_type]
+            ).fetchone()
+
+        if not result:
+            return None
+
+        return {
+            "source": result[0],
+            "target": result[1],
+            "type": result[2],
+            "properties": json.loads(result[3]) if result[3] else {}
+        }

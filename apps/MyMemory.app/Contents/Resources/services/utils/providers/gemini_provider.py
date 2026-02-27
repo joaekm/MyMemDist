@@ -34,13 +34,14 @@ class GeminiProvider(BaseProvider):
     def name(self) -> str:
         return "gemini"
 
-    def generate(self, prompt: str, model: str) -> ProviderResponse:
+    def generate(self, prompt: str, model: str, max_tokens: Optional[int] = None) -> ProviderResponse:
         """
         Generera svar via Gemini.
 
         Args:
             prompt: Prompten att skicka
             model: Modellnamn (t.ex. "models/gemini-2.5-flash")
+            max_tokens: Max output tokens (unused for Gemini, kept for interface compatibility)
 
         Returns:
             ProviderResponse med text och status

@@ -271,14 +271,10 @@ def _enrich_entities_from_graph(
                     if prop in edge_props:
                         relation[prop] = edge_props[prop]
 
-                # Inkludera target node_context (första texten, max 200 tecken)
-                node_context = target_props.get("node_context", [])
-                if node_context and isinstance(node_context, list) and len(node_context) > 0:
-                    first_ctx = node_context[0]
-                    if isinstance(first_ctx, dict):
-                        ctx_text = first_ctx.get("text", "")
-                        if ctx_text:
-                            relation["target_context"] = ctx_text[:200]
+                # Inkludera target context_summary (kompakt identitet, max 200 tecken)
+                ctx_summary = target_props.get("context_summary", "")
+                if ctx_summary:
+                    relation["target_context"] = ctx_summary[:200]
 
                 entity_data["relations"].append(relation)
 
@@ -456,7 +452,7 @@ def generate_semantic_metadata(
             current_context=current_meta.get("context_summary", ""),
             current_relations=current_meta.get("relations_summary", ""),
             current_keywords=json.dumps(current_meta.get("document_keywords", []), ensure_ascii=False),
-            node_context=full_context
+            graph_context=full_context
         )
     else:
         # Nygenereringsläge (ingestion)

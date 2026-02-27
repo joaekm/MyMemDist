@@ -3,23 +3,23 @@
 <plist version="1.0">
 <dict>
     <!--
-    MyMemory Dreamer Daemon (OBJEKT-76)
+    MyMemory Enrichment Daemon (OBJEKT-76)
 
-    Threshold-based trigger for Dreamer entity resolution.
-    Polls state file and runs Dreamer when node threshold reached.
+    Threshold-based trigger for Enrichment property-filling.
+    Polls state file and runs Enrichment when node threshold reached.
 
-    Install: launchctl load ~/Library/LaunchAgents/com.mymemory.dreamer.plist
-    Uninstall: launchctl unload ~/Library/LaunchAgents/com.mymemory.dreamer.plist
+    Install: launchctl load ~/Library/LaunchAgents/com.mymemory.enrichment.plist
+    Uninstall: launchctl unload ~/Library/LaunchAgents/com.mymemory.enrichment.plist
     Status: launchctl list | grep mymemory
     -->
 
     <key>Label</key>
-    <string>com.mymemory.dreamer</string>
+    <string>com.mymemory.enrichment</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/python3</string>
-        <string>/Users/jekman/Projects/MyMemory/services/engines/dreamer_daemon.py</string>
+        <string>/Users/jekman/Projects/MyMemory/services/engines/enrichment_daemon.py</string>
     </array>
 
     <!-- Run at login -->
@@ -39,10 +39,10 @@
 
     <!-- Logging -->
     <key>StandardOutPath</key>
-    <string>/Users/jekman/MyMemory/Logs/dreamer_daemon.stdout.log</string>
+    <string>/Users/jekman/MyMemory/Logs/enrichment_daemon.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/jekman/MyMemory/Logs/dreamer_daemon.stderr.log</string>
+    <string>/Users/jekman/MyMemory/Logs/enrichment_daemon.stderr.log</string>
 
     <!-- Environment -->
     <key>EnvironmentVariables</key>

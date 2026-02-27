@@ -220,7 +220,6 @@ doc_converter:
       - "confidence": Sätts baserat på "Schema-Fit" (0.0 - 1.0).
         * 0.8-1.0 (Hög): Entiteten uppfyller definitionen tydligt och har unika attribut.
         * <0.3 (Låg/Brus): Entiteten är generisk eller trivial.
-      - "node_context": En fras eller mening som beskriver vad vi lärt oss om entiteten baserat på texten.
       - "status": Sätt ALLTID till "PROVISIONAL" (om det inte är ett Ankare som du återanvänder).
 
     NAME NORMALIZATION:
@@ -251,22 +250,27 @@ doc_converter:
 
     === EDGE PROPERTY RULES ===
     EVERY edge MUST include all properties that can be inferred from the text.
+    EVERY edge MUST include "relation_context" — en mening som beskriver vad som framkommer om relationen i detta dokument. Fokusera på HÄNDELSE/BESLUT/FÖRÄNDRING, inte rollbeskrivning.
 
     BELONGS_TO (Person/Group -> Organization/Group):
       - job_title: Extract if the person's title or position is mentioned (e.g. "Projektledare", "VD", "Utvecklare")
       - job_function: Extract if the person's function/department is mentioned (e.g. "Försäljning", "IT")
+      - relation_context: Vad framkommer om personens relation till organisationen i detta dokument?
 
     HAS_BUSINESS_RELATION (Organization -> Organization):
       - relation_type (*REQUIRED*): MUST be one of [Kund, Leverantör, Partner, Prospekt, Lead]. NEVER omit this.
       - relation_status: Set to "Aktiv" or "Inaktiv" if inferable.
+      - relation_context: Vad framkommer om affärsrelationen i detta dokument? (avtal, förhandling, leverans, etc.)
 
     HAS_ROLE (Person -> Roles):
       - context: Describe in what context the person has this role (e.g. "Lead developer on Project X")
+      - relation_context: Vad framkommer om denna roll i detta dokument?
 
     ATTENDED (Person -> Event):
       - For Calendar Events: Do NOT create ATTENDED edges. They are handled by deterministic post-processing.
       - For other source types: Create ATTENDED if the text indicates a person participated in an event.
       - duration_minutes: Include if meeting duration is mentioned.
+      - relation_context: Vad framkommer om personens deltagande?
 
     RETURNERA JSON (Exakt format):
     {{
@@ -275,15 +279,14 @@ doc_converter:
           "name": "Namn",
           "type": "Nodtyp",
           "org_type": "Bolag",
-          "node_context": "Beskrivande mening om entitetens roll i dokumentet.",
           "status": "PROVISIONAL",
           "confidence": 0.85
         }}
       ],
       "edges": [
-        {{ "source": "PersonNamn", "target": "OrgNamn", "type": "BELONGS_TO", "confidence": 0.9, "job_title": "Projektledare", "job_function": "IT" }},
-        {{ "source": "OrgA", "target": "OrgB", "type": "HAS_BUSINESS_RELATION", "confidence": 0.85, "relation_type": "Kund", "relation_status": "Aktiv" }},
-        {{ "source": "PersonNamn", "target": "RollNamn", "type": "HAS_ROLE", "confidence": 0.8, "context": "Lead developer on Project X" }}
+        {{ "source": "PersonNamn", "target": "OrgNamn", "type": "BELONGS_TO", "confidence": 0.9, "job_title": "Projektledare", "job_function": "IT", "relation_context": "Leder leveransgranskning av projekt X" }},
+        {{ "source": "OrgA", "target": "OrgB", "type": "HAS_BUSINESS_RELATION", "confidence": 0.85, "relation_type": "Kund", "relation_status": "Aktiv", "relation_context": "Avtal förlängt med nytt timpris 600 kr/h" }},
+        {{ "source": "PersonNamn", "target": "RollNamn", "type": "HAS_ROLE", "confidence": 0.8, "context": "Lead developer on Project X", "relation_context": "Identifierad som lead developer i statusrapport" }}
       ]
     }}
 
@@ -320,8 +323,7 @@ doc_converter:
     KONTEXT: Detta är ett mötestranskript. Det är BRUSIGT men värdefullt för KONTEXT om kända entiteter.
     Din PRIMÄRA uppgift är att identifiera BEFINTLIGA entiteter som nämns i samtalet — personer, organisationer, projekt — så att de kan LÄNKAS till sina grafnoder och berikas med kontext.
     Skapa INGA nya entiteter. Talare använder ofta bara förnamn, förkortningar eller informella referenser.
-    För varje entitet du identifierar, ge en rik node_context som beskriver vad som sades om dem i samtalet.
-    Fokusera på: beslut som fattades, ämnen som diskuterades, åsikter som uttrycktes, åtgärdspunkter som nämndes.
+    Lägg den rika kontexten — beslut, diskussioner, åsikter, åtgärdspunkter — i relation_context på edges.
     Ignorera: utfyllnadsord, småprat, teknisk jargong som inte handlar om affärsentiteter.
 
   entity_critic: |
@@ -344,8 +346,8 @@ doc_converter:
       "rejected": [{{"name": "...", "type": "...", "reason": "varför avvisad"}}]
     }}
 
-# --- Dreamer (Taxonomi-konsolidering) ---
-dreamer:
+# --- Enrichment (Property-berikning, fas 2 i pipeline) ---
+enrichment:
   consolidation_prompt: |
     Du är en taxonomi-expert. Din uppgift är att kategorisera NYA noder under rätt masternode.
     
@@ -378,7 +380,7 @@ dreamer:
     SCHEMA-REGEL FÖR "{type}":
     {node_type_description}
 
-    KONTEXT (node_context med spårbarhet):
+    KONTEXT (context_summary + relation_context):
     {context_list}
 
     TILLÅTNA TYPER (från taxonomi):
@@ -414,7 +416,7 @@ dreamer:
     Keywords: {current_keywords}
 
     === NY GRAF-INSIKT (Aggregerad kunskap om entiteter i dokumentet) ===
-    {node_context}
+    {graph_context}
 
     === INSTRUKTION ===
     1. Behåll kärnan i "NUVARANDE METADATA" (det speglar innehållet i dokumentet).
@@ -465,11 +467,248 @@ entity_resolver:
   context_pruning_prompt: |
     Du ska städa upp en lista med nyckelord för en entitet.
     Ta bort dubbletter, synonymer och irrelevanta ord. Behåll de mest beskrivande.
-    
+
     LISTA:
     {keywords}
-    
+
     RETURNERA JSON:
     {{
       "pruned_keywords": ["ord1", "ord2"]
     }}
+
+  enrichment_prompt: |
+    ## UPPGIFT: BERIKA (Steg 1 av 2)
+
+    Du har fått nyligen ingestade dokument och berörda entiteter/relationer.
+
+    ### VIKTIGT: BERIKA ALLA ENTITETER DU KAN
+    Du är INTE begränsad till att bara berika de listade entiteterna.
+    Om du i dokumenten hittar information som kan berika NÅGON entitet du ser
+    (inklusive de som bara nämns som grannar), gör det.
+
+    Titta särskilt på:
+    - Entiteter med "SAKNAS"-fält som du kan fylla från dokumentkontext
+    - Entiteter med "Context: TOM" där dokumenten innehåller relevanta detaljer
+    - Grannar som nämns med detaljer i dokumenten men som har tomma properties
+
+    ### REGLER
+    - Returnera BARA NYA eller ÄNDRADE properties. ALDRIG system-properties.
+    - Enum-värden MÅSTE matcha schemat EXAKT. Hitta inte på egna värden.
+    - Gissa inte — om du inte kan härleda med rimlig säkerhet, hoppa över.
+    - confidence < 0.6 = inkludera inte.
+    - aliases: Returnera HELA listan (befintliga + nya) om du lägger till alias.
+
+    ### UPPGIFTER
+
+    1. **BERIKA NODER** — Fyll saknade properties från dokumentkontext + grannskap.
+       Gäller ALLA entiteter du ser, inte bara de som listats under "BERÖRDA ENTITETER".
+       **context_summary**: Generera en kompakt identitetsbeskrivning (1-2 meningar) — vem/vad ÄR detta?
+       Returnera som updated_properties: {"context_summary": "Joakim Ekman är VD på Digitalist Group."}
+       Beskriv identitet, inte händelser. Om context_summary redan finns och är korrekt, hoppa över.
+    2. **BERIKA EDGES** — Fyll saknade edge-properties (duration_minutes, job_title, etc).
+       OBS: relation_context på kanter är READ-ONLY. Inkludera ALDRIG relation_context i edge_enrichments.
+    3. **LAKE-METADATA** — Uppdatera context_summary, relations_summary, document_keywords
+       för varje dokument baserat på den berikade grafkontexten.
+
+    ### SVARSFORMAT (STRIKT JSON)
+
+    ```json
+    {{
+      "node_enrichments": [
+        {{
+          "node_id": "uuid",
+          "updated_properties": {{"property_name": "value"}},
+          "new_context": [{{"text": "...", "origin": "unit_id"}}],
+          "new_aliases": ["existing_alias", "new_alias"],
+          "confidence": 0.8,
+          "reason": "Kort motivering"
+        }}
+      ],
+      "edge_enrichments": [
+        {{
+          "source": "uuid",
+          "target": "uuid",
+          "edge_type": "ATTENDED",
+          "updated_properties": {{"duration_minutes": 30}},
+          "confidence": 0.8,
+          "reason": "Kort motivering"
+        }}
+      ],
+      "lake_updates": [
+        {{
+          "unit_id": "uuid",
+          "context_summary": "Uppdaterad sammanfattning",
+          "relations_summary": "Uppdaterad relationstext",
+          "document_keywords": ["kw1", "kw2"]
+        }}
+      ]
+    }}
+    ```
+
+    Returnera ENDAST JSON. Inga kommentarer utanför JSON-blocket.
+    Utelämna tomma listor (om inga edge_enrichments, returnera inte nyckeln).
+
+  # structural_prompt_v2: BORTTAGEN i OBJEKT-107 — ersatt av dreamer-promptar nedan
+
+# --- Dreamer (Strukturell grafanalys, fas 3 i pipeline) ---
+dreamer:
+  merge_evaluation: |
+    ## UPPGIFT: Är dessa noder samma entitet?
+
+    Du ska avgöra om två noder i en kunskapsgraf representerar SAMMA verkliga entitet
+    och bör slås samman (MERGE), eller om de är separata entiteter (SKIP).
+
+    ### NOD A: "{name_a}" ({type_a})
+    **Identitet (context_summary):**
+    {context_a}
+
+    **Kopplingar:**
+    {edges_a}
+
+    **Aliases:** {aliases_a}
+
+    ### NOD B: "{name_b}" ({type_b})
+    **Identitet (context_summary):**
+    {context_b}
+
+    **Kopplingar:**
+    {edges_b}
+
+    **Aliases:** {aliases_b}
+
+    ### REGLER
+    - Namnlikhet ensam räcker INTE för MERGE. Kontexten avgör.
+    - Om namnen matchar MEN organisationer, roller eller kontext skiljer sig → SKIP
+    - Om organisation OCH roll matchar → stark merge-signal
+    - Om context_summary saknas på en nod men namnet är en del av den andres namn, och ingen motstridande kontext finns → svag merge-signal (lägre confidence)
+    - Var konservativ: hellre SKIP med hög confidence än MERGE med låg confidence
+
+    ### SVARSFORMAT (STRIKT JSON)
+
+    ```json
+    {{
+      "decision": "MERGE" eller "SKIP",
+      "confidence": 0.0-1.0,
+      "primary_node_id": "UUID för noden som ska behållas (den med mest kontext)",
+      "secondary_node_id": "UUID för noden som ska tas bort",
+      "reason": "Kort motivering med specifik evidens"
+    }}
+    ```
+
+    Returnera ENDAST JSON.
+
+  rename_evaluation: |
+    ## UPPGIFT: Bör denna nod byta namn?
+
+    Du ska avgöra om en nod i en kunskapsgraf har ett ofullständigt eller felaktigt namn
+    och bör byta namn (RENAME), eller om nuvarande namn är tillräckligt (SKIP).
+
+    ### NODEN
+    - **Aktuellt namn:** "{current_name}"
+    - **Typ:** {node_type}
+    - **Context_summary:** {context_summary}
+
+    ### HEURISTISKT FÖRSLAG
+    - **Föreslaget namn:** "{suggested_name}"
+    - **Anledning:** {reason}
+
+    ### RELATIONER
+    {edges_text}
+
+    ### REGLER
+    - Om context_summary TYDLIGT identifierar personen med fullständigt namn → RENAME
+    - Om context_summary är vag eller namnförslaget inte stämmer med kontext → SKIP
+    - Det föreslagna namnet från heuristiken kan vara fel — LLM avgör det korrekta namnet
+    - Om det finns motstridande information (t.ex. "Mikael" som kan vara flera personer) → SKIP
+    - Var konservativ: hellre behåll nuvarande namn än byt till fel namn
+
+    ### SVARSFORMAT (STRIKT JSON)
+
+    ```json
+    {{
+      "decision": "RENAME" eller "SKIP",
+      "new_name": "Det korrekta nya namnet (eller null om SKIP)",
+      "confidence": 0.0-1.0,
+      "reason": "Kort motivering med specifik evidens"
+    }}
+    ```
+
+    Returnera ENDAST JSON.
+
+  split_evaluation: |
+    ## UPPGIFT: Blandar denna nod ihop flera entiteter?
+
+    En nod har flaggats som potentiell sammanblandning av flera verkliga entiteter.
+    Avgör om noden bör DELAS (SPLIT) eller behållas som den är (SKIP).
+
+    ### NODEN
+    - **Namn:** "{node_name}"
+    - **Typ:** {node_type}
+    - **Context_summary:** {context_summary}
+    - **Aliases:** {aliases}
+
+    ### RELATIONER
+    {edges_text}
+
+    ### FLAGGORSAK
+    {flag_reason}
+
+    ### REGLER
+    - SPLIT bara om det finns TYDLIGT motstridande kontext (t.ex. två helt olika roller/organisationer)
+    - En person som byter jobb över tid är INTE en split-kandidat
+    - En person med flera roller i SAMMA organisation är INTE en split-kandidat
+    - Var konservativ: hellre behåll en nod med rik kontext än skapa fragmenterade noder
+
+    ### SVARSFORMAT (STRIKT JSON)
+
+    ```json
+    {{
+      "decision": "SPLIT" eller "SKIP",
+      "confidence": 0.0-1.0,
+      "split_clusters": [
+        {{"name": "Namn för entitet 1", "context_indices": [0, 2]}},
+        {{"name": "Namn för entitet 2", "context_indices": [1, 3]}}
+      ],
+      "reason": "Kort motivering"
+    }}
+    ```
+
+    Returnera ENDAST JSON.
+
+  recategorize_evaluation: |
+    ## UPPGIFT: Har denna nod fel typ?
+
+    En nod har flaggats som potentiellt felkategoriserad.
+    Avgör om noden bör BYTA TYP (RECATEGORIZE) eller behålla sin nuvarande typ (SKIP).
+
+    ### NODEN
+    - **Namn:** "{node_name}"
+    - **Aktuell typ:** {current_type}
+    - **Context_summary:** {context_summary}
+
+    ### RELATIONER
+    {edges_text}
+
+    ### TILLÅTNA TYPER
+    {allowed_types}
+
+    ### FLAGGORSAK
+    {flag_reason}
+
+    ### REGLER
+    - Ändra typ BARA om kontexten tydligt bryter mot definitionen för nuvarande typ
+    - Den nya typen MÅSTE finnas i TILLÅTNA TYPER
+    - Var konservativ: osäkerhet = behåll nuvarande typ
+
+    ### SVARSFORMAT (STRIKT JSON)
+
+    ```json
+    {{
+      "decision": "RECATEGORIZE" eller "SKIP",
+      "new_type": "Ny typ (eller null om SKIP)",
+      "confidence": 0.0-1.0,
+      "reason": "Kort motivering"
+    }}
+    ```
+
+    Returnera ENDAST JSON.
