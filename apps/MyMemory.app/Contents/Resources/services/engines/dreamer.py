@@ -463,18 +463,18 @@ class Dreamer:
             return 0
 
         rows = self.graph_service.conn.execute(
-            "SELECT id, aliases, properties FROM nodes WHERE aliases IS NOT NULL AND aliases != '[]'"
+            "SELECT id, type, aliases, properties FROM nodes WHERE aliases IS NOT NULL AND aliases != '[]'"
         ).fetchall()
 
         cleaned = 0
-        for node_id, aliases_str, props_str in rows:
+        for node_id, node_type, aliases_str, props_str in rows:
             aliases = json.loads(aliases_str) if aliases_str else []
             props = json.loads(props_str) if props_str else {}
             name = props.get("name", node_id)
 
             new_aliases = [a for a in aliases if a != name]
             if len(new_aliases) < len(aliases):
-                self.graph_service.upsert_node(node_id, None, new_aliases, {})
+                self.graph_service.upsert_node(node_id, node_type, new_aliases, {})
                 cleaned += len(aliases) - len(new_aliases)
 
         if cleaned:
@@ -489,15 +489,15 @@ class Dreamer:
         uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
         rows = self.graph_service.conn.execute(
-            "SELECT id, aliases, properties FROM nodes WHERE aliases IS NOT NULL AND aliases != '[]'"
+            "SELECT id, type, aliases, properties FROM nodes WHERE aliases IS NOT NULL AND aliases != '[]'"
         ).fetchall()
 
         cleaned = 0
-        for node_id, aliases_str, props_str in rows:
+        for node_id, node_type, aliases_str, props_str in rows:
             aliases = json.loads(aliases_str) if aliases_str else []
             new_aliases = [a for a in aliases if not uuid_pattern.match(a)]
             if len(new_aliases) < len(aliases):
-                self.graph_service.upsert_node(node_id, None, new_aliases, {})
+                self.graph_service.upsert_node(node_id, node_type, new_aliases, {})
                 cleaned += len(aliases) - len(new_aliases)
 
         if cleaned:
