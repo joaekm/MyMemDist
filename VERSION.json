@@ -1,7 +1,7 @@
 {
-  "version": "0.9.1",
+  "version": "0.9.2",
   "date": "2026-02-27",
-  "description": "# Release Notes Fixade krasch i Dreamer Graph Sweep vid alias-cleanup. **Buggfix:** - Dreamer kraschade med \"NOT NULL constraint failed: nodes.type\" under Graph Sweep pass 1 (deterministic cleanup) - Orsak: alias-cleanup-funktionerna skickade NULL som nodtyp till upsert_node, vilket triggade NOT NULL-constraint via ON CONFLICT-klausulen - Fix: Korrekt nodtyp hämtas från databasen och skickas vidare vid alias-uppdatering ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.9.1/MyMemory-Installer.dmg",
+  "description": "# Release Notes Fixade DuckDB-connection-konflikt som blockerade Lake-uppdatering efter Dreamer-operationer. **Buggfix:** - Dreamer Graph Sweep: \"Semantic update\" misslyckades för alla Lake-filer efter rename/merge/split med \"Can't open a connection to same database file with a different configuration\" - Orsak: metadata_service öppnade en ny read-only DuckDB-connection medan Dreamer redan höll en write-connection — DuckDB tillåter inte blandad konfiguration - Fix: Befintlig GraphService-instans återanvänds genom hela anropskedjan istället för att öppna en ny ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.9.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

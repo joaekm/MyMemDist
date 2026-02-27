@@ -168,7 +168,8 @@ def _get_relevant_edge_types_for_node(schema: dict, node_type: str) -> List[dict
 
 def _enrich_entities_from_graph(
     resolved_entities: List[Dict],
-    graph_path: str
+    graph_path: str,
+    graph_service=None
 ) -> Dict[str, Dict]:
     """
     Hämta graf-relationer för varje entity.
@@ -196,15 +197,16 @@ def _enrich_entities_from_graph(
         return {}
 
     # Kolla om graf finns
-    if not os.path.exists(graph_path):
+    if not graph_service and not os.path.exists(graph_path):
         LOGGER.debug(f"Graph not found at {graph_path}, skipping enrichment")
         return {}
 
     schema = _get_schema()
     enriched = {}
+    owns_graph = graph_service is None
 
     try:
-        graph = GraphService(graph_path, read_only=True)
+        graph = graph_service if graph_service else GraphService(graph_path, read_only=True)
 
         for entity in resolved_entities:
             action = entity.get("action")
@@ -280,7 +282,8 @@ def _enrich_entities_from_graph(
 
             enriched[uuid] = entity_data
 
-        graph.close()
+        if owns_graph:
+            graph.close()
     except (OSError, IOError) as e:
         # Graf-fil kan saknas eller vara låst - returnera tom dict
         LOGGER.warning(f"Could not enrich entities (graph unavailable): {e}")
@@ -392,7 +395,8 @@ def generate_semantic_metadata(
     text: str,
     resolved_entities: List[Dict] = None,
     current_meta: Dict = None,
-    filename: str = ""
+    filename: str = "",
+    graph_service=None
 ) -> Dict[str, Any]:
     """
     Generera eller förädla semantisk metadata (context_summary, relations_summary, document_keywords).
@@ -408,6 +412,7 @@ def generate_semantic_metadata(
         current_meta: Befintlig metadata (för förädling). Om None → nygenering.
             {"context_summary": "...", "relations_summary": "...", "document_keywords": [...]}
         filename: Filnamn (för logging och prompt-kontext)
+        graph_service: Befintlig GraphService-instans (undviker ny connection vid concurrent access)
 
     Returns:
         {
@@ -423,7 +428,7 @@ def generate_semantic_metadata(
     # Hämta graf-kontext (schema-driven)
     enriched = {}
     if resolved_entities:
-        enriched = _enrich_entities_from_graph(resolved_entities, graph_path)
+        enriched = _enrich_entities_from_graph(resolved_entities, graph_path, graph_service=graph_service)
 
     # Bygg entity-kontext sträng
     entity_context = _build_entity_context_string(resolved_entities or [], enriched)

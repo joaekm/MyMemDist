@@ -887,7 +887,8 @@ class Enrichment:
                         "relations_summary": current_meta.get('relations_summary', ''),
                         "document_keywords": current_meta.get('document_keywords', [])
                     },
-                    filename=os.path.basename(filepath)
+                    filename=os.path.basename(filepath),
+                    graph_service=self.graph_service
                 )
 
                 if new_semantics.get('ai_model') in ['FAILED', 'SKIPPED']:
