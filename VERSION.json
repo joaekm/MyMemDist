@@ -1,7 +1,7 @@
 {
-  "version": "0.9.2",
+  "version": "0.10.0",
   "date": "2026-02-27",
-  "description": "# Release Notes Fixade DuckDB-connection-konflikt som blockerade Lake-uppdatering efter Dreamer-operationer. **Buggfix:** - Dreamer Graph Sweep: \"Semantic update\" misslyckades för alla Lake-filer efter rename/merge/split med \"Can't open a connection to same database file with a different configuration\" - Orsak: metadata_service öppnade en ny read-only DuckDB-connection medan Dreamer redan höll en write-connection — DuckDB tillåter inte blandad konfiguration - Fix: Befintlig GraphService-instans återanvänds genom hela anropskedjan istället för att öppna en ny ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.9.2/MyMemory-Installer.dmg",
+  "description": "# Release Notes Kritisk buggfix i Dreamer och nya schema guards som skyddar grafens integritet. **Buggfixar:** - Dreamer Graph Sweep raderade felaktigt alla semantiska kanter (BELONGS_TO, WORKS_ON etc.) — validate_edge krävde properties som saknades i edge-dict. Fix: ny validate_edge_structure som bara kollar kanttyp + nodtyper. - Dreamer dry-run visade felaktiga siffror (samma bugg som ovan) - Deletion lämnade orphaned relation_context-entries på kanter - Dreamer daemon saknade ordningsberoende mot Enrichment **Nytt:** - Schema guards i grafen — ogiltiga kanter och noder avvisas vid skrivning istället för att smyga in - Pipeline-tester (ingestion, enrichment, dreamer) körs nu isolerat från produktion via temporär MYMEMORY_HOME **Kodhygien:** - Stale namngivning, dead code och tombstone-kommentarer borttagna (OBJEKT-108) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.10.0/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

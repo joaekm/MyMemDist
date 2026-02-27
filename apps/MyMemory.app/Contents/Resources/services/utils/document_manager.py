@@ -7,6 +7,7 @@ Används av:
 
 Logik:
     1. Graph — rensa orphan-entities (inga kanter till andra Source-noder)
+    1b. Graph — purge relation_context entries med origin=doc_id på kvarvarande entiteters kanter
     2. Graph — delete Source-nod + MENTIONS-kanter
     3. Vector — delete dokument + transcript-chunks
     4. Lake — ta bort .md-fil
@@ -230,6 +231,36 @@ def preview_deletion(doc_id: str) -> dict:
     }
 
 
+def _purge_relation_context(graph: GraphService, entity_id: str, origin_id: str) -> int:
+    """Remove relation_context entries with matching origin from all edges on an entity.
+
+    Returns count of entries removed.
+    """
+    purged = 0
+    all_edges = graph.get_edges_from(entity_id) + graph.get_edges_to(entity_id)
+
+    for edge in all_edges:
+        props = edge.get("properties", {})
+        rc_list = props.get("relation_context")
+        if not rc_list or not isinstance(rc_list, list):
+            continue
+
+        filtered = [entry for entry in rc_list if entry.get("origin") != origin_id]
+        removed_count = len(rc_list) - len(filtered)
+        if removed_count == 0:
+            continue
+
+        props["relation_context"] = filtered
+        props_json = json.dumps(props, ensure_ascii=False)
+        graph.conn.execute(
+            "UPDATE edges SET properties = ? WHERE source = ? AND target = ? AND edge_type = ?",
+            [props_json, edge["source"], edge["target"], edge["type"]]
+        )
+        purged += removed_count
+
+    return purged
+
+
 def execute_deletion(doc_id: str) -> dict:
     """Utför deletion från alla tre lager."""
     _, paths = _load_paths()
@@ -263,6 +294,7 @@ def execute_deletion(doc_id: str) -> dict:
 
                 entities_cleaned = 0
                 entities_deleted = 0
+                rc_purged = 0
 
                 for edge in mentions:
                     entity_id = edge["target"]
@@ -279,11 +311,17 @@ def execute_deletion(doc_id: str) -> dict:
                         vs.delete(entity_id)
                         entities_deleted += 1
                     else:
+                        # Purge relation_context entries referencing deleted document
+                        rc_purged += _purge_relation_context(graph, entity_id, unit_id)
                         entities_cleaned += 1
 
                 result["actions"].append(
                     f"Entities: {entities_cleaned} cleaned, {entities_deleted} deleted"
                 )
+                if rc_purged:
+                    result["actions"].append(
+                        f"Relation context: {rc_purged} entries purged from edges"
+                    )
 
                 # 2. Ta bort Source-noden (+ kvarvarande MENTIONS-kanter)
                 doc_deleted = graph.delete_node(unit_id)

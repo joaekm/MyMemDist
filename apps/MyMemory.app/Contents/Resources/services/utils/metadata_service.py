@@ -438,8 +438,8 @@ def generate_semantic_metadata(
 
     # Välj prompt baserat på läge
     if current_meta:
-        # Förädlingsläge (dreamer)
-        prompt_template = _get_prompt('dreamer', 'semantic_update')
+        # Förädlingsläge (propagate_changes efter graf-operationer)
+        prompt_template = _get_prompt('enrichment', 'semantic_update')
         if not prompt_template:
             LOGGER.warning("semantic_update prompt missing, using current metadata")
             return {

@@ -43,7 +43,13 @@ signal.signal(signal.SIGTERM, _handle_sigterm)
 signal.signal(signal.SIGINT, _handle_sigterm)
 
 # --- LOGGING SETUP (FileHandler only, no terminal output) ---
-_log_file = os.path.expanduser('~/MyMemory/Logs/my_mem_system.log')
+from services.utils.config_loader import get_config, get_prompts, get_expanded_paths
+try:
+    _early_cfg = get_config()
+except FileNotFoundError:
+    logging.debug("Config not found at startup — using default log path")
+    _early_cfg = {}
+_log_file = os.path.expanduser(_early_cfg.get('logging', {}).get('system_log', '~/Library/Logs/MyMemory/system.log'))
 os.makedirs(os.path.dirname(_log_file), exist_ok=True)
 
 _root = logging.getLogger()
@@ -85,8 +91,6 @@ for _name in ['httpx', 'httpcore', 'mcp', 'google', 'google_genai', 'anyio', 'wa
 
 
 # --- CONFIG LOADER ---
-from services.utils.config_loader import get_config, get_prompts, get_expanded_paths
-
 _raw_config = get_config()
 # Expandera paths
 CONFIG = dict(_raw_config)
@@ -158,7 +162,7 @@ _last_ingestion_payload = []
 _last_raw_text = ""
 _last_semantic_metadata = {}
 
-# Dreamer state lock (OBJEKT-76)
+# Enrichment state lock (OBJEKT-76)
 ENRICHMENT_STATE_LOCK = threading.Lock()
 
 
@@ -219,10 +223,10 @@ def reset_enrichment_counter():
             with open(ENRICHMENT_STATE_FILE, 'w') as f:
                 json.dump(state, f, indent=2, default=str)
 
-            LOGGER.info("Dreamer counter reset to 0")
+            LOGGER.info("Enrichment counter reset to 0")
 
         except (OSError, json.JSONDecodeError) as e:
-            LOGGER.warning(f"Could not reset Dreamer state: {e}")
+            LOGGER.warning(f"Could not reset Enrichment state: {e}")
 
 
 # Global Schema Validator (Lazy load)
@@ -1235,13 +1239,16 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List,
 
             # OBJEKT-107: Filter MENTIONS against schema — Roles should not get MENTIONS edges
             if node_type != "Roles":
-                graph.upsert_edge(
-                    source=unit_id,
-                    target=target_uuid,
-                    edge_type="MENTIONS",
-                    properties={"confidence": confidence}
-                )
-                edges_written += 1
+                try:
+                    graph.upsert_edge(
+                        source=unit_id,
+                        target=target_uuid,
+                        edge_type="MENTIONS",
+                        properties={"confidence": confidence}
+                    )
+                    edges_written += 1
+                except ValueError as e:
+                    LOGGER.warning(f"Edge skipped (schema guard): {e}")
 
         elif action == "CREATE_EDGE":
             source_uuid = entity.get("source_uuid")
@@ -1296,13 +1303,17 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List,
                         )
                         continue
 
-                graph.upsert_edge(
-                    source=source_uuid,
-                    target=target_uuid,
-                    edge_type=edge_type,
-                    properties=edge_props
-                )
-                edges_written += 1
+                try:
+                    graph.upsert_edge(
+                        source=source_uuid,
+                        target=target_uuid,
+                        edge_type=edge_type,
+                        properties=edge_props
+                    )
+                    edges_written += 1
+                except ValueError as e:
+                    LOGGER.warning(f"Edge skipped (schema guard): {e}")
+                    continue
 
                 # Terminal output: visa sparad relation
                 entity_detail(

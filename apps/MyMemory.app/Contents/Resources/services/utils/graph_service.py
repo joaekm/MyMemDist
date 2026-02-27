@@ -184,6 +184,19 @@ class GraphService:
         if self.read_only:
             raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
 
+        # Schema guard: validate node type (OBJEKT-108)
+        try:
+            from services.utils.schema_validator import SchemaValidator
+            validator = SchemaValidator()
+            valid_types = list(validator.schema.get("nodes", {}).keys())
+            if type not in valid_types:
+                raise ValueError(
+                    f"Schema guard REJECTED node: unknown type '{type}'. "
+                    f"Allowed: {valid_types}"
+                )
+        except ImportError:
+            LOGGER.debug("SchemaValidator not available — skipping node type validation")
+
         new_props = properties or {}
 
         with self._lock:
@@ -616,20 +629,16 @@ class GraphService:
                     target: target_node.get("type", "Unknown"),
                 }
                 edge_dict = {"source": source, "target": target, "type": edge_type}
-                # Include scalar properties for required-property validation (e.g. confidence).
-                # Complex types (list, dict) excluded — validated at extraction time,
-                # and extraction_type vs runtime type mismatch would cause false rejections.
-                if properties:
-                    for k, v in properties.items():
-                        if not isinstance(v, (list, dict)):
-                            edge_dict[k] = v
-                ok, msg = validator.validate_edge(edge_dict, nodes_map)
+                ok, msg = validator.validate_edge_structure(edge_dict, nodes_map)
                 if not ok:
                     LOGGER.warning(
                         f"Schema guard REJECTED edge: {source_node.get('type')}→{target_node.get('type')} "
                         f"via {edge_type} — {msg}"
                     )
-                    return
+                    raise ValueError(
+                        f"Schema guard REJECTED edge: {source_node.get('type')}→{target_node.get('type')} "
+                        f"via {edge_type} — {msg}"
+                    )
             except ImportError:
                 LOGGER.debug("SchemaValidator not available — skipping edge validation")
 

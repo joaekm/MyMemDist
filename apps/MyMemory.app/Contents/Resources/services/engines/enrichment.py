@@ -487,8 +487,6 @@ class Enrichment:
 
         return prompt, stats, selected_entities, edges, neighbor_summaries
 
-    # _build_structural_prompt_v2: REMOVED in OBJEKT-107 — structural analysis moved to dreamer.py
-
     # =====================================================================
     # LLM CALL HELPER
     # =====================================================================
@@ -647,8 +645,11 @@ class Enrichment:
                 LOGGER.warning(f"Large relation_context ({len(existing_rc)} entries) on "
                                f"{source} -[{edge_type}]-> {target}")
 
-            self.graph_service.upsert_edge(source, target, edge_type, merged_props)
-            stats["edges_updated"] += 1
+            try:
+                self.graph_service.upsert_edge(source, target, edge_type, merged_props)
+                stats["edges_updated"] += 1
+            except ValueError as e:
+                LOGGER.warning(f"Edge skipped (schema guard): {e}")
 
         # --- Lake updates ---
         lake_path = self._get_lake_path()
@@ -673,8 +674,6 @@ class Enrichment:
         LOGGER.info(f"Enrich writes: {stats['nodes_updated']} nodes, {stats['edges_updated']} edges, "
                      f"{stats['lake_updated']} lake ({stats['nodes_skipped']} skipped)")
         return stats
-
-    # _execute_structural_writes: REMOVED in OBJEKT-107 — structural writes moved to dreamer.py
 
     # =====================================================================
     # WRITE: QUALITY FLAGS (OBJEKT-107)
@@ -801,7 +800,7 @@ class Enrichment:
         return summary
 
     # =====================================================================
-    # PRESERVED METHODS (used by structural writes and propagation)
+    # SHARED METHODS (used by Dreamer via import)
     # =====================================================================
 
     def _validate_edges_for_recategorize(self, node_id: str, new_type: str) -> tuple:
@@ -837,17 +836,6 @@ class Enrichment:
         if node:
             return node.get("type", "Unknown")
         return "Unknown"
-
-    def _is_weak_name(self, name: str) -> bool:
-        """Identify UUIDs or generic placeholders."""
-        patterns = [
-            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-            r'^Talare \d+$',
-            r'^Speaker \d+$',
-            r'^Unknown$',
-            r'^Unit_.*$'
-        ]
-        return any(re.match(p, name, re.I) for p in patterns)
 
     def propagate_changes(self, unit_ids: List[str]) -> int:
         """Regenerate semantic metadata for Lake files affected by graph changes."""

@@ -236,10 +236,11 @@ class SchemaValidator:
 
         return True, "OK"
 
-    def validate_edge(self, edge: Dict[str, Any], nodes_map: Dict[str, str]) -> Tuple[bool, str]:
+    def validate_edge_structure(self, edge: Dict[str, Any], nodes_map: Dict[str, str]) -> Tuple[bool, str]:
         """
-        Validerar en kant mot schemat.
-        nodes_map: {node_name: node_type} - Mappning av nodnamn till typ för uppslagning.
+        Validerar en kants strukturella korrekthet: kanttyp finns i schemat,
+        source/target-nodtyper är tillåtna. Kontrollerar INTE edge properties.
+        Används av Dreamer för cleanup av befintliga kanter i grafen.
         """
         rel_type = edge.get('type')
         source = edge.get('source')
@@ -248,27 +249,39 @@ class SchemaValidator:
         if not rel_type or not source or not target:
             return False, "Malformed edge: missing type, source, or target"
 
-        # Kolla att relationstypen finns
         edge_def = self.schema.get('edges', {}).get(rel_type)
         if not edge_def:
             return False, f"Unknown relation type: '{rel_type}'"
 
-        # Kolla att noder finns i extraktionen
         s_type = nodes_map.get(source)
         t_type = nodes_map.get(target)
 
-        if not s_type: return False, f"Source node '{source}' not found in extraction"
-        if not t_type: return False, f"Target node '{target}' not found in extraction"
+        if not s_type: return False, f"Source node '{source}' not found"
+        if not t_type: return False, f"Target node '{target}' not found"
 
-        # Validera riktning
         allowed_sources = edge_def.get('source_type', [])
         allowed_targets = edge_def.get('target_type', [])
 
         if s_type not in allowed_sources:
             return False, f"Invalid source type '{s_type}' for relation '{rel_type}'. Allowed: {allowed_sources}"
-        
+
         if t_type not in allowed_targets:
             return False, f"Invalid target type '{t_type}' for relation '{rel_type}'. Allowed: {allowed_targets}"
+
+        return True, "OK"
+
+    def validate_edge(self, edge: Dict[str, Any], nodes_map: Dict[str, str]) -> Tuple[bool, str]:
+        """
+        Validerar en kant mot schemat (struktur + properties).
+        nodes_map: {node_name: node_type} - Mappning av nodnamn till typ för uppslagning.
+        """
+        # Structural validation first
+        ok, msg = self.validate_edge_structure(edge, nodes_map)
+        if not ok:
+            return False, msg
+
+        rel_type = edge.get('type')
+        edge_def = self.schema.get('edges', {}).get(rel_type)
 
         # Validera edge properties mot schemat
         properties_def = edge_def.get("properties", {})

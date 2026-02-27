@@ -372,7 +372,7 @@ class Dreamer:
                     target_id: target_node.get("type", "Unknown"),
                 }
                 edge = {"source": source_id, "target": target_id, "type": edge_type}
-                ok, msg = validator.validate_edge(edge, nodes_map)
+                ok, msg = validator.validate_edge_structure(edge, nodes_map)
                 if not ok:
                     result["invalid_edges"] += 1
 
@@ -432,7 +432,7 @@ class Dreamer:
                 target_id: target_node.get("type", "Unknown"),
             }
             edge = {"source": source_id, "target": target_id, "type": edge_type}
-            ok, msg = validator.validate_edge(edge, nodes_map)
+            ok, msg = validator.validate_edge_structure(edge, nodes_map)
             if not ok:
                 self.graph_service.delete_edge(source_id, target_id, edge_type)
                 removed += 1

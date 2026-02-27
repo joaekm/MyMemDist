@@ -106,8 +106,34 @@ def _save_state(state_file: str, state: dict):
         LOGGER.error(f"Failed to save state: {e}")
 
 
-def _should_run(state: dict, daemon_config: dict) -> tuple[bool, str]:
-    """Check if dreamer should run."""
+def _enrichment_has_run_since(dreamer_last_run: str, config: dict) -> bool:
+    """Check if Enrichment has completed since the given Dreamer run timestamp."""
+    enrichment_state_file = os.path.expanduser(
+        config.get('enrichment', {}).get('daemon', {}).get(
+            'state_file', '~/Library/Application Support/MyMemory/enrichment_state.json'
+        )
+    )
+    if not os.path.exists(enrichment_state_file):
+        return False
+
+    try:
+        with open(enrichment_state_file, 'r') as f:
+            enrichment_state = json.load(f)
+        enrich_ts = enrichment_state.get('last_run_timestamp')
+        if not enrich_ts:
+            return False
+        return datetime.fromisoformat(enrich_ts) > datetime.fromisoformat(dreamer_last_run)
+    except (json.JSONDecodeError, ValueError, OSError) as e:
+        LOGGER.warning(f"Could not read enrichment state: {e}")
+        return True  # On error, don't block Dreamer
+
+
+def _should_run(state: dict, daemon_config: dict, config: dict = None) -> tuple[bool, str]:
+    """Check if dreamer should run.
+
+    Requires that Enrichment has run since the last Dreamer run
+    (Enrichment sets quality_flags consumed by Dreamer's split/recat passes).
+    """
     last_run = state.get('last_run_timestamp')
     interval_hours = daemon_config['run_interval_hours']
 
@@ -116,6 +142,9 @@ def _should_run(state: dict, daemon_config: dict) -> tuple[bool, str]:
             last_run_dt = datetime.fromisoformat(last_run)
             hours_since = (datetime.now() - last_run_dt).total_seconds() / 3600
             if hours_since >= interval_hours:
+                # Check enrichment ordering
+                if config and not _enrichment_has_run_since(last_run, config):
+                    return False, f"Interval reached ({hours_since:.1f}h) but Enrichment has not run since last Dreamer — waiting"
                 return True, f"Interval reached: {hours_since:.1f}h >= {interval_hours}h"
             return False, f"Waiting: {hours_since:.1f}h / {interval_hours}h"
         except ValueError as e:
@@ -173,7 +202,7 @@ def run_daemon():
     while True:
         try:
             state = _load_state(daemon_config['state_file'])
-            should_run, reason = _should_run(state, daemon_config)
+            should_run, reason = _should_run(state, daemon_config, config)
 
             if should_run:
                 LOGGER.info(f"Triggering Dreamer: {reason}")
@@ -207,7 +236,7 @@ def run_once():
     daemon_config = _get_daemon_config(config)
 
     state = _load_state(daemon_config['state_file'])
-    should_run, reason = _should_run(state, daemon_config)
+    should_run, reason = _should_run(state, daemon_config, config)
 
     print(f"State: {json.dumps(state, indent=2, default=str)}")
     print(f"Should run: {should_run}")
