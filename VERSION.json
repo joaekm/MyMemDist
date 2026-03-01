@@ -1,7 +1,7 @@
 {
-  "version": "0.12.2",
+  "version": "0.12.3",
   "date": "2026-03-01",
-  "description": "# Release Notes ## Buggfixar - **Fix: Loggfiler hittades inte efter setup** — Config-templaten pekade Python-loggar till `~/MyMemory/Logs/` medan Swift-appen letade i `~/Library/Logs/MyMemory/` (macOS-standard). Nya installationer fick \"Loggfilen hittades inte\" i inställningar. - **Fix: Version visades som \"0.0.0\"** — Config-templaten saknade `version`-fält. Menubar-appen visar nu korrekt version från app-bundlen. - **Fix: MCP-agenter loggade till fel sökväg** — `mymem_mcp.py` och `validator_mcp.py` hade hårdkodad logg-sökväg som inte matchade macOS-standard. - **Fix: SettingsView läser nu logg-sökväg från config** istället för att hårdkoda den. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.2/MyMemory-Installer.dmg",
+  "description": "# Release Notes ## Buggfixar - **Fix: Tjänster startade inte efter initial setup** — Efter att setup-wizarden slutförde på en ny installation startades aldrig backend-tjänsterna. Appen väntade på en signal som aldrig kom. Nu triggas service-start automatiskt när setup är klart. - **Fix: PYTHONPATH saknades för subprocesser** — `start_services.py` startade tjänster med `python -m` utan att skicka med PYTHONPATH, vilket orsakade `ModuleNotFoundError: No module named 'services'` på nya installationer. - **Fix: Loggfiler hittades inte efter setup** — Config-templaten pekade loggar till `~/MyMemory/Logs/` medan appen letade i `~/Library/Logs/MyMemory/` (macOS-standard). Alla logg-sökvägar alignade till macOS-standard. - **Fix: Version visades som \"0.0.0\"** — Config-templaten saknade `version`-fält. Menubar-appen visar nu korrekt version. - **Fix: SettingsView läser logg-sökväg från config** istället för att hårdkoda den. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.3/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

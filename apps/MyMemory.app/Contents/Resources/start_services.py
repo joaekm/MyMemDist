@@ -199,11 +199,19 @@ def start_all():
 
     python_exec = sys.executable
 
+    # Säkerställ att PYTHONPATH inkluderar script-katalogen så subprocesser hittar 'services'
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    env = os.environ.copy()
+    existing = env.get('PYTHONPATH', '')
+    if script_dir not in existing.split(os.pathsep):
+        env['PYTHONPATH'] = script_dir + (os.pathsep + existing if existing else '')
+
     for service in SERVICES:
         module_name = service["module"]
         try:
             p = subprocess.Popen(
-                [python_exec, "-m", module_name]
+                [python_exec, "-m", module_name],
+                env=env
             )
             processes.append({"process": p, "name": service["name"]})
             LOGGER.info(f"Started {service['name']}")
