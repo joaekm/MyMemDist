@@ -1,7 +1,7 @@
 {
-  "version": "0.12.0",
+  "version": "0.12.1",
   "date": "2026-03-01",
-  "description": "# Release Notes ## 0.12.0 — Smartare MCP-verktyg och relationsbaserad vektorsökning ### Ny funktionalitet - **Tre nya MCP-verktyg (#110):** - `get_data_model` — visar systemets datamodell (nodtyper, relationer, källprofiler, söktips) - `get_source_connections` — navigera mellan dokument och entiteter i båda riktningar - `get_system_health` — visa tillgänglighet och status för graf, vektor och Lake - **Typfiltrering i vektorsökning (#110)** — `query_vector_memory` accepterar `node_type`-parameter för att filtrera till specifik entitetstyp - **Confidence synlig i sökresultat (#110)** — visas i `search_graph_nodes` och som edge-confidence i `get_neighbor_network` - **Kvalitetsstatistik i graf (#110)** — `get_graph_statistics` visar context_summary-täckning, confidence-fördelning, orphan-noder och senaste Dreamer-körning - **Relationsdata i nod-vektorer (#111)** — vektorsökning hittar entiteter via deras relationer (t.ex. \"vem jobbar på Digitalist\") ### Förbättringar - **Omskrivna tool descriptions (#110)** — ärligare beskrivning av sökmetoder, listade nodtyper/relationstyper/källtyper - **Graceful degradation (#110)** — `search_graph_nodes` faller tillbaka på vektorsökning vid graf-lock, övriga verktyg ger tydligare felmeddelanden - **Schema-driven validering** — node_type-validering i MCP använder SchemaValidator istället för rå filläsning ### Buggfixar - **Source-noder exkluderade från vektorindex (#111)** — undviker ID-kollision mellan Source-noders UUID och dokument-UUID i ChromaDB ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.0/MyMemory-Installer.dmg",
+  "description": "# Release Notes - Fixat menubar-appens statuscheck som slutat fungera efter moduläriseringen av ingestion pipeline - ServiceManager använder nu `python -m <modul>` istället för direkta script-sökvägar (matchar start_services.py) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.1/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
