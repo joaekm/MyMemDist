@@ -18,7 +18,19 @@ try:
 except ImportError as e:
     raise ImportError(f"Missing required libraries (pymupdf, python-docx): {e}")
 
+from services.utils.config_loader import get_config
+
 LOGGER = logging.getLogger('TextExtractor')
+
+_DOCUMENT_EXTENSIONS = None
+
+def _get_document_extensions() -> set:
+    """Load document_extensions from config (cached)."""
+    global _DOCUMENT_EXTENSIONS
+    if _DOCUMENT_EXTENSIONS is None:
+        config = get_config()
+        _DOCUMENT_EXTENSIONS = set(config.get('processing', {}).get('document_extensions', []))
+    return _DOCUMENT_EXTENSIONS
 
 
 def extract_text(filepath: str, extension: str = None) -> str:
@@ -49,10 +61,10 @@ def extract_text(filepath: str, extension: str = None) -> str:
     try:
         if extension == '.pdf':
             raw_text = _extract_pdf(filepath)
-        elif extension in ['.txt', '.md', '.json', '.csv']:
-            raw_text = _extract_plain_text(filepath)
         elif extension == '.docx':
             raw_text = _extract_docx(filepath)
+        elif extension in _get_document_extensions():
+            raw_text = _extract_plain_text(filepath)
         else:
             LOGGER.warning(f"Unsupported file type: {extension}, attempting plain text")
             raw_text = _extract_plain_text(filepath)
@@ -86,5 +98,5 @@ def _extract_docx(filepath: str) -> str:
 
 
 def get_supported_extensions() -> list:
-    """Return list of supported file extensions."""
-    return ['.pdf', '.docx', '.txt', '.md', '.json', '.csv']
+    """Return list of supported file extensions (from config)."""
+    return sorted(_get_document_extensions())

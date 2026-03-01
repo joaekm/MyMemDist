@@ -82,7 +82,7 @@ SERVICES = [
     {"module": "services.collectors.file_collector", "name": "File Retriever"},
     {"module": "services.collectors.slack_collector", "name": "Slack Collector"},
     {"module": "services.collectors.collector_daemon", "name": "Collector Daemon"},
-    {"module": "services.engines.ingestion_engine", "name": "Ingestion Engine"},
+    {"module": "services.engines.ingestion", "name": "Ingestion Engine"},
     {"module": "services.processors.transcriber", "name": "Transcriber"},
     {"module": "services.collectors.rode_collector", "name": "Røde Collector"},
     {"module": "services.engines.enrichment_daemon", "name": "Enrichment Daemon"},

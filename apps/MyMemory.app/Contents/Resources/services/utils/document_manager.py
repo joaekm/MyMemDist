@@ -24,8 +24,17 @@ from services.utils.config_loader import get_config
 from services.utils.graph_service import GraphService
 from services.utils.vector_service import vector_scope
 from services.utils.shared_lock import resource_lock
+from services.utils.schema_validator import SchemaValidator
 
 LOGGER = logging.getLogger("DocumentManager")
+
+_SCHEMA_VALIDATOR = None
+
+def _get_schema_validator() -> SchemaValidator:
+    global _SCHEMA_VALIDATOR
+    if _SCHEMA_VALIDATOR is None:
+        _SCHEMA_VALIDATOR = SchemaValidator()
+    return _SCHEMA_VALIDATOR
 
 
 def _load_paths():
@@ -160,7 +169,8 @@ def collect_impact(unit_id: str, graph: GraphService) -> dict:
         impact["document_node"] = True
 
     edges = graph.get_edges_from(unit_id)
-    mentions = [e for e in edges if e.get("type") == "MENTIONS"]
+    source_edges = _get_schema_validator().get_source_edge_types()
+    mentions = [e for e in edges if e.get("type") in source_edges]
     impact["mentions_edges"] = len(mentions)
 
     for edge in mentions:
@@ -290,7 +300,8 @@ def execute_deletion(doc_id: str) -> dict:
             try:
                 # 1. Rensa orphan entities
                 edges = graph.get_edges_from(unit_id)
-                mentions = [e for e in edges if e.get("type") == "MENTIONS"]
+                source_edges = _get_schema_validator().get_source_edge_types()
+                mentions = [e for e in edges if e.get("type") in source_edges]
 
                 entities_cleaned = 0
                 entities_deleted = 0

@@ -51,6 +51,7 @@ for _name in ['httpx', 'httpcore', 'mcp', 'anyio']:
 
 # --- CONFIG LOADING ---
 from services.utils.config_loader import get_config
+from services.utils.schema_validator import SchemaValidator
 
 try:
     CONFIG = get_config()
@@ -59,6 +60,14 @@ except FileNotFoundError as e:
     CONFIG = {}
 PATHS = CONFIG.get('paths', {})
 SEARCH_CONFIG = CONFIG.get('search', {})
+
+_SCHEMA_VALIDATOR = None
+
+def _get_schema_validator() -> SchemaValidator:
+    global _SCHEMA_VALIDATOR
+    if _SCHEMA_VALIDATOR is None:
+        _SCHEMA_VALIDATOR = SchemaValidator()
+    return _SCHEMA_VALIDATOR
 
 GRAPH_PATH = os.path.expanduser(PATHS.get('graph_db', '~/MyMemory/Index/GraphDB'))
 LAKE_PATH = os.path.expanduser(PATHS.get('lake_dir', '~/MyMemory/Lake'))
@@ -607,7 +616,7 @@ def search_by_date_range(
                         'filename': filename,
                         'date': file_dt,
                         'source_type': source_type,
-                        'summary': summary
+                        'summary': summary  # noqa: SD — local dict key, not schema property
                     })
 
             except (ValueError, TypeError) as e:
@@ -634,8 +643,8 @@ def search_by_date_range(
             date_str = m['date'].strftime("%Y-%m-%d %H:%M")
             output.append(f"📄 [{date_str}] {m['filename']}")
             output.append(f"   Typ: {m['source_type']}")
-            if m['summary']:
-                output.append(f"   {m['summary']}...")
+            if m['summary']:  # noqa: SD — local dict key, not schema property
+                output.append(f"   {m['summary']}...")  # noqa: SD — local dict key
 
         return "\n".join(output)
 
@@ -917,7 +926,8 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
             output.append(f"Aliases: {', '.join(aliases[:5])}" + (" ..." if len(aliases) > 5 else ""))
 
         # Relation context from edges
-        non_mentions = [e for e in out_edges + in_edges if e.get('type') != 'MENTIONS']
+        source_edges = _get_schema_validator().get_source_edge_types()
+        non_mentions = [e for e in out_edges + in_edges if e.get('type') not in source_edges]
         has_rc = False
         for e in non_mentions:
             rc = e.get("properties", {}).get("relation_context", [])

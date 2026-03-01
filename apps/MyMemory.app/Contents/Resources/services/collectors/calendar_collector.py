@@ -195,7 +195,7 @@ def extract_event_info(event: dict) -> dict:
 
     return {
         'id': event.get('id', ''),
-        'summary': event.get('summary', 'Ingen titel'),
+        'summary': event.get('summary', 'Ingen titel'),  # noqa: SD — Google Calendar API field
         'start': start_dt,
         'end': end_dt,
         'location': event.get('location', ''),
@@ -322,7 +322,7 @@ def create_daily_digest(target_date: datetime.date, events: list) -> bool:
         attendees_str = ", ".join(event['attendees']) if event['attendees'] else ""
         
         # Bygg event-block
-        lines = [f"## {time_str}: {event['summary']}"]
+        lines = [f"## {time_str}: {event['summary']}"]  # noqa: SD — Google Calendar API field
         
         if event['location']:
             lines.append(f"**Plats:** {event['location']}")

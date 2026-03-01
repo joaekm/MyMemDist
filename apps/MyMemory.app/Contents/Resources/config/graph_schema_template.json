@@ -1,9 +1,10 @@
 {
 "meta": {
-    "version": "3.3",
+    "version": "3.4",
     "description": "Strikt schema för MyMemory med stöd för Self-Healing Graph (Provisional/Verified) samt Declarative Healing.",
     "strict_mode": true,
     "changelog": {
+      "3.4": "base_properties: $NOW sentinel for timestamp defaults. Schema-driven defaults (#94).",
       "3.3": "WORKS_ON edge: Person → Project. Möjliggör strukturella kopplingar mellan personer och projekt.",
       "3.2": "Schema-driven entity resolution: matching-block per nodtyp styr token_subset, first_token_prefix, fuzzy_cutoff och ambiguity_action. ALWAYS_CREATE-typer hoppar över matching helt.",
       "3.1": "OBJEKT-106: node_context borttagen. Ersatt av relation_context på kanter (händelser) + context_summary på noder (identitet).",
@@ -19,8 +20,10 @@
     "source_mappings": {
       "slack": "Slack Log",
       "mail": "Email Thread",
-      "calendar": "Calendar Event"
-    }
+      "calendar": "Calendar Event",
+      "transcripts": "Transcript"
+    },
+    "default_source_type": "Document"
   },
   "base_properties": {
     "description": "Egenskaper som alla noder automatiskt får (system-nivå).",
@@ -53,22 +56,26 @@
       "created_at": {
         "type": "timestamp",
         "required": true,
+        "default": "$NOW",
         "include_in_vector": false
       },
       "last_synced_at": {
         "type": "timestamp",
         "required": true,
+        "default": "$NOW",
         "include_in_vector": false
       },
       "last_seen_at": {
         "type": "timestamp",
         "required": true,
+        "default": "$NOW",
         "include_in_vector": false,
         "description": "Tidpunkt då noden senast observerades/bearbetades av systemet."
       },
       "last_retrieved_at": {
         "type": "timestamp",
         "required": true,
+        "default": "$NOW",
         "include_in_vector": false,
         "description": "Tidpunkt då noden senast användes i ett svar (Relevans)."
       },
@@ -90,14 +97,6 @@
         "type": "string",
         "required": false,
         "include_in_vector": false
-      },
-      "status": {
-        "type": "enum",
-        "required": true,
-        "values": ["PROVISIONAL"],
-        "default": "PROVISIONAL",
-        "include_in_vector": false,
-        "description": "Entitetens status. Alla nya entiteter skapas som PROVISIONAL."
       },
       "confidence": {
         "type": "float",

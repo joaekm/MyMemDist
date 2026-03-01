@@ -157,6 +157,18 @@ def status(
         print(line, file=sys.stderr, flush=True)
 
 
+def short_id(node_id: str) -> str:
+    """Shorten UUID for terminal display: 'a2453abe-...' """
+    if node_id and len(node_id) > 12 and '-' in node_id:
+        return f"{node_id[:8]}-..."
+    return node_id
+
+
+def node_name(node: dict) -> str:
+    """Get node name from properties dict."""
+    return node.get("properties", {}).get("name", node.get("id", "?"))
+
+
 def entity_detail(
     source_name: str,
     source_type: str,

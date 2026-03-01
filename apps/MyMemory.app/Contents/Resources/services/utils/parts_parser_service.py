@@ -18,7 +18,17 @@ import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
+from services.utils.schema_validator import SchemaValidator
+
 LOGGER = logging.getLogger("PartsParserService")
+
+_SCHEMA_VALIDATOR = None
+
+def _get_schema_validator() -> SchemaValidator:
+    global _SCHEMA_VALIDATOR
+    if _SCHEMA_VALIDATOR is None:
+        _SCHEMA_VALIDATOR = SchemaValidator()
+    return _SCHEMA_VALIDATOR
 
 
 @dataclass
@@ -536,15 +546,21 @@ def chunk_document(raw_text: str, source_type: str, chunk_size: int,
     Returnerar None om dokumentet inte ska chunkas (för kort, Calendar Event,
     Transcript, eller om chunkningen bara ger 0-1 delar).
     """
-    if source_type in ("Calendar Event", "Transcript"):
+    mappings = _get_schema_validator().get_source_type_mappings()
+    calendar_type = mappings.get('calendar', '')
+    transcript_type = mappings.get('transcripts', '')
+    slack_type = mappings.get('slack', '')
+    mail_type = mappings.get('mail', '')
+
+    if source_type in (calendar_type, transcript_type):
         return None
 
     if len(raw_text) <= chunk_threshold:
         return None
 
-    if source_type == "Slack Log":
+    if source_type == slack_type:
         parts = chunk_slack_log(raw_text, chunk_size, chunk_overlap)
-    elif source_type == "Email Thread":
+    elif source_type == mail_type:
         parts = chunk_email_thread(raw_text, chunk_size, chunk_overlap)
     else:
         parts = chunk_generic_document(raw_text, chunk_size, chunk_overlap)

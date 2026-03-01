@@ -74,6 +74,22 @@ class GraphService:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target)")
 
+            # Dreamer audit trail (#105)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS dreamer_decisions (
+                    timestamp TEXT NOT NULL,
+                    pass_name TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    node_name TEXT,
+                    confidence FLOAT,
+                    reason TEXT,
+                    metadata TEXT
+                )
+            """)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_pass ON dreamer_decisions(pass_name, timestamp)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_node ON dreamer_decisions(node_id)")
+
     def close(self):
         """Stäng databasanslutningen."""
         with self._lock:
@@ -184,11 +200,12 @@ class GraphService:
         if self.read_only:
             raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
 
-        # Schema guard: validate node type (OBJEKT-108)
+        # Schema guard: validate node type + get defaults (OBJEKT-108 + #94)
+        _validator = None
         try:
             from services.utils.schema_validator import SchemaValidator
-            validator = SchemaValidator()
-            valid_types = list(validator.schema.get("nodes", {}).keys())
+            _validator = SchemaValidator()
+            valid_types = list(_validator.schema.get("nodes", {}).keys())
             if type not in valid_types:
                 raise ValueError(
                     f"Schema guard REJECTED node: unknown type '{type}'. "
@@ -237,18 +254,8 @@ class GraphService:
                         final_props[k] = v
 
             else:
-                # Ny nod - Initiera alla required systemfält enligt schema
-                now_ts = datetime.now().isoformat()
-                defaults = {
-                    "created_at": now_ts,
-                    "last_synced_at": now_ts,
-                    "last_seen_at": now_ts,
-                    "last_retrieved_at": now_ts,
-                    "retrieved_times": 0,
-                    "last_refined_at": "never",
-                    "status": "PROVISIONAL",
-                    "confidence": 0.5
-                }
+                # Ny nod - Initiera alla required systemfält enligt schema (#94)
+                defaults = _validator.get_base_property_defaults() if _validator else {}
                 final_props = defaults
                 final_props.update(new_props)
 
@@ -819,6 +826,23 @@ class GraphService:
 
             LOGGER.info(f"Saved pending review: {entity} vs {master_node} ({score})")
 
+    def record_dreamer_decision(self, pass_name, decision, node_id, node_name_str,
+                                confidence, reason, metadata=None):
+        """Registrera ett Dreamer-beslut i audit trail (#105)."""
+        if self.read_only:
+            raise RuntimeError("HARDFAIL: Försöker skriva dreamer_decision i read_only mode")
+
+        metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
+        timestamp = datetime.now().isoformat()
+
+        with self._lock:
+            self.conn.execute("""
+                INSERT INTO dreamer_decisions
+                (timestamp, pass_name, decision, node_id, node_name, confidence, reason, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, [timestamp, pass_name, decision, node_id, node_name_str,
+                  confidence, reason, metadata_json])
+
     def _merge_edge_relation_context(self, source: str, target: str, edge_type: str, donor_props_raw: str):
         """
         Interfoliera relation_context från en donator-kant till en befintlig kant.
@@ -1045,7 +1069,8 @@ class GraphService:
 
             LOGGER.info(f"Renamed node {old_id}: '{old_name}' -> '{new_name}'")
 
-    def split_node(self, original_id: str, split_map: list):
+    def split_node(self, original_id: str, split_map: list,
+                   edge_assignment: dict = None, source_edge_types: set = None):
         """
         Dela upp en nod i flera nya noder.
         Genererar UUID för varje ny nod och sparar namnet i properties.name.
@@ -1054,6 +1079,12 @@ class GraphService:
             original_id: ID på noden som ska splittas.
             split_map: Lista av dicts:
                        [{ "name": "Nytt_Namn_1", "context_indices": [0, 2] }, ...]
+            edge_assignment: Optional dict {cluster_index: [edge_dicts]} for directed
+                           edge distribution. Each edge dict must have 'direction'
+                           ("out"/"in") plus standard edge keys. Without this,
+                           falls back to legacy brute-force copy.
+            source_edge_types: Set of edge types from Source nodes (e.g. MENTIONS).
+                             These are always copied to all new nodes.
 
         Returns:
             Lista med skapade node IDs (UUID:n)
@@ -1076,6 +1107,9 @@ class GraphService:
                 LOGGER.error(f"Corrupt JSON in node {original_id}: {e}")
                 raise ValueError(f"Corrupt JSON in node {original_id}") from e
 
+            # Properties to clear on new nodes (enrichment will regenerate)
+            stale_keys = ("context_summary", "quality_flags", "quality_flag_reason")
+
             # 2. Skapa nya noder med UUID
             created_nodes = []
             for item in split_map:
@@ -1083,46 +1117,87 @@ class GraphService:
 
                 if not new_name: continue
 
-                # Generera UUID för den nya noden
                 new_node_id = str(uuid_module.uuid4())
 
-                # Bygg properties för den nya noden
                 new_props = orig_props.copy()
-                new_props["name"] = new_name  # Spara namnet i properties
+                new_props["name"] = new_name
+                for key in stale_keys:
+                    new_props.pop(key, None)
 
                 props_json = json.dumps(new_props, ensure_ascii=False)
 
-                # Skapa noden med UUID som ID
                 self.conn.execute("INSERT INTO nodes (id, type, aliases, properties) VALUES (?, ?, '[]', ?)",
                                 [new_node_id, orig_type, props_json])
 
                 LOGGER.info(f"Split: Created node '{new_name}' with ID {new_node_id}")
                 created_nodes.append(new_node_id)
 
-            # 3. Kopiera relationer (Brute force copy)
-            # Eftersom vi inte vet vilken relation som hör till vilket kluster,
-            # kopierar vi ALLA relationer till ALLA nya noder.
-            # Dreamer får städa detta i framtida cykler (relevans-städning).
+            # 3. Kopiera relationer
+            if edge_assignment is not None and source_edge_types is not None:
+                # 3A: Directed assignment — non-source edges per cluster
+                for ci, new_node in enumerate(created_nodes):
+                    edges_for_cluster = edge_assignment.get(ci, [])
+                    for e in edges_for_cluster:
+                        if e.get("direction") == "out":
+                            target = e["target"]
+                            if target == new_node:
+                                continue
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
+                                [new_node, target, e["type"], json.dumps(e.get("properties", {}), ensure_ascii=False)])
+                        else:
+                            source = e["source"]
+                            if source == new_node:
+                                continue
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
+                                [source, new_node, e["type"], json.dumps(e.get("properties", {}), ensure_ascii=False)])
+                    LOGGER.info(f"Split: Cluster {ci} ({created_nodes[ci][:8]}): {len(edges_for_cluster)} directed edges")
 
-            # Utgående
-            out_edges = self.conn.execute("SELECT target, edge_type, properties FROM edges WHERE source = ?", [original_id]).fetchall()
-            for new_node in created_nodes:
-                for target, etype, props in out_edges:
-                    # Undvik self-loops om nya noden råkar vara target
-                    if target == new_node: continue
-                    self.conn.execute("INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
-                                    [new_node, target, etype, props])
+                # 3B: Source edges (MENTIONS etc.) — brute-force to all new nodes
+                out_edges = self.conn.execute(
+                    "SELECT target, edge_type, properties FROM edges WHERE source = ?", [original_id]).fetchall()
+                in_edges = self.conn.execute(
+                    "SELECT source, edge_type, properties FROM edges WHERE target = ?", [original_id]).fetchall()
 
-            # Inkommande
-            in_edges = self.conn.execute("SELECT source, edge_type, properties FROM edges WHERE target = ?", [original_id]).fetchall()
-            for new_node in created_nodes:
-                for source, etype, props in in_edges:
-                    if source == new_node: continue
-                    self.conn.execute("INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
-                                    [source, new_node, etype, props])
+                for new_node in created_nodes:
+                    for target, etype, props in out_edges:
+                        if etype in source_edge_types:
+                            if target == new_node:
+                                continue
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
+                                [new_node, target, etype, props])
+                    for source, etype, props in in_edges:
+                        if etype in source_edge_types:
+                            if source == new_node:
+                                continue
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
+                                [source, new_node, etype, props])
+            else:
+                # Legacy brute-force: copy ALL edges to ALL new nodes
+                out_edges = self.conn.execute(
+                    "SELECT target, edge_type, properties FROM edges WHERE source = ?", [original_id]).fetchall()
+                for new_node in created_nodes:
+                    for target, etype, props in out_edges:
+                        if target == new_node:
+                            continue
+                        self.conn.execute(
+                            "INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
+                            [new_node, target, etype, props])
+
+                in_edges = self.conn.execute(
+                    "SELECT source, edge_type, properties FROM edges WHERE target = ?", [original_id]).fetchall()
+                for new_node in created_nodes:
+                    for source, etype, props in in_edges:
+                        if source == new_node:
+                            continue
+                        self.conn.execute(
+                            "INSERT OR IGNORE INTO edges (source, target, edge_type, properties) VALUES (?, ?, ?, ?)",
+                            [source, new_node, etype, props])
 
             # 4. Radera originalnoden
-            # Detta tar också bort dess kanter via Cascade (om implementerat) eller manuell delete
             self.conn.execute("DELETE FROM edges WHERE source = ? OR target = ?", [original_id, original_id])
             self.conn.execute("DELETE FROM nodes WHERE id = ?", [original_id])
 

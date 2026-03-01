@@ -220,8 +220,6 @@ doc_converter:
       - "confidence": Sätts baserat på "Schema-Fit" (0.0 - 1.0).
         * 0.8-1.0 (Hög): Entiteten uppfyller definitionen tydligt och har unika attribut.
         * <0.3 (Låg/Brus): Entiteten är generisk eller trivial.
-      - "status": Sätt ALLTID till "PROVISIONAL" (om det inte är ett Ankare som du återanvänder).
-
     NAME NORMALIZATION:
       - Always output person names in given-name-first order: "Suzanne Winting", NOT "Winting Suzanne".
       - Some source systems (Outlook/Teams/Adda) store names as "Lastname Firstname". Correct this.
@@ -259,7 +257,7 @@ doc_converter:
 
     HAS_BUSINESS_RELATION (Organization -> Organization):
       - relation_type (*REQUIRED*): MUST be one of [Kund, Leverantör, Partner, Prospekt, Lead]. NEVER omit this.
-      - relation_status: Set to "Aktiv" or "Inaktiv" if inferable.
+      - relation_status: Set to "Aktiv" or "Inaktiv" if inferable.  # noqa: SD — enum values from schema
       - relation_context: Vad framkommer om affärsrelationen i detta dokument? (avtal, förhandling, leverans, etc.)
 
     HAS_ROLE (Person -> Roles):
@@ -278,15 +276,14 @@ doc_converter:
         {{
           "name": "Namn",
           "type": "Nodtyp",
-          "org_type": "Bolag",
-          "status": "PROVISIONAL",
+          "org_type": "Bolag",  # noqa: SD — prompt example
           "confidence": 0.85
         }}
       ],
       "edges": [
-        {{ "source": "PersonNamn", "target": "OrgNamn", "type": "BELONGS_TO", "confidence": 0.9, "job_title": "Projektledare", "job_function": "IT", "relation_context": "Leder leveransgranskning av projekt X" }},
-        {{ "source": "OrgA", "target": "OrgB", "type": "HAS_BUSINESS_RELATION", "confidence": 0.85, "relation_type": "Kund", "relation_status": "Aktiv", "relation_context": "Avtal förlängt med nytt timpris 600 kr/h" }},
-        {{ "source": "PersonNamn", "target": "RollNamn", "type": "HAS_ROLE", "confidence": 0.8, "context": "Lead developer on Project X", "relation_context": "Identifierad som lead developer i statusrapport" }}
+        {{ "source": "PersonNamn", "target": "OrgNamn", "type": "BELONGS_TO", "confidence": 0.9, "job_title": "Projektledare", "job_function": "IT", "relation_context": "Leder leveransgranskning av projekt X" }},  # noqa: SD — prompt example
+        {{ "source": "OrgA", "target": "OrgB", "type": "HAS_BUSINESS_RELATION", "confidence": 0.85, "relation_type": "Kund", "relation_status": "Aktiv", "relation_context": "Avtal förlängt med nytt timpris 600 kr/h" }},  # noqa: SD — prompt example
+        {{ "source": "PersonNamn", "target": "RollNamn", "type": "HAS_ROLE", "confidence": 0.8, "context": "Lead developer on Project X", "relation_context": "Identifierad som lead developer i statusrapport" }}  # noqa: SD — prompt example
       ]
     }}
 
@@ -348,6 +345,24 @@ doc_converter:
 
 # --- Enrichment (Property-berikning, fas 2 i pipeline) ---
 enrichment:
+  triage_prompt: |
+    ## UPPGIFT: TRIAGE
+
+    Bedöm om nya observationer väsentligt ändrar bilden av en entitet.
+
+    ### NUVARANDE BESKRIVNING
+    {context_summary}
+
+    ### NYA OBSERVATIONER (sedan senaste berikning)
+    {new_entries}
+
+    ### FRÅGA
+    Ändrar de nya observationerna bilden av entiteten väsentligt?
+    Svara EXAKT "JA" eller "NEJ".
+
+    - JA: Om ny roll, nytt sammanhang, ny relation, korrigering av fel, eller annan signifikant förändring
+    - NEJ: Om observationerna bekräftar redan känd information eller handlar om triviala/tillfälliga händelser
+
   consolidation_prompt: |
     Du är en taxonomi-expert. Din uppgift är att kategorisera NYA noder under rätt masternode.
     
@@ -368,7 +383,7 @@ enrichment:
     5. VARJE koncept MÅSTE placeras under en masternode - ingen får utelämnas
     
     RETURNERA ENDAST GILTIG JSON. Exempel på korrekt format:
-    {"Händelser": ["Sprint review", "Standup"], "Teknologier": ["Kubernetes"], "Person": ["Anna"], "aliases_detected": [{"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}]}
+    {"Händelser": ["Sprint review", "Standup"], "Teknologier": ["Kubernetes"], "Person": ["Anna"], "aliases_detected": [{"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}]}  # noqa: SD — prompt example
     
     Nycklar MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER. Inkludera INTE noder utan nya koncept.
 
@@ -389,7 +404,7 @@ enrichment:
     KRITERIER:
     - SPLIT: Om kontexten innehåller distinkt olika kluster (t.ex. olika personer med samma namn, eller ett ord som betyder två helt olika saker).
     - RENAME: Om ID:t är svagt (UUID, "Talare 1", "Fil_X") men kontexten innehåller ett tydligt egennamn.
-    - RE-CATEGORIZE: Om kontexten BRYTER mot SCHEMA-REGELN ovan (t.ex. tekniska moduler som felaktigt klassats som "Project").
+    - RE-CATEGORIZE: Om kontexten BRYTER mot SCHEMA-REGELN ovan (t.ex. tekniska moduler som felaktigt klassats som "Project").  # noqa: SD — illustrative example
     - DELETE: Om noden är brus (stoppord, verb, meningslös text), saknar substans, eller bryter mot schema-regeln utan möjlig omkategorisering.
     - KEEP: Om noden är stabil och korrekt enligt schema-regeln.
     
@@ -479,7 +494,7 @@ entity_resolver:
   enrichment_prompt: |
     ## UPPGIFT: BERIKA (Steg 1 av 2)
 
-    Du har fått nyligen ingestade dokument och berörda entiteter/relationer.
+    Du har fått källtext-kontext (originaltext från dokument) och berörda entiteter/relationer.
 
     ### VIKTIGT: BERIKA ALLA ENTITETER DU KAN
     Du är INTE begränsad till att bara berika de listade entiteterna.
@@ -509,6 +524,10 @@ entity_resolver:
        OBS: relation_context på kanter är READ-ONLY. Inkludera ALDRIG relation_context i edge_enrichments.
     3. **LAKE-METADATA** — Uppdatera context_summary, relations_summary, document_keywords
        för varje dokument baserat på den berikade grafkontexten.
+    4. **KVALITETSFLAGGOR** — Flagga noder med strukturella problem. Lägg till quality_flags på node_enrichments:
+       - "possible_split": Nodens kontext innehåller distinkt olika kluster (t.ex. samma namn refererar till två olika personer, eller ett begrepp som blandar ihop två skilda saker).
+       - "wrong_type": Nodens innehåll bryter mot sin typbeskrivning (t.ex. en teknisk modul klassad som Project, eller en roll klassad som Person).
+       Inkludera flag_reason med en kort motivering per flagga. Flagga BARA vid tydliga problem — inte vid osäkerhet.
 
     ### SVARSFORMAT (STRIKT JSON)
 
@@ -520,6 +539,8 @@ entity_resolver:
           "updated_properties": {{"property_name": "value"}},
           "new_context": [{{"text": "...", "origin": "unit_id"}}],
           "new_aliases": ["existing_alias", "new_alias"],
+          "quality_flags": ["possible_split"],
+          "flag_reason": {{"possible_split": "Kort motivering"}},
           "confidence": 0.8,
           "reason": "Kort motivering"
         }}
@@ -589,8 +610,7 @@ dreamer:
     {{
       "decision": "MERGE" eller "SKIP",
       "confidence": 0.0-1.0,
-      "primary_node_id": "UUID för noden som ska behållas (den med mest kontext)",
-      "secondary_node_id": "UUID för noden som ska tas bort",
+      "primary_node": "Namn på noden som ska behållas (den med mest kontext)",
       "reason": "Kort motivering med specifik evidens"
     }}
     ```
@@ -647,7 +667,8 @@ dreamer:
     - **Context_summary:** {context_summary}
     - **Aliases:** {aliases}
 
-    ### RELATIONER
+    ### NUMRERADE RELATIONER
+    Varje relation har ett index [0], [1], [2]... som du MÅSTE referera till i context_indices.
     {edges_text}
 
     ### FLAGGORSAK
@@ -660,6 +681,9 @@ dreamer:
     - Var konservativ: hellre behåll en nod med rik kontext än skapa fragmenterade noder
 
     ### SVARSFORMAT (STRIKT JSON)
+
+    context_indices MÅSTE vara en lista med heltalsindex från NUMRERADE RELATIONER ovan.
+    Varje relation ska tilldelas exakt ETT kluster. Utelämna inte relationer.
 
     ```json
     {{

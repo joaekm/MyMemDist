@@ -126,25 +126,20 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
             
             # --- AUTO-FIX: Inject System Fields & Anchors ---
             # Vi hjälper LLM med fält den inte kan veta eller ofta glömmer
-            for node in extracted_data.get('nodes', []):
-                # 1. System fields
-                if reference_timestamp:
-                    if 'last_seen_at' not in node: node['last_seen_at'] = reference_timestamp
-                    if 'created_at' not in node: node['created_at'] = reference_timestamp
-                    if 'last_synced_at' not in node: node['last_synced_at'] = reference_timestamp
-                
-                if 'status' not in node:
-                    node['status'] = 'PROVISIONAL'
-                if 'confidence' not in node:
-                    node['confidence'] = 0.5
+            # Schema-driven defaults (#94)
+            schema_defaults = validator.get_base_property_defaults(resolve_now=False)
 
-                # Användnings- och underhållsräknare (initialiseras vid skapande)
-                if 'last_retrieved_at' not in node:
-                    node['last_retrieved_at'] = reference_timestamp
-                if 'retrieved_times' not in node:
-                    node['retrieved_times'] = 0
-                if 'last_refined_at' not in node:
-                    node['last_refined_at'] = "never"
+            for node in extracted_data.get('nodes', []):
+                # 1. System fields: apply schema defaults for missing properties
+                for field, default_val in schema_defaults.items():
+                    if field not in node:
+                        if default_val == "$NOW" and reference_timestamp:
+                            node[field] = reference_timestamp
+                        elif default_val == "$NOW":
+                            from datetime import datetime
+                            node[field] = datetime.now().isoformat()
+                        else:
+                            node[field] = default_val
 
                 # 2. Fixa ID (UUID) om det saknas (Krävs av schemat)
                 if 'id' not in node:

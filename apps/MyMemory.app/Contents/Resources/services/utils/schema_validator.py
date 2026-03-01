@@ -130,6 +130,47 @@ class SchemaValidator:
         raw_schema["nodes"] = nodes
         return raw_schema
 
+    def find_node_type_by_property(self, unique_property: str) -> Optional[str]:
+        """Find node type that defines a specific non-base property.
+
+        Use properties unique to one node type as structural identifiers:
+        - 'email' → Person
+        - 'org_type' → Organization
+        - 'project_status' → Project
+        """
+        base_props = set(self.schema.get('base_properties', {}).get('properties', {}).keys())
+        for name, defn in self.schema.get('nodes', {}).items():
+            own_props = set(defn.get('properties', {}).keys()) - base_props
+            if unique_property in own_props:
+                return name
+        return None
+
+    def find_edge_type_by_property(self, unique_property: str) -> Optional[str]:
+        """Find edge type that defines a specific property.
+
+        Use properties unique to one edge type as structural identifiers:
+        - 'job_title' → BELONGS_TO
+        - 'relation_type' → HAS_BUSINESS_RELATION
+        - 'duration_minutes' → ATTENDED
+        """
+        for name, defn in self.schema.get('edges', {}).items():
+            if unique_property in defn.get('properties', {}):
+                return name
+        return None
+
+    def find_edge_type_by_target(self, target_type: str) -> Optional[str]:
+        """Find the single edge type targeting a specific node type.
+
+        Works when only one edge type targets the given type:
+        - 'Roles' target → HAS_ROLE (only edge targeting Roles)
+        """
+        matches = [
+            name for name, defn in self.schema.get('edges', {}).items()
+            if target_type in defn.get('target_type', [])
+            and 'Source' not in defn.get('source_type', [])
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def validate_node(self, node_data: Dict[str, Any]) -> Tuple[bool, str]:
         node_type = node_data.get("type")
         if not node_type: return False, "Missing field: 'type'"
@@ -143,13 +184,6 @@ class SchemaValidator:
         for field, field_def in base_props.items():
             if field_def.get("required", False) and field not in node_data:
                 return False, f"Missing system field: '{field}'"
-
-        # Validera status mot schema-definierade värden
-        status = node_data.get("status")
-        status_def = base_props.get("status", {})
-        allowed_statuses = status_def.get("values", ["PROVISIONAL"])
-        if status not in allowed_statuses:
-            return False, f"Invalid status: '{status}'. Allowed: {allowed_statuses}"
 
         # Check name quality
         node_name = node_data.get('name', '')
@@ -307,3 +341,82 @@ class SchemaValidator:
                         return False, msg
 
         return True, "OK"
+
+    def get_node_types(self) -> set:
+        """All defined node type names from schema."""
+        return set(self.schema.get('nodes', {}).keys())
+
+    def get_edge_types(self) -> set:
+        """All defined edge type names from schema."""
+        return set(self.schema.get('edges', {}).keys())
+
+    def get_profile_names(self) -> set:
+        """All source type profile names from schema."""
+        profiles = self.schema.get('source_type_profiles', {})
+        return {k for k in profiles if k != 'description'}
+
+    def get_document_node_type(self) -> str:
+        """Node type representing source documents (primary_key_strategy=UUID)."""
+        for name, defn in self.schema.get('nodes', {}).items():
+            if defn.get('primary_key_strategy') == 'UUID':
+                return name
+        raise ValueError("No document node type found in schema")
+
+    def get_source_edge_target_types(self) -> set:
+        """Node types that can be targets of document→entity edges."""
+        doc_type = self.get_document_node_type()
+        result = set()
+        for edge_def in self.schema.get('edges', {}).values():
+            if doc_type in edge_def.get('source_type', []):
+                result.update(edge_def.get('target_type', []))
+        return result
+
+    def get_source_type_mappings(self) -> dict:
+        """Path keyword → profile name mappings from processing_policy."""
+        return dict(self.schema.get('processing_policy', {}).get('source_mappings', {}))
+
+    def get_default_source_type(self) -> str:
+        """Default source type profile name from processing_policy."""
+        return self.schema.get('processing_policy', {}).get('default_source_type', '')
+
+    def get_source_edge_types(self) -> set:
+        """Edge types from Source nodes to entities (e.g. MENTIONS).
+
+        Schema-driven: returns edge types where 'Source' is in source_type.
+        Used to filter out document→entity edges when only entity→entity
+        edges are relevant.
+        """
+        return {
+            edge_name for edge_name, edge_def in self.schema.get('edges', {}).items()
+            if 'Source' in edge_def.get('source_type', [])
+        }
+
+    def get_base_property_defaults(self, resolve_now: bool = True) -> Dict[str, Any]:
+        """
+        Generate default values for required base_properties that have a 'default'.
+
+        Args:
+            resolve_now: If True, "$NOW" is resolved to datetime.now().isoformat().
+                         If False, "$NOW" is kept as-is (for callers needing reference_timestamp).
+
+        Returns:
+            Dict mapping property name to resolved default value.
+        """
+        from datetime import datetime
+
+        base_props = self.schema.get("base_properties", {}).get("properties", {})
+        defaults = {}
+
+        for prop_name, prop_def in base_props.items():
+            if not prop_def.get("required", False):
+                continue
+            if "default" not in prop_def:
+                continue
+
+            raw_default = prop_def["default"]
+            if raw_default == "$NOW" and resolve_now:
+                defaults[prop_name] = datetime.now().isoformat()
+            else:
+                defaults[prop_name] = raw_default
+
+        return defaults

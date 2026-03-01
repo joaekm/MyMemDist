@@ -58,6 +58,7 @@ from services.utils.date_service import get_timestamp
 from services.utils.llm_service import LLMService, AdaptiveThrottler
 from services.utils.providers import GeminiProvider
 from services.utils.graph_service import GraphService
+from services.utils.schema_validator import SchemaValidator
 from services.utils.vector_service import vector_scope
 from services.utils.metadata_service import generate_semantic_metadata, get_owner_name
 from services.utils.terminal_status import status as terminal_status, service_status
@@ -151,6 +152,14 @@ for _name in ['httpx', 'httpcore', 'google', 'google_genai', 'anyio', 'watchdog'
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 LOGGER = logging.getLogger('MyMem_Transcriber')
+
+_SCHEMA_VALIDATOR = None
+
+def _get_schema_validator() -> SchemaValidator:
+    global _SCHEMA_VALIDATOR
+    if _SCHEMA_VALIDATOR is None:
+        _SCHEMA_VALIDATOR = SchemaValidator()
+    return _SCHEMA_VALIDATOR
 
 # Process state
 UUID_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$')
@@ -756,111 +765,73 @@ def step5_enrich_context(
     """Hämta rådata från Graf + Vektor, destillera till ContextPackage."""
     llm = _get_llm_service()
 
-    graph_data = {
-        'persons': {},
-        'organizations': {},
-        'projects': {},
-        'shared_events': []
+    graph_data = {}
+
+    # Mappning nodtyp → queries-attribut (koppling transcriber-queries ↔ schema)
+    QUERY_ATTR_MAP = {
+        "Person": "person_queries",  # noqa: SD — koppling till EnrichmentQueries dataclass
+        "Organization": "org_queries",  # noqa: SD
+        "Project": "project_queries",  # noqa: SD
     }
 
-    # Graf-uppslagning
+    # Graf-uppslagning — schema-driven
     if os.path.exists(GRAPH_PATH):
         graph = None
         try:
             graph = GraphService(GRAPH_PATH, read_only=True)
+            validator = _get_schema_validator()
+            schema_nodes = validator.schema.get('nodes', {})
+            schema_edges = validator.schema.get('edges', {})
+            doc_type = validator.get_document_node_type()
 
-            # Personer
-            person_node_ids = {}
-            for name in queries.person_queries[:MAX_ENTITY_QUERIES]:
-                node_id = graph.find_node_by_name("Person", name)
-                if node_id:
+            for node_type, node_def in schema_nodes.items():
+                if node_type == doc_type:
+                    continue
+
+                query_attr = QUERY_ATTR_MAP.get(node_type)
+                if not query_attr or not hasattr(queries, query_attr):
+                    continue
+
+                type_props = set(node_def.get('properties', {}).keys()) - {'name'}
+
+                for name in getattr(queries, query_attr)[:MAX_ENTITY_QUERIES]:
+                    node_id = graph.find_node_by_name(node_type, name)
+                    if not node_id:
+                        continue
                     node = graph.get_node(node_id)
-                    if node:
-                        props = node.get('properties', {})
-                        person_node_ids[name] = node_id
+                    if not node:
+                        continue
 
-                        person_data = {
-                            'node_id': node_id,
-                            'person_type': props.get('person_type', ''),
-                            'context_summary': props.get('context_summary', ''),
-                            'organizations': [],
-                            'roles': [],
-                            'events_attended': []
-                        }
+                    props = node.get('properties', {})
+                    node_data = {
+                        'node_id': node_id,
+                        'context_summary': props.get('context_summary', ''),
+                    }
+                    for prop_name in type_props:
+                        node_data[prop_name] = props.get(prop_name, '')
 
-                        edges = graph.get_edges_from(node_id)
-                        for edge in edges:
-                            edge_type = edge.get('type')
-                            target_id = edge.get('target')
-                            target = graph.get_node(target_id)
+                    # Hämta edges — schema-driven
+                    edges = graph.get_edges_from(node_id)
+                    for edge in edges:
+                        edge_type = edge.get('type')
+                        edge_def = schema_edges.get(edge_type, {})
+                        target = graph.get_node(edge.get('target'))
+                        if not target:
+                            continue
 
-                            if not target:
-                                continue
+                        target_name = target.get('properties', {}).get('name', '')
+                        edge_props = edge.get('properties', {})
 
-                            target_props = target.get('properties', {})
-                            target_name = target_props.get('name', '')
+                        edge_info = {'name': target_name, 'edge_type': edge_type}
+                        for ep_name in edge_def.get('properties', {}):
+                            if ep_name != 'confidence':
+                                val = edge_props.get(ep_name, '')
+                                if val:
+                                    edge_info[ep_name] = val
 
-                            if edge_type == 'BELONGS_TO':
-                                org_info = {
-                                    'name': target_name,
-                                    'job_title': edge.get('properties', {}).get('job_title', ''),
-                                    'job_function': edge.get('properties', {}).get('job_function', '')
-                                }
-                                person_data['organizations'].append(org_info)
-                            elif edge_type == 'HAS_ROLE':
-                                person_data['roles'].append(target_name)
-                            elif edge_type == 'ATTENDED':
-                                event_info = {
-                                    'event_id': target_id,
-                                    'name': target_name,
-                                    'event_type': target_props.get('event_type', ''),
-                                    'context_summary': target_props.get('context_summary', '')
-                                }
-                                person_data['events_attended'].append(event_info)
+                        node_data.setdefault('edges', []).append(edge_info)
 
-                        graph_data['persons'][name] = person_data
-
-            # Organisationer
-            for org_name in queries.org_queries[:MAX_ENTITY_QUERIES]:
-                node_id = graph.find_node_by_name("Organization", org_name)
-                if node_id:
-                    node = graph.get_node(node_id)
-                    if node:
-                        props = node.get('properties', {})
-                        org_data = {
-                            'node_id': node_id,
-                            'org_type': props.get('org_type', ''),
-                            'context_summary': props.get('context_summary', ''),
-                            'business_relations': []
-                        }
-
-                        edges = graph.get_edges_from(node_id)
-                        for edge in edges:
-                            if edge.get('type') == 'HAS_BUSINESS_RELATION':
-                                target = graph.get_node(edge.get('target'))
-                                if target:
-                                    rel_info = {
-                                        'target': target.get('properties', {}).get('name', ''),
-                                        'relation_type': edge.get('properties', {}).get('relation_type', ''),
-                                        'relation_status': edge.get('properties', {}).get('relation_status', '')
-                                    }
-                                    org_data['business_relations'].append(rel_info)
-
-                        graph_data['organizations'][org_name] = org_data
-
-            # Projekt
-            for proj_name in queries.project_queries[:MAX_ENTITY_QUERIES]:
-                node_id = graph.find_node_by_name("Project", proj_name)
-                if node_id:
-                    node = graph.get_node(node_id)
-                    if node:
-                        props = node.get('properties', {})
-                        graph_data['projects'][proj_name] = {
-                            'node_id': node_id,
-                            'project_status': props.get('project_status', ''),
-                            'project_type': props.get('project_type', ''),
-                            'context_summary': props.get('context_summary', '')
-                        }
+                    graph_data.setdefault(node_type, {})[name] = node_data
 
         except Exception as e:  # noqa: FALLBACK_DOCUMENTED - graf-berikning är optional
             LOGGER.warning(f"Graf-berikning misslyckades: {e}")
@@ -890,26 +861,22 @@ def step5_enrich_context(
     except (OSError, RuntimeError, ValueError) as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional
         LOGGER.warning(f"Vektor-sökning misslyckades: {e}")
 
-    # Bygg rik rådata
-    persons_summary = []
-    for name, data in graph_data['persons'].items():
-        orgs = [f"{o['name']} ({o['job_title']})" if o['job_title'] else o['name']
-                for o in data.get('organizations', [])]
-        persons_summary.append({
-            'name': name,
-            'organizations': orgs,
-            'roles': data.get('roles', []),
-            'person_type': data.get('person_type', '')
-        })
-
-    orgs_summary = []
-    for name, data in graph_data['organizations'].items():
-        rels = [f"{r['relation_type']} till {r['target']}" for r in data.get('business_relations', [])]
-        orgs_summary.append({
-            'name': name,
-            'org_type': data.get('org_type', ''),
-            'business_relations': rels
-        })
+    # Bygg rik rådata — schema-driven sammanfattning per nodtyp
+    graph_sections = []
+    for node_type, nodes in graph_data.items():
+        summaries = []
+        for name, data in nodes.items():
+            entry = {'name': name}
+            entry['context_summary'] = data.get('context_summary', '')
+            for k, v in data.items():
+                if k not in ('node_id', 'context_summary', 'edges') and v:
+                    entry[k] = v
+            if data.get('edges'):
+                entry['edges'] = data['edges']
+            summaries.append(entry)
+        section = f"\n{node_type.upper()} (från graf):\n"
+        section += json.dumps(summaries, indent=2, ensure_ascii=False) if summaries else 'Inga'
+        graph_sections.append(section)
 
     raw_data = f"""
 FILMETADATA:
@@ -919,15 +886,7 @@ FILMETADATA:
 KALENDER:
 - Titel: {calendar_match.title if calendar_match else 'Ingen kalendermatch'}
 - Deltagare: {', '.join(calendar_match.participants) if calendar_match else 'Okända'}
-
-PERSONER (från graf):
-{json.dumps(persons_summary, indent=2, ensure_ascii=False) if persons_summary else 'Inga'}
-
-ORGANISATIONER (från graf):
-{json.dumps(orgs_summary, indent=2, ensure_ascii=False) if orgs_summary else 'Inga'}
-
-PROJEKT (från graf):
-{json.dumps(list(graph_data['projects'].keys()), ensure_ascii=False) if graph_data['projects'] else 'Inga'}
+{''.join(graph_sections) if graph_sections else chr(10) + 'GRAF: Inga entiteter hittade'}
 
 VEKTOR-TRÄFFAR:
 {json.dumps([{'query': v['query'], 'source': v['metadata'].get('source_type', '')} for v in vector_results[:5]], indent=2, ensure_ascii=False) if vector_results else 'Inga träffar'}

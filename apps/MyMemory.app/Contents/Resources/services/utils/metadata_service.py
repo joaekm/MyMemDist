@@ -26,7 +26,7 @@ LOGGER = logging.getLogger("MetadataService")
 
 # Lazy-loaded singletons
 _LLM_SERVICE = None
-_SCHEMA = None
+_SCHEMA_VALIDATOR = None
 _CONFIG = None
 _PROMPTS = None
 _USER_PROFILE = None
@@ -40,13 +40,12 @@ def _get_llm_service() -> LLMService:
     return _LLM_SERVICE
 
 
-def _get_schema() -> dict:
-    """Get or load schema from graph_schema_template.json."""
-    global _SCHEMA
-    if _SCHEMA is None:
-        validator = SchemaValidator()
-        _SCHEMA = validator.schema
-    return _SCHEMA
+def _get_schema_validator() -> SchemaValidator:
+    """Get or load cached SchemaValidator instance."""
+    global _SCHEMA_VALIDATOR
+    if _SCHEMA_VALIDATOR is None:
+        _SCHEMA_VALIDATOR = SchemaValidator()
+    return _SCHEMA_VALIDATOR
 
 
 def _load_config() -> tuple:
@@ -144,10 +143,11 @@ def _get_relevant_edge_types_for_node(schema: dict, node_type: str) -> List[dict
             ...
         ]
     """
+    source_edge_types = _get_schema_validator().get_source_edge_types()
     relevant = []
     for edge_type, edge_def in schema.get('edges', {}).items():
-        # Skippa MENTIONS - det är dokument → entitet, inte entitet → entitet
-        if edge_type == "MENTIONS":
+        # Skippa dokument→entitet-kanter (schema-driven)
+        if edge_type in source_edge_types:
             continue
 
         source_types = edge_def.get('source_type', [])
@@ -201,7 +201,7 @@ def _enrich_entities_from_graph(
         LOGGER.debug(f"Graph not found at {graph_path}, skipping enrichment")
         return {}
 
-    schema = _get_schema()
+    schema = _get_schema_validator().schema
     enriched = {}
     owns_graph = graph_service is None
 
@@ -508,6 +508,6 @@ def generate_semantic_metadata(
     return {
         "context_summary": data.get("context_summary", ""),
         "relations_summary": data.get("relations_summary", ""),
-        "document_keywords": data.get("document_keywords", []) or data.get("keywords", []),
+        "document_keywords": data.get("document_keywords", []),
         "ai_model": response.model
     }
