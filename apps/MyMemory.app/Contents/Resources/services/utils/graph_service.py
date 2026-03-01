@@ -606,6 +606,55 @@ class GraphService:
             })
         return edges
 
+    def get_node_relations_for_vector(self, node_id: str) -> list[dict]:
+        """
+        Hämta alla relationer för en nod, formaterade för vektorindexering.
+
+        Filtrerar bort Source-edge-typer (MENTIONS etc.) och resolver
+        den andra nodens ID till namn.
+
+        Returns:
+            [{'edge_type': str, 'target_name': str, 'direction': 'out'|'in'}]
+        """
+        try:
+            from services.utils.schema_validator import SchemaValidator
+            source_edge_types = SchemaValidator().get_source_edge_types()
+        except ImportError:
+            LOGGER.debug("SchemaValidator not available — skipping source edge filtering")
+            source_edge_types = set()
+
+        relations = []
+
+        for edge in self.get_edges_from(node_id):
+            if edge['type'] in source_edge_types:
+                continue
+            other = self.get_node(edge['target'])
+            if not other:
+                continue
+            name = other.get('properties', {}).get('name', other.get('id', ''))
+            if name:
+                relations.append({
+                    'edge_type': edge['type'],
+                    'target_name': name,
+                    'direction': 'out',
+                })
+
+        for edge in self.get_edges_to(node_id):
+            if edge['type'] in source_edge_types:
+                continue
+            other = self.get_node(edge['source'])
+            if not other:
+                continue
+            name = other.get('properties', {}).get('name', other.get('id', ''))
+            if name:
+                relations.append({
+                    'edge_type': edge['type'],
+                    'target_name': name,
+                    'direction': 'in',
+                })
+
+        return relations
+
     def upsert_edge(self, source: str, target: str, edge_type: str, properties: dict = None):
         """
         Skapa eller uppdatera en kant.
@@ -739,6 +788,134 @@ class GraphService:
             "nodes": nodes_dict,
             "edges": edges_dict
         }
+
+    def get_quality_stats(self) -> dict:
+        """Returnerar kvalitetsstatistik om grafen.
+
+        Returns:
+            dict med nycklar:
+            - context_summary_coverage: {type: {total: int, with_summary: int, pct: float}}
+            - confidence_distribution: {type: {low: int, medium: int, high: int, avg: float}}
+              low=<0.5, medium=0.5-0.8, high=>0.8
+            - orphan_count: int (noder utan kanter, exkl. Source-noder)
+            - last_dreamer_run: str (ISO timestamp eller "never")
+        """
+        with self._lock:
+            # Context summary coverage per type (excl Source)
+            coverage_rows = self.conn.execute("""
+                SELECT type,
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN json_extract_string(properties, '$.context_summary') IS NOT NULL
+                               AND json_extract_string(properties, '$.context_summary') != ''
+                          THEN 1 END) as with_summary
+                FROM nodes
+                WHERE type != 'Source'
+                GROUP BY type
+            """).fetchall()
+
+            # Confidence distribution per type (excl Source)
+            conf_rows = self.conn.execute("""
+                SELECT type,
+                    COUNT(CASE WHEN CAST(json_extract_string(properties, '$.confidence') AS DOUBLE) < 0.5 THEN 1 END) as low,
+                    COUNT(CASE WHEN CAST(json_extract_string(properties, '$.confidence') AS DOUBLE) >= 0.5
+                               AND CAST(json_extract_string(properties, '$.confidence') AS DOUBLE) <= 0.8 THEN 1 END) as medium,
+                    COUNT(CASE WHEN CAST(json_extract_string(properties, '$.confidence') AS DOUBLE) > 0.8 THEN 1 END) as high,
+                    AVG(CAST(json_extract_string(properties, '$.confidence') AS DOUBLE)) as avg
+                FROM nodes
+                WHERE type != 'Source'
+                GROUP BY type
+            """).fetchall()
+
+            # Orphan count (nodes without edges, excl Source)
+            orphan_row = self.conn.execute("""
+                SELECT COUNT(*) FROM nodes n
+                WHERE n.type != 'Source'
+                  AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source = n.id OR e.target = n.id)
+            """).fetchone()
+
+            # Last dreamer run
+            dreamer_row = self.conn.execute("""
+                SELECT MAX(json_extract_string(properties, '$.last_refined_at'))
+                FROM nodes
+                WHERE json_extract_string(properties, '$.last_refined_at') IS NOT NULL
+                  AND json_extract_string(properties, '$.last_refined_at') != 'never'
+            """).fetchone()
+
+        context_summary_coverage = {}
+        for row in coverage_rows:
+            total = row[1]
+            with_summary = row[2]
+            pct = round((with_summary / total) * 100, 1) if total > 0 else 0.0
+            context_summary_coverage[row[0]] = {
+                "total": total,
+                "with_summary": with_summary,
+                "pct": pct
+            }
+
+        confidence_distribution = {}
+        for row in conf_rows:
+            confidence_distribution[row[0]] = {
+                "low": row[1],
+                "medium": row[2],
+                "high": row[3],
+                "avg": round(row[4], 2) if row[4] is not None else 0.0
+            }
+
+        orphan_count = orphan_row[0] if orphan_row else 0
+        last_dreamer = dreamer_row[0] if dreamer_row and dreamer_row[0] else "never"
+
+        return {
+            "context_summary_coverage": context_summary_coverage,
+            "confidence_distribution": confidence_distribution,
+            "orphan_count": orphan_count,
+            "last_dreamer_run": last_dreamer
+        }
+
+    def get_system_health(self) -> dict:
+        """Returnerar systemhälsa-indikatorer.
+
+        Returns:
+            dict med nycklar:
+            - graph_accessible: bool
+            - total_nodes: int
+            - total_edges: int
+            - last_dreamer_run: str (ISO timestamp eller "never")
+            - nodes_never_refined: int
+        """
+        try:
+            with self._lock:
+                node_count = self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()
+                edge_count = self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()
+
+                never_refined_row = self.conn.execute("""
+                    SELECT COUNT(*) FROM nodes
+                    WHERE type != 'Source'
+                    AND json_extract_string(properties, '$.last_refined_at') = 'never'
+                """).fetchone()
+
+                dreamer_row = self.conn.execute("""
+                    SELECT MAX(json_extract_string(properties, '$.last_refined_at'))
+                    FROM nodes
+                    WHERE json_extract_string(properties, '$.last_refined_at') IS NOT NULL
+                      AND json_extract_string(properties, '$.last_refined_at') != 'never'
+                """).fetchone()
+
+            return {
+                "graph_accessible": True,
+                "total_nodes": node_count[0] if node_count else 0,
+                "total_edges": edge_count[0] if edge_count else 0,
+                "last_dreamer_run": dreamer_row[0] if dreamer_row and dreamer_row[0] else "never",
+                "nodes_never_refined": never_refined_row[0] if never_refined_row else 0
+            }
+        except duckdb.Error as e:
+            LOGGER.warning(f"get_system_health: graph inaccessible — {e}")
+            return {
+                "graph_accessible": False,
+                "total_nodes": 0,
+                "total_edges": 0,
+                "last_dreamer_run": "never",
+                "nodes_never_refined": 0
+            }
 
     # --- SEARCH HELPERS ---
 

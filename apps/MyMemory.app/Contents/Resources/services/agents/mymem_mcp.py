@@ -396,33 +396,35 @@ _lake_cache = _LakeMetadataCache()
 @mcp.tool()
 def search_graph_nodes(query: str, node_type: str = None) -> str:
     """
-    Exakt sökning i grafstrukturen – hittar specifika entiteter via namn, alias eller ID.
+    Sök specifika entiteter i grafen via namn, alias, e-post eller ID.
+
+    SÖKMETOD: ILIKE-matchning (%query%) — söker i id, aliases och hela
+    properties-objektet (name, email, context_summary, etc.). Hittar
+    delmatchningar, t.ex. "Johan" matchar "Johan Ekman".
 
     ANVÄND FÖR:
     - Hitta en specifik person: query="Johan"
     - Kolla om en organisation finns: query="Acme AB", node_type="Organization"
-    - Söka på e-post eller andra properties: query="johan@example.com"
+    - Söka på e-post: query="johan@example.com"
+    - Söka i identitetsbeskrivning: query="projektledare"
 
-    Söker i: id, aliases, och hela properties (name, email, context_summary, etc.)
+    FILTRERA PÅ TYP (node_type):
+    Person, Organization, Group, Project, Event, Roles, Source
 
     SKILLNAD MOT query_vector_memory:
-    - search_graph_nodes = "Finns noden X?" (exakt matchning)
+    - search_graph_nodes = "Finns noden X?" (textsökning i namn/properties)
     - query_vector_memory = "Vem jobbar med AI-projekt?" (semantisk sökning)
 
-    TIPS: Börja ofta här för att hitta rätt node_id,
+    TIPS: Börja här för att hitta rätt node_id,
     använd sedan get_entity_summary eller get_neighbor_network för detaljer.
     """
     _t0 = time.monotonic()
     try:
         # Validera node_type mot schemat om angivet
         if node_type:
-            schema_path = os.path.expanduser(CONFIG.get('paths', {}).get('graph_schema', ''))
-            if schema_path and os.path.exists(schema_path):
-                with open(schema_path, 'r') as sf:
-                    schema = json.load(sf)
-                valid_types = [nt['type'] for nt in schema.get('node_types', [])]
-                if node_type not in valid_types:
-                    return f"Ogiltig node_type: '{node_type}'. Giltiga: {', '.join(sorted(valid_types))}"
+            valid_types = _get_schema_validator().get_node_types()
+            if node_type not in valid_types:
+                return f"Ogiltig node_type: '{node_type}'. Giltiga: {', '.join(sorted(valid_types))}"
 
         with resource_lock("graph", exclusive=False, timeout=10.0):
             graph = GraphService(_get_graph_path(), read_only=True)
@@ -451,18 +453,37 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
             aliases = json.loads(aliases_raw) if aliases_raw else []
 
             name = props.get('name', node_id)
+            confidence = props.get('confidence', 'N/A')
             ctx_summary = props.get('context_summary', '')
             ctx_str = f"Identitet: {ctx_summary}" if ctx_summary else "Identitet: SAKNAS"
             alias_str = f"Aliases: {len(aliases)}" if aliases else ""
 
             output.append(f"• [{n_type}] {name}")
             output.append(f"  ID: {node_id}")
+            output.append(f"  Confidence: {confidence}")
             if alias_str: output.append(f"  {alias_str}")
             output.append(f"  {ctx_str}")
 
         return "\n".join(output)
     except TimeoutError:
-        return "Grafsökning misslyckades: Databasen är upptagen (ingestion pågår). Försök igen om en stund."
+        # Vektor-fallback: grafens ILIKE kan approximeras via semantisk sökning
+        fallback_msg = "Grafen är upptagen (ingestion/dreamer pågår).\nFörsöker vektor-sökning som fallback..."
+        try:
+            with vector_scope(exclusive=False, timeout=10.0) as vs:
+                results = vs.search(query_text=query, limit=GRAPH_SEARCH_LIMIT)
+            if results:
+                lines = [f"=== VEKTOR-FALLBACK ({len(results)} träffar, graf upptagen) ==="]
+                for item in results:
+                    meta = item['metadata']
+                    content = item['document'].replace('\n', ' ')[:100]
+                    lines.append(f"• {meta.get('filename', item['id'])}: {content}...")
+                fallback_msg += "\n" + "\n".join(lines)
+            else:
+                fallback_msg += "\nInga vektor-träffar heller."
+            fallback_msg += "\n\nGraf-verktyg: Försök igen om 30 sekunder."
+        except Exception:
+            fallback_msg += "\nVektor-fallback misslyckades också. Försök igen om 30 sekunder."
+        return fallback_msg
     except Exception as e:
         return f"Grafsökning misslyckades: {e}"
     finally:
@@ -471,31 +492,49 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
 # --- TOOL 2: VECTOR (Semantics) ---
 
 @mcp.tool()
-def query_vector_memory(query_text: str, n_results: int = 5) -> str:
+def query_vector_memory(query_text: str, n_results: int = 5, node_type: str = None) -> str:
     """
-    Semantisk sökning i kunskapsgrafen – hittar entiteter baserat på MENING, inte bara nyckelord.
+    Semantisk sökning – hittar dokument OCH graf-entiteter baserat på MENING.
 
-    Varje entitet har en "context_summary" som beskriver:
-    - Vem/vad entiteten ÄR (kompakt identitet)
-    - Relationer och kontext via relation_context på kanter
+    Söker bland:
+    - Dokument (mail, Slack, transkript, etc.) — matchas via innehåll
+    - Graf-noder (Person, Organization, etc.) — matchas via context_summary
+      och relationsdata (t.ex. "vem jobbar på Digitalist" hittar personer
+      via deras BELONGS_TO-relationer inbakade i vektorn)
 
-    EXEMPEL PÅ CONTEXT_SUMMARY:
-    - "IT-konsultbolag specialiserat på digital transformation"
-    - "Projektledare på Digitalist, ansvarig för AI-initiativ"
-    - "Internt projekt för kunskapshantering"
+    RESULTATTYPER (skilj på source i metadata):
+    - source="graph_node" → En entitet i grafen
+    - Annars → Ett dokument i Lake
 
     SÖK PÅ KONCEPT, INTE NAMN:
     ✅ "vem arbetar med upphandlingar"
     ✅ "projekt med faktureringsproblem"
     ✅ "personer som haft kundmöten"
+    ✅ "vem jobbar på Digitalist" (hittar via relationsdata)
     ❌ "Johan" (använd search_graph_nodes för exakta namn)
 
-    Returnerar: Entiteter rankade efter semantisk likhet med din fråga.
+    FILTRERA PÅ NODTYP (node_type):
+    Person, Organization, Group, Project, Event, Roles
+    Filtrerar till enbart graf-noder av angiven typ.
+
+    SKILLNAD MOT search_graph_nodes:
+    - search_graph_nodes = "Finns noden X?" (textsökning)
+    - query_vector_memory = "Vem/vad matchar konceptet Y?" (semantisk)
     """
     _t0 = time.monotonic()
     try:
+        # Bygg where-filter
+        where_filter = None
+        if node_type:
+            sv = _get_schema_validator()
+            doc_type = sv.get_document_node_type()
+            valid_types = sv.get_node_types() - {doc_type}
+            if node_type not in valid_types:
+                return f"Ogiltig node_type: '{node_type}'. Giltiga: {', '.join(sorted(valid_types))}"
+            where_filter = {"$and": [{"type": node_type}, {"source": "graph_node"}]}
+
         with vector_scope(exclusive=False, timeout=10.0) as vs:
-            results = vs.search(query_text=query_text, limit=n_results)
+            results = vs.search(query_text=query_text, limit=n_results, where=where_filter)
             model_name = vs.model_name
 
         if not results:
@@ -541,19 +580,23 @@ def search_by_date_range(
     """
     Tidssökning – hitta dokument och händelser från en specifik period.
 
-    TRE DATUMFÄLT:
-    - "content": När händelsen faktiskt inträffade (default)
-    - "ingestion": När filen lades till i systemet
-    - "updated": Senaste semantiska uppdatering
+    3-TIMESTAMP-SYSTEMET:
+    - "content" (default): När innehållet faktiskt hände (möte, mail skickades)
+    - "ingestion": När filen lades till i systemet (indexeringstidpunkt)
+    - "updated": Senaste förädling av Enrichment/Dreamer
+
+    DOKUMENTTYPER (source_type i resultat):
+    Document, Slack Log, Email Thread, Calendar Event, Transcript
 
     EXEMPEL:
     - Vad hände förra veckan? → parse_relative_date först, sedan denna
     - Alla dokument från Q4 2024 → start="2024-10-01", end="2024-12-31"
+    - Nyligen indexerade filer → date_field="ingestion"
 
     KOMBINERA MED ANDRA VERKTYG:
     1. search_by_date_range → Hitta dokument från perioden
     2. read_document_content → Läs intressanta dokument
-    3. query_vector_memory → Hitta relaterade entiteter
+    3. get_source_connections(doc_id=...) → Vilka entiteter nämns i dokumentet
 
     Args:
         start_date: Startdatum (YYYY-MM-DD)
@@ -660,20 +703,23 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
     Sök i dokumentens YAML-metadata – hitta filer baserat på taggning.
 
     SÖKER I FRONTMATTER:
-    - source_type: Dokumenttyp — "Slack Log", "Email Thread", "Calendar Event", "Transcript", "Document"
+    - source_type: "Document", "Slack Log", "Email Thread", "Calendar Event", "Transcript"
     - document_keywords: AI-extraherade nyckelord (lista)
     - owner: Dokumentets ägare
     - context_summary: AI-genererad sammanfattning
     - relations_summary: AI-genererad sammanfattning av relationer
-    - original_filename: Originalfilnamn (t.ex. "Slack_sälj_sales_2026-01-13_uuid.txt")
+    - original_filename: Originalfilnamn
 
     EXEMPEL:
     - Alla Slack-loggar: keyword="Slack Log", field="source_type"
     - Alla mail: keyword="Email Thread", field="source_type"
+    - Alla transkript: keyword="Transcript", field="source_type"
     - Dokument om upphandling: keyword="upphandling", field="document_keywords"
     - Fritextsökning i alla fält: keyword="Besqab" (utan field)
 
-    KOMBINERA MED read_document_content för att läsa matchande filer.
+    KOMBINERA MED:
+    - read_document_content(doc_id) för att läsa matchande filer
+    - get_source_connections(doc_id=...) för att se vilka entiteter som nämns
     """
     _t0 = time.monotonic()
     metadata_max_results = SEARCH_CONFIG.get('lake_metadata_max_results', 10)
@@ -769,19 +815,23 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
     Kartlägg relationerna kring en entitet – vem/vad är den kopplad till?
 
     RETURNERAR:
-    - Utgående relationer: "Person → ARBETAR_PÅ → Organisation"
-    - Inkommande relationer: "Projekt → HAR_DELTAGARE → Person"
-    - Relationstyper och riktning
+    - Utgående relationer med confidence och relation_context
+    - Inkommande relationer med confidence och relation_context
+    - relation_context: Kronologiska händelser per relation (vad som sagts/hänt)
+
+    RELATIONSTYPER:
+    MENTIONS (Source→entitet), ATTENDED (Person→Event),
+    BELONGS_TO (Person/Group→Organization/Group),
+    HAS_BUSINESS_RELATION (Organization→Organization),
+    WORKS_ON (Person→Project), HAS_ROLE (Person→Roles)
+
+    TIDSFILTRERING (start_date/end_date):
+    Filtrerar relation_context-händelser till angiven period.
 
     ANVÄNDNINGSFLÖDE:
     1. search_graph_nodes("Johan") → node_id
     2. get_neighbor_network(node_id) → Se alla kopplingar
     3. get_entity_summary(granne_id) → Djupdyk i intressant koppling
-
-    BRA FÖR:
-    - "Vilka projekt är personen inblandad i?"
-    - "Vilka personer jobbar med projektet?"
-    - "Hur hänger dessa entiteter ihop?"
     """
     _t0 = time.monotonic()
     try:
@@ -824,7 +874,9 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
             output.append("\n--> UTGÅENDE:")
             for e in out_edges:
                 target_name = neighbor_map.get(e['target'], e['target'])
-                output.append(f"   [{e['type']}] -> {target_name}")
+                edge_conf = e.get("properties", {}).get("confidence", "")
+                conf_str = f" (conf: {edge_conf})" if edge_conf else ""
+                output.append(f"   [{e['type']}] -> {target_name}{conf_str}")
                 rc = e.get("properties", {}).get("relation_context", [])
                 rc_lines = _format_relation_context(rc, start_date, end_date)
                 output.extend(rc_lines)
@@ -833,7 +885,9 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
             output.append("\n<-- INKOMMANDE:")
             for e in in_edges:
                 source_name = neighbor_map.get(e['source'], e['source'])
-                output.append(f"   {source_name} -> [{e['type']}]")
+                edge_conf = e.get("properties", {}).get("confidence", "")
+                conf_str = f" (conf: {edge_conf})" if edge_conf else ""
+                output.append(f"   {source_name} -> [{e['type']}]{conf_str}")
                 rc = e.get("properties", {}).get("relation_context", [])
                 rc_lines = _format_relation_context(rc, start_date, end_date)
                 output.extend(rc_lines)
@@ -844,7 +898,7 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
         return "\n".join(output)
 
     except TimeoutError:
-        return "Nätverksutforskning misslyckades: Databasen är upptagen. Försök igen om en stund."
+        return "Nätverksutforskning misslyckades: Grafen är upptagen (ingestion/dreamer pågår). Försök igen om 30 sekunder."
     except Exception as e:
         return f"Nätverksutforskning misslyckades: {e}"
     finally:
@@ -859,11 +913,15 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
     Djupdyk i EN entitet – hämtar allt systemet vet om den.
 
     RETURNERAR:
-    - context_summary: Kompakt identitetsbeskrivning
-    - relation_context: Kronologiska händelser per relation
-    - Relationer: Vilka andra entiteter den är kopplad till
-    - Metadata: Typ, alias, properties
-    - Konfidens: Hur säker systemet är på informationen
+    - context_summary: AI-genererad identitetsbeskrivning (vem/vad ÄR detta)
+    - Confidence: Systemets säkerhet (0.0-1.0, >0.8 = hög, <0.5 = låg)
+    - relation_context: Kronologiska händelser per relation (vad som hänt)
+    - Relationer: Vilka andra entiteter den är kopplad till (exkl. MENTIONS)
+    - Metadata: Typ, alias, popularitet
+
+    TIDSFILTRERING (start_date/end_date):
+    Filtrerar relation_context-händelser till angiven period.
+    Format: YYYY-MM-DD
 
     ANVÄNDNING:
     1. Hitta entitet med search_graph_nodes: "Johan" → node_id="abc123"
@@ -944,7 +1002,7 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
         return "\n".join(output)
 
     except TimeoutError:
-        return "Summering misslyckades: Databasen är upptagen. Försök igen om en stund."
+        return "Summering misslyckades: Grafen är upptagen (ingestion/dreamer pågår). Försök igen om 30 sekunder."
     except Exception as e:
         return f"Summering misslyckades: {e}"
     finally:
@@ -956,14 +1014,21 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
 @mcp.tool()
 def get_graph_statistics() -> str:
     """
-    Hämtar övergripande statistik om kunskapsgrafen.
-    Visar antal noder och kanter per typ.
+    Hämtar övergripande statistik och datakvalitet för kunskapsgrafen.
+
+    RETURNERAR:
+    - Antal noder och kanter per typ
+    - Datakvalitet: context_summary-täckning per nodtyp
+    - Confidence-fördelning per nodtyp (låg/medel/hög + genomsnitt)
+    - Antal orphan-noder (utan kopplingar)
+    - Senaste Dreamer-körning
     """
     _t0 = time.monotonic()
     try:
         with resource_lock("graph", exclusive=False, timeout=10.0):
             graph = GraphService(_get_graph_path(), read_only=True)
             stats = graph.get_stats()
+            quality = graph.get_quality_stats()
             graph.close()
 
         output = ["=== GRAF STATISTIK ==="]
@@ -978,14 +1043,145 @@ def get_graph_statistics() -> str:
         for k, v in stats.get('edges', {}).items():
             output.append(f"  {k}: {v}")
 
+        # Datakvalitet
+        output.append("\n--- Datakvalitet ---")
+        output.append("Context Summary:")
+        for ntype, cov in quality.get('context_summary_coverage', {}).items():
+            output.append(f"  {ntype}: {cov['with_summary']}/{cov['total']} ({cov['pct']:.0f}%)")
+
+        output.append("\nConfidence:")
+        for ntype, dist in quality.get('confidence_distribution', {}).items():
+            output.append(f"  {ntype}: avg {dist['avg']:.2f} ({dist['low']} låg, {dist['medium']} medel, {dist['high']} hög)")
+
+        output.append(f"\nOrphaner: {quality.get('orphan_count', 'N/A')} noder utan kopplingar")
+        output.append(f"Senaste Dreamer-körning: {quality.get('last_dreamer_run', 'N/A')}")
+
         return "\n".join(output)
 
     except TimeoutError:
-        return "Kunde inte hämta statistik: Databasen är upptagen. Försök igen om en stund."
+        return "Kunde inte hämta statistik: Databasen är upptagen (ingestion/dreamer pågår). Försök igen om 30 sekunder."
     except Exception as e:
         return f"Kunde inte hämta statistik: {e}"
     finally:
         _log_tool_time("get_graph_statistics", _t0)
+
+
+# --- TOOL 7b: SYSTEM HEALTH ---
+
+@mcp.tool()
+def get_system_health() -> str:
+    """
+    Visa systemets hälsa och status.
+
+    RETURNERAR:
+    - Datatillgänglighet (graf, vektor, Lake)
+    - Antal noder, kanter, dokument, vektorer
+    - Senaste Dreamer-körning
+    - Andel noder som aldrig förädlats
+
+    Användbart för felsökning och överblick.
+    """
+    _t0 = time.monotonic()
+    output = ["=== SYSTEMHÄLSA ==="]
+
+    # Graf
+    try:
+        with resource_lock("graph", exclusive=False, timeout=10.0):
+            graph = GraphService(_get_graph_path(), read_only=True)
+            health = graph.get_system_health()
+            graph.close()
+        output.append(f"\nGraf: Tillgänglig")
+        output.append(f"  Noder: {health.get('total_nodes', '?')}")
+        output.append(f"  Kanter: {health.get('total_edges', '?')}")
+        output.append(f"  Senaste Dreamer: {health.get('last_dreamer_run', 'N/A')}")
+        output.append(f"  Aldrig förädlade: {health.get('nodes_never_refined', '?')} noder")
+    except TimeoutError:
+        output.append(f"\nGraf: Upptagen (ingestion/dreamer pågår)")
+    except Exception as e:
+        output.append(f"\nGraf: FEL ({e})")
+
+    # Lake
+    try:
+        all_docs = _lake_cache.get_all()
+        output.append(f"\nLake: Tillgänglig")
+        output.append(f"  Dokument: {len(all_docs)}")
+    except Exception as e:
+        output.append(f"\nLake: FEL ({e})")
+
+    # Vektor
+    try:
+        with vector_scope(exclusive=False, timeout=10.0) as vs:
+            count = vs.count()
+        output.append(f"\nVektor: Tillgänglig")
+        output.append(f"  Vektorer: {count}")
+    except TimeoutError:
+        output.append(f"\nVektor: Upptagen")
+    except Exception as e:
+        output.append(f"\nVektor: FEL ({e})")
+
+    output.append(f"\nAktivt index: {_current_paths['label']}")
+
+    return "\n".join(output)
+
+
+# --- TOOL 7c: DATA MODEL ---
+
+@mcp.tool()
+def get_data_model() -> str:
+    """
+    Visa systemets datamodell — nodtyper, relationer och källprofiler.
+
+    Användbar för att förstå:
+    - Vilka typer av entiteter som finns (Person, Organization, etc.)
+    - Hur de relaterar till varandra (BELONGS_TO, WORKS_ON, etc.)
+    - Hur olika källtyper (Email, Slack, Transcript) tolkas
+
+    Anropa detta verktyg FÖRST om du är osäker på hur systemet fungerar
+    eller vilka sökstrategier som är mest effektiva.
+    """
+    _t0 = time.monotonic()
+    try:
+        schema = _get_schema_validator().get_llm_readable_schema()
+
+        output = [f"=== DATAMODELL (schema v{schema.get('schema_version', '?')}) ==="]
+
+        # Nodtyper
+        output.append("\n--- NODTYPER ---")
+        for nt in schema.get('node_types', []):
+            output.append(f"  {nt['type']}: {nt.get('description', '')}")
+
+        # Relationer
+        output.append("\n--- RELATIONER ---")
+        for et in schema.get('edge_types', []):
+            src = ', '.join(et.get('source_types', []))
+            tgt = ', '.join(et.get('target_types', []))
+            desc = et.get('description') or ''
+            output.append(f"  {et['type']}: {src} → {tgt}")
+            if desc:
+                output.append(f"    {desc}")
+
+        # Källprofiler
+        output.append("\n--- KÄLLPROFILER ---")
+        for sp in schema.get('source_type_profiles', []):
+            creates = ', '.join(sp.get('allow_create', [])) or 'Inga (LINK-only)'
+            output.append(f"  {sp['type']}: {sp.get('description', '')}")
+            output.append(f"    Kan skapa: {creates}")
+
+        # Söktips
+        output.append("\n--- SÖKTIPS ---")
+        output.append("• Specifik person/org → search_graph_nodes(\"namn\")")
+        output.append("• Koncept/roll/ämne → query_vector_memory(\"beskrivning\")")
+        output.append("• Tidsperiod → parse_relative_date + search_by_date_range")
+        output.append("• Djupdyk i entitet → get_entity_summary(node_id)")
+        output.append("• Kartlägg relationer → get_neighbor_network(node_id)")
+        output.append("• Läs källdokument → search_lake_metadata + read_document_content")
+        output.append("• Dokument↔entiteter → get_source_connections(entity_id/doc_id)")
+
+        return "\n".join(output)
+    except Exception as e:
+        return f"Kunde inte hämta datamodell: {e}"
+    finally:
+        _log_tool_time("get_data_model", _t0)
 
 
 # --- TOOL 8: RELATIVE DATE PARSER ---
@@ -1232,6 +1428,144 @@ def read_document_content(doc_id: str, max_length: int = 8000, section: str = "s
         return f"Dokumentläsning misslyckades: {e}"
     finally:
         _log_tool_time("read_document_content", _t0)
+
+
+# --- TOOL 9b: SOURCE CONNECTIONS ---
+
+@mcp.tool()
+def get_source_connections(entity_id: str = None, doc_id: str = None) -> str:
+    """
+    Navigera mellan dokument och entiteter via MENTIONS-kanter.
+
+    TVÅ RIKTNINGAR:
+    - entity_id → "Vilka dokument nämner denna person/organisation?"
+    - doc_id → "Vilka entiteter nämns i detta dokument?"
+
+    Exakt en av entity_id eller doc_id måste anges.
+
+    ANVÄNDNINGSFLÖDE:
+    1. search_graph_nodes("Kajsa") → node_id
+    2. get_source_connections(entity_id=node_id) → Lista dokument
+    3. read_document_content(doc_id) → Läs dokumentet
+
+    ELLER:
+    1. search_by_date_range(...) → filnamn
+    2. get_source_connections(doc_id="filnamn-uuid") → Vilka entiteter nämns
+    3. get_entity_summary(entity_id) → Djupdyk
+
+    Args:
+        entity_id: Node-ID för entiteten (Person, Organization, etc.)
+        doc_id: Filnamn eller UUID för dokumentet (matchar Source-nodens uuid-property)
+    """
+    _t0 = time.monotonic()
+    try:
+        # Validera att exakt en parameter anges
+        if entity_id and doc_id:
+            return "FEL: Ange antingen entity_id ELLER doc_id, inte båda."
+        if not entity_id and not doc_id:
+            return "FEL: Ange entity_id eller doc_id."
+
+        sv = _get_schema_validator()
+        source_edge_types = sv.get_source_edge_types()
+        doc_node_type = sv.get_document_node_type()
+
+        with resource_lock("graph", exclusive=False, timeout=10.0):
+            graph = GraphService(_get_graph_path(), read_only=True)
+
+            if entity_id:
+                # Riktning: entitet → vilka dokument nämner den?
+                entity_node = graph.get_node(entity_id)
+                if not entity_node:
+                    graph.close()
+                    return f"Noden '{entity_id}' hittades inte."
+
+                in_edges = graph.get_edges_to(entity_id)
+                mentions = [e for e in in_edges if e.get('type') in source_edge_types]
+
+                # Hämta Source-noders properties
+                sources = []
+                for e in mentions:
+                    source_node = graph.get_node(e['source'])
+                    if source_node:
+                        s_props = source_node.get('properties', {})
+                        edge_conf = e.get('properties', {}).get('confidence', '')
+                        sources.append({
+                            'id': e['source'],
+                            'title': s_props.get('title', e['source']),
+                            'source_type': s_props.get('source_type', ''),
+                            'confidence': edge_conf
+                        })
+
+                graph.close()
+
+                e_name = entity_node.get('properties', {}).get('name', entity_id)
+                output = [f"=== DOKUMENT SOM NÄMNER: {e_name} ({len(sources)} träffar) ==="]
+
+                if not sources:
+                    output.append("Inga dokument hittade via Source-kanter.")
+                    return "\n".join(output)
+
+                for s in sources:
+                    conf_str = f" (conf: {s['confidence']})" if s['confidence'] else ""
+                    output.append(f"  [{s['source_type']}] {s['title']}{conf_str}")
+                    output.append(f"    ID: {s['id']}")
+
+                return "\n".join(output)
+
+            else:
+                # Riktning: dokument → vilka entiteter nämns?
+                # Hitta Source-noden via uuid-property
+                sql = "SELECT id, properties FROM nodes WHERE type = ? AND (id ILIKE ? OR properties ILIKE ?)"
+                params = [doc_node_type, f"%{doc_id}%", f"%{doc_id}%"]
+                rows = graph.conn.execute(sql, params).fetchall()
+
+                if not rows:
+                    graph.close()
+                    return f"Ingen {doc_node_type}-nod hittades för '{doc_id}'."
+
+                source_node_id = rows[0][0]
+                source_props = json.loads(rows[0][1]) if rows[0][1] else {}
+
+                # Hämta Source→entitet-kanter
+                out_edges = graph.get_edges_from(source_node_id)
+                mentions = [e for e in out_edges if e.get('type') in source_edge_types]
+
+                # Hämta target-noder
+                targets = []
+                for e in mentions:
+                    target_node = graph.get_node(e['target'])
+                    if target_node:
+                        t_props = target_node.get('properties', {})
+                        edge_conf = e.get('properties', {}).get('confidence', '')
+                        targets.append({
+                            'id': e['target'],
+                            'type': target_node['type'],
+                            'name': t_props.get('name', e['target']),
+                            'confidence': edge_conf
+                        })
+
+                graph.close()
+
+                title = source_props.get('title', source_node_id)
+                output = [f"=== ENTITETER I: {title} ({len(targets)} träffar) ==="]
+
+                if not targets:
+                    output.append("Inga entiteter hittade via MENTIONS-kanter.")
+                    return "\n".join(output)
+
+                for t in targets:
+                    conf_str = f" (conf: {t['confidence']})" if t['confidence'] else ""
+                    output.append(f"  [{t['type']}] {t['name']}{conf_str}")
+                    output.append(f"    ID: {t['id']}")
+
+                return "\n".join(output)
+
+    except TimeoutError:
+        return "Source-navigering misslyckades: Databasen är upptagen (ingestion/dreamer pågår). Försök igen om 30 sekunder."
+    except Exception as e:
+        return f"Source-navigering misslyckades: {e}"
+    finally:
+        _log_tool_time("get_source_connections", _t0)
 
 
 # --- TOOL 10: INGEST CONTENT ---

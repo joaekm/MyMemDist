@@ -391,6 +391,60 @@ class SchemaValidator:
             if 'Source' in edge_def.get('source_type', [])
         }
 
+    def get_llm_readable_schema(self) -> dict:
+        """Returnerar en strippat, LLM-läsbar version av schemat.
+
+        Inkluderar:
+        - schema_version: str
+        - node_types: [{type, description}]
+        - edge_types: [{type, source_types, target_types, description}]
+        - source_type_profiles: [{type, description, allow_create}]
+
+        Exkluderar interna fält: matching, primary_key_strategy, regex,
+        lookup_key, fallback_key, allowed_sources, creation_policy,
+        extraction_type, item_schema, validation_rule, skip_critic, prompt_key.
+        """
+        schema_version = self.schema.get("meta", {}).get("version", "unknown")
+
+        # Node types
+        node_types = []
+        for name, defn in self.schema.get("nodes", {}).items():
+            node_types.append({
+                "type": name,
+                "description": defn.get("description")
+            })
+
+        # Edge types
+        edge_types = []
+        for name, defn in self.schema.get("edges", {}).items():
+            edge_types.append({
+                "type": name,
+                "source_types": defn.get("source_type", []),
+                "target_types": defn.get("target_type", []),
+                "description": defn.get("description")
+            })
+
+        # Source type profiles
+        source_type_profiles = []
+        profiles = self.schema.get("source_type_profiles", {})
+        for name, defn in profiles.items():
+            if name == "description":
+                continue
+            if not isinstance(defn, dict):
+                continue
+            source_type_profiles.append({
+                "type": name,
+                "description": defn.get("description"),
+                "allow_create": defn.get("allow_create", [])
+            })
+
+        return {
+            "schema_version": schema_version,
+            "node_types": node_types,
+            "edge_types": edge_types,
+            "source_type_profiles": source_type_profiles
+        }
+
     def get_base_property_defaults(self, resolve_now: bool = True) -> Dict[str, Any]:
         """
         Generate default values for required base_properties that have a 'default'.

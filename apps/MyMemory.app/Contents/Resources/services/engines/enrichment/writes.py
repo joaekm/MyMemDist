@@ -78,10 +78,11 @@ def execute_enrich_writes(engine, enrich_result: Dict) -> Dict:
                 props["last_refined_at"] = now_ts
                 engine.graph_service.update_node_properties(node_id, props)
 
-            # Vector re-index
+            # Vector re-index (with relation data)
             updated_node = engine.graph_service.get_node(node_id)
             if updated_node:
-                engine.vector_service.upsert_node(updated_node)
+                edges = engine.graph_service.get_node_relations_for_vector(node_id)
+                engine.vector_service.upsert_node(updated_node, edges=edges)
 
             enriched_node_ids.add(node_id)
             stats["nodes_updated"] += 1

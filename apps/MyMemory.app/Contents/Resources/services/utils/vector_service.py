@@ -134,7 +134,7 @@ class VectorService:
         if not text: return
         self.collection.upsert(ids=[id], documents=[text], metadatas=[metadata or {}])
 
-    def upsert_node(self, node: Dict):
+    def upsert_node(self, node: Dict, edges: list = None):
         if not node: return
         node_id = node.get('id')
         name = node.get('properties', {}).get('name', '')
@@ -146,6 +146,16 @@ class VectorService:
         if node.get('aliases'): parts.append(f"Aliases: {', '.join(node['aliases'])}")
         if props.get('context_summary'):
             parts.append(f"Context: {props['context_summary']}")
+
+        if edges:
+            rel_parts = []
+            for e in edges:
+                if e['direction'] == 'out':
+                    rel_parts.append(f"{e['edge_type']} → {e['target_name']}")
+                else:
+                    rel_parts.append(f"{e['edge_type']} ← {e['target_name']}")
+            if rel_parts:
+                parts.append(f"Relations: {', '.join(rel_parts)}")
 
         full_text = ". ".join(parts)
         self.upsert(id=node_id, text=full_text, metadata={
