@@ -1,5 +1,7 @@
 # MyMemory Konfiguration
-# Genererad av setup_mymemory.py — redigera efter behov.
+# Genererad av MyMemory Setup — redigera efter behov.
+
+version: "__APP_VERSION__"
 
 # --- SYSTEMINSTÄLLNINGAR ---
 system:
@@ -55,8 +57,8 @@ paths:
 
 # Loggning
 logging:
-  system_log: "~/MyMemory/Logs/system.log"
-  rebuild_log: "~/MyMemory/Logs/rebuild.log"
+  system_log: "~/Library/Logs/MyMemory/system.log"
+  rebuild_log: "~/Library/Logs/MyMemory/rebuild.log"
   log_level: "INFO"
 
 # AI-Motor & Modeller (Hybrid: Claude + Gemini)

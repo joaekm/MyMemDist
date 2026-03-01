@@ -1,7 +1,7 @@
 {
-  "version": "0.12.1",
+  "version": "0.12.2",
   "date": "2026-03-01",
-  "description": "# Release Notes - Fixat menubar-appens statuscheck som slutat fungera efter moduläriseringen av ingestion pipeline - ServiceManager använder nu `python -m <modul>` istället för direkta script-sökvägar (matchar start_services.py) ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.1/MyMemory-Installer.dmg",
+  "description": "# Release Notes ## Buggfixar - **Fix: Loggfiler hittades inte efter setup** — Config-templaten pekade Python-loggar till `~/MyMemory/Logs/` medan Swift-appen letade i `~/Library/Logs/MyMemory/` (macOS-standard). Nya installationer fick \"Loggfilen hittades inte\" i inställningar. - **Fix: Version visades som \"0.0.0\"** — Config-templaten saknade `version`-fält. Menubar-appen visar nu korrekt version från app-bundlen. - **Fix: MCP-agenter loggade till fel sökväg** — `mymem_mcp.py` och `validator_mcp.py` hade hårdkodad logg-sökväg som inte matchade macOS-standard. - **Fix: SettingsView läser nu logg-sökväg från config** istället för att hårdkoda den. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

@@ -160,7 +160,7 @@ def archive_day(channel_id, target_date):
 
     # HÄR ÄR ÄNDRINGEN: DATUM_TID
     header = f"""================================================================================
-METADATA FRÅN SLACK (MyMem Daily Digest)
+METADATA FRÅN SLACK
 ================================================================================
 KANAL:         #{ch_name}
 DATUM_TID:     {day_iso}

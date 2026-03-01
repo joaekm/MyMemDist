@@ -28,7 +28,7 @@ signal.signal(signal.SIGINT, _handle_sigterm)
 
 # --- LOGGING: Endast FileHandler, ingen terminal-output ---
 # MCP-servrar använder stdout för protokoll, stderr läcker till terminal
-_log_file = os.path.expanduser('~/MyMemory/Logs/my_mem_system.log')
+_log_file = os.path.expanduser('~/Library/Logs/MyMemory/my_mem_system.log')
 os.makedirs(os.path.dirname(_log_file), exist_ok=True)
 
 _root = logging.getLogger()
