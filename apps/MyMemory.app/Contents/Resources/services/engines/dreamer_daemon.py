@@ -155,26 +155,53 @@ def _should_run(state: dict, daemon_config: dict, config: dict = None) -> tuple[
 
 
 def _run_dreamer(config: dict) -> dict:
-    """Execute dreamer sweep with resource locking."""
-    LOGGER.info("Acquiring locks for Dreamer...")
+    """Execute dreamer sweep with phased locking (#115).
+
+    Phase 1 — Discover + Evaluate: read-only graph, LLM calls (shared lock OK for MCP)
+    Phase 2 — Execute: exclusive graph + vector (~2-5s)
+    """
+    graph_path = os.path.expanduser(
+        config.get('paths', {}).get('graph_db', '~/MyMemory/Index/my_mem_graph.duckdb')
+    )
 
     try:
+        # --- Phase 1: Discover + Evaluate (read-only graph) ---
+        LOGGER.info("Phase 1: Discover + Evaluate (read-only)...")
+        graph_ro = GraphService(graph_path, read_only=True)
+        dreamer = Dreamer(graph_ro, vector_service=None)
+
+        sweep_results = dreamer.discover_and_evaluate_all()
+        graph_ro.close()
+
+        # Check if there's anything to execute
+        has_decisions = any(
+            len(decisions) > 0
+            for _stats, decisions in sweep_results.values()
+        )
+        if not has_decisions:
+            LOGGER.info("No decisions to execute, skipping write phase")
+            # Collect stats only
+            stats = {
+                "deterministic": {"invalid_edges": 0, "self_aliases": 0, "uuid_aliases": 0},
+            }
+            for pass_name, (pass_stats, _decisions) in sweep_results.items():
+                stats[pass_name] = pass_stats
+            return stats
+
+        # --- Phase 2: Execute (exclusive locks, ~2-5s) ---
+        LOGGER.info("Phase 2: Executing decisions (exclusive locks)...")
         with resource_lock("graph", exclusive=True):
             with vector_scope(exclusive=True) as vector_service:
-                LOGGER.info("Locks acquired, initializing Dreamer...")
+                graph_rw = GraphService(graph_path)
+                dreamer.graph_service = graph_rw
+                dreamer.vector_service = vector_service
 
-                graph_path = os.path.expanduser(
-                    config.get('paths', {}).get('graph_db', '~/MyMemory/Index/my_mem_graph.duckdb')
-                )
-                graph_service = GraphService(graph_path)
-                dreamer = Dreamer(graph_service, vector_service)
+                result = dreamer.execute_all(sweep_results)
 
-                LOGGER.info("Running dreamer sweep...")
-                result = dreamer.run_sweep(dry_run=False)
+                graph_rw.close()
 
-                graph_service.close()
-                LOGGER.info(f"Dreamer completed: {result}")
-                return result
+        LOGGER.info(f"Dreamer completed: {result}")
+        return result
 
     except Exception as e:
         LOGGER.error(f"Dreamer failed: {e}", exc_info=True)

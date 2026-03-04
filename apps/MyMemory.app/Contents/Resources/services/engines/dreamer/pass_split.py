@@ -16,12 +16,18 @@ from services.engines.dreamer.pass_merge import _get_ordered_edges
 LOGGER = logging.getLogger(__name__)
 
 
-def run(engine, dry_run: bool, limit: int) -> dict:
-    """Run split pass. Returns stats dict."""
+def discover_and_evaluate(engine, dry_run: bool, limit: int) -> Tuple[dict, list]:
+    """Phase 1: Discovery + LLM evaluation (graph reads + LLM).
+
+    Returns (stats, decisions) where decisions is a list of tuples:
+        (node, flag_reason, result, ordered_edges)
+    No writes happen here. Note: ordered_edges are needed for _execute.
+    """
     config = engine.dreamer_config
     stats = {"candidates": 0, "split": 0, "skipped": 0, "decisions": []}
+    decisions = []
 
-    LOGGER.info("Pass 4: SPLIT (quality_flags)")
+    LOGGER.info("Pass 4: SPLIT (discover + evaluate)")
 
     split_config = config.get('split', {})
     max_split = limit or split_config.get('max_candidates_per_run', 10)
@@ -46,54 +52,111 @@ def run(engine, dry_run: bool, limit: int) -> dict:
 
     stats["candidates"] = len(candidates)
 
-    if not dry_run and candidates:
-        threshold = config.get('thresholds', {}).get('split', 0.90)
+    if not candidates:
+        return stats, decisions
 
-        for node, flag_reason in candidates:
-            result, ordered_edges = _evaluate(engine, node, flag_reason)
-            if not result:
-                _clear_flag(engine, node["id"])
-                continue
+    for node, flag_reason in candidates:
+        result, ordered_edges = _evaluate(engine, node, flag_reason)
+        decisions.append((node, flag_reason, result, ordered_edges))
 
-            decision = result.get("decision", "SKIP")
-            conf = result.get("confidence", 0)
+    return stats, decisions
 
-            decision_record = {
-                "node_name": node_name(node), "flag_reason": flag_reason,
-                "decision": decision, "confidence": conf,
-                "reason": result.get("reason", ""),
-            }
 
-            if decision == "SPLIT" and conf >= threshold:
-                clusters = result.get("split_clusters", [])
-                if clusters:
-                    LOGGER.info(f"SPLIT: {node_name(node)} -> {len(clusters)} clusters (conf={conf:.2f})")
-                    engine.graph_service.record_dreamer_decision(
-                        "split", "EXECUTE", node["id"], node_name(node),
-                        conf, result.get("reason", ""), {
-                            "clusters": clusters,
-                        })
-                    _execute(engine, node["id"], clusters, ordered_edges)
-                    decision_record["clusters"] = clusters
-                    stats["split"] += 1
-            else:
-                engine.graph_service.record_dreamer_decision(
-                    "split", "SKIP", node["id"], node_name(node),
-                    conf, result.get("reason", ""), {
-                        "flag_reason": flag_reason,
-                    })
-                stats["skipped"] += 1
+def execute_decisions(engine, stats: dict, decisions: list) -> dict:
+    """Phase 2: Execute split decisions (graph + vector writes).
 
-            stats["decisions"].append(decision_record)
+    Validates that nodes still exist before executing.
+    Clears quality flags after processing.
+    """
+    config = engine.dreamer_config
+    threshold = config.get('thresholds', {}).get('split', 0.90)
+
+    for node, flag_reason, result, ordered_edges in decisions:
+        # Exists-guard: verify node still exists
+        if not engine.graph_service.get_node(node["id"]):
+            LOGGER.info(f"SPLIT SKIP (stale): {node_name(node)}")
+            continue
+
+        if not result:
             _clear_flag(engine, node["id"])
+            continue
 
-    elif dry_run and candidates:
-        details = []
-        for node, flag_reason in candidates:
-            details.append({"name": node_name(node), "reason": flag_reason})
-            LOGGER.info(f"  [DRY] SPLIT candidate: {node_name(node)} -- {flag_reason}")
-        stats["details"] = details
+        decision = result.get("decision", "SKIP")
+        conf = result.get("confidence", 0)
 
+        decision_record = {
+            "node_name": node_name(node), "flag_reason": flag_reason,
+            "decision": decision, "confidence": conf,
+            "reason": result.get("reason", ""),
+        }
+
+        if decision == "SPLIT" and conf >= threshold:
+            clusters = result.get("split_clusters", [])
+            if clusters:
+                LOGGER.info(f"SPLIT: {node_name(node)} -> {len(clusters)} clusters (conf={conf:.2f})")
+                engine.graph_service.record_dreamer_decision(
+                    "split", "EXECUTE", node["id"], node_name(node),
+                    conf, result.get("reason", ""), {
+                        "clusters": clusters,
+                    })
+                _execute(engine, node["id"], clusters, ordered_edges)
+                decision_record["clusters"] = clusters
+                stats["split"] += 1
+        else:
+            engine.graph_service.record_dreamer_decision(
+                "split", "SKIP", node["id"], node_name(node),
+                conf, result.get("reason", ""), {
+                    "flag_reason": flag_reason,
+                })
+            stats["skipped"] += 1
+
+        stats["decisions"].append(decision_record)
+        _clear_flag(engine, node["id"])
+
+    return stats
+
+
+def run(engine, dry_run: bool, limit: int) -> dict:
+    """Run split pass. Returns stats dict.
+
+    Convenience wrapper: discover_and_evaluate + execute_decisions.
+    """
+    if dry_run:
+        config = engine.dreamer_config
+        LOGGER.info("Pass 4: SPLIT (quality_flags)")
+
+        split_config = config.get('split', {})
+        max_split = limit or split_config.get('max_candidates_per_run', 10)
+
+        rows = engine.graph_service.conn.execute(
+            "SELECT id, properties FROM nodes WHERE "
+            "json_extract(properties, '$.quality_flags') IS NOT NULL"
+        ).fetchall()
+
+        candidates = []
+        for node_id, props_str in rows:
+            if len(candidates) >= max_split:
+                break
+            props = json.loads(props_str) if props_str else {}
+            flags = props.get("quality_flags", [])
+            if "possible_split" in flags:
+                node = engine.graph_service.get_node(node_id)
+                if node:
+                    flag_reason = props.get("quality_flag_reason", {}).get("possible_split", "Flagged by enrichment")
+                    candidates.append((node, flag_reason))
+
+        stats = {"candidates": len(candidates), "split": 0, "skipped": 0, "decisions": []}
+        if candidates:
+            details = []
+            for node, flag_reason in candidates:
+                details.append({"name": node_name(node), "reason": flag_reason})
+                LOGGER.info(f"  [DRY] SPLIT candidate: {node_name(node)} -- {flag_reason}")
+            stats["details"] = details
+        return stats
+
+    stats, decisions = discover_and_evaluate(engine, dry_run, limit)
+    if decisions:
+        stats = execute_decisions(engine, stats, decisions)
     return stats
 
 

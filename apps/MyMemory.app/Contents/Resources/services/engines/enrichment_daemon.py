@@ -151,34 +151,66 @@ def _should_run(state: dict, daemon_config: dict) -> tuple[bool, str]:
 
 def _run_enrichment(config: dict) -> dict:
     """
-    Execute Enrichment cycle with resource locking.
+    Execute Enrichment cycle with phased locking (#115).
 
-    Takes exclusive locks on graph and vector to prevent conflicts
-    with concurrent ingestion processes.
+    Phase 1 — Prepare: read-only graph + shared vector (candidates + prompt)
+    Phase 2 — LLM call: no locks
+    Phase 3 — Write: exclusive graph + vector (~1-3s)
 
     Returns:
         Result dict from Enrichment
     """
-    LOGGER.info("Acquiring locks for Enrichment cycle...")
+    graph_path = os.path.expanduser(
+        config.get('paths', {}).get('graph_db', '~/MyMemory/Index/my_mem_graph.duckdb')
+    )
 
     try:
-        # Take exclusive locks for entire cycle (OBJEKT-73)
+        # --- Phase 1: Prepare (read-only graph, no exclusive locks) ---
+        LOGGER.info("Phase 1: Preparing enrichment (read-only)...")
+        graph_ro = GraphService(graph_path, read_only=True)
+        enrichment = Enrichment(graph_ro, vector_service=None)
+
+        prepare_result = enrichment.prepare_cycle()
+        graph_ro.close()
+
+        if prepare_result.get("status") != "ready":
+            LOGGER.info(f"Enrichment prepare: {prepare_result.get('status')}")
+            return prepare_result
+
+        prompt = prepare_result["prompt"]
+        prompt_stats = prepare_result["prompt_stats"]
+
+        # --- Phase 2: LLM call (no locks) ---
+        LOGGER.info("Phase 2: LLM call (no locks)...")
+        llm_result = enrichment.call_enrich_llm(prompt, prompt_stats)
+
+        if llm_result.get("status") != "ready":
+            LOGGER.info(f"Enrichment LLM: {llm_result.get('status')}")
+            return llm_result
+
+        enrich_result = llm_result["enrich_result"]
+        total_usage = llm_result["usage"]
+
+        # --- Phase 3: Write (exclusive locks, ~1-3s) ---
+        LOGGER.info("Phase 3: Writing enrichments (exclusive locks)...")
         with resource_lock("graph", exclusive=True):
             with vector_scope(exclusive=True) as vector_service:
-                LOGGER.info("Locks acquired, initializing Enrichment...")
+                graph_rw = GraphService(graph_path)
+                enrichment.graph_service = graph_rw
+                enrichment.vector_service = vector_service
 
-                graph_path = os.path.expanduser(
-                    config.get('paths', {}).get('graph_db', '~/MyMemory/Index/my_mem_graph.duckdb')
-                )
-                graph_service = GraphService(graph_path)
-                enrichment = Enrichment(graph_service, vector_service)
+                enrich_stats = enrichment.write_cycle_results(enrich_result)
 
-                LOGGER.info("Running enrichment cycle...")
-                result = enrichment.run_enrichment_cycle(dry_run=False)
+                graph_rw.close()
 
-                graph_service.close()
-                LOGGER.info(f"Enrichment completed: {result}")
-                return result
+        result = {
+            "status": "completed",
+            "enrich": enrich_stats,
+            "prompt_stats": prompt_stats,
+            "usage": total_usage,
+        }
+        LOGGER.info(f"Enrichment completed: {result}")
+        return result
 
     except Exception as e:
         LOGGER.error(f"Enrichment failed: {e}", exc_info=True)

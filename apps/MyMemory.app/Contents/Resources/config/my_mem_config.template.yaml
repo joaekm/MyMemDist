@@ -51,6 +51,10 @@ paths:
   asset_ai_generated: "~/MyMemory/Assets/AIGenerated"
   asset_failed: "~/MyMemory/Assets/Failed"
 
+  # --- RUNTIME ---
+  pending_drops: "~/Library/Application Support/MyMemory/PendingDrops"
+  downloads_folder: "~/Downloads"
+
   # --- INDEX ---
   chroma_db: "~/MyMemory/Index/VectorDB"
   graph_db: "~/MyMemory/Index/GraphDB"
@@ -142,6 +146,21 @@ dreamer:
     max_hours_between_runs: 24
     poll_interval_seconds: 300
     state_file: "~/MyMemory/Index/.dreamer_state.json"
+
+# Enrichment — batchberikning av graf-noder
+enrichment:
+  token_budget: 22500
+  entity_ceiling_pct: 0.6
+  neighbor_budget_pct: 0.4
+
+  daemon:
+    re_enrich_threshold: 10
+
+  thresholds:
+    enrich: 0.6
+
+  quality_flags:
+    enabled: true
 
 # Search - Tröskelvärden och limits för MCP-sökning
 search:
@@ -255,6 +274,8 @@ meeting_transcriber:
 # --- RICH TRANSCRIBER ---
 transcriber:
   chunk_size_bytes: 10000000
+  chunk_overlap_seconds: 5
+  normalize_audio: false
   calendar_window_minutes: 10
   part_preview_limit: 500
   max_file_workers: 2

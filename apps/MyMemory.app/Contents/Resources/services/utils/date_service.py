@@ -276,7 +276,85 @@ class FilesystemExtractor(DateExtractor):
         return None
 
 
-# === PRIORITERAD LISTA AV EXTRACTORS ===
+# === CONTENT HEADER EXTRACTOR (text-baserad) ===
+
+# Header patterns for collector/transcriber output
+_DATUM_TID_PATTERN = re.compile(r'^DATUM_TID:\s+(.+)$', re.MULTILINE)
+_RICH_TRANSCRIBER_PATTERN = re.compile(
+    r'^\*\*Tid:\*\*\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', re.MULTILINE
+)
+_TRANSCRIBER_DATE_PATTERN = re.compile(r'^DATUM:\s+(\d{4}-\d{2}-\d{2})$', re.MULTILINE)
+_TRANSCRIBER_START_PATTERN = re.compile(r'^START:\s+(\d{2}:\d{2})$', re.MULTILINE)
+
+# How many chars to scan for headers (configurable via config)
+_HEADER_SCAN_CHARS = VALIDATION_CONFIG.get('header_scan_chars', 3000)
+
+
+def _extract_from_content_headers(text: str) -> Optional[datetime]:
+    """
+    Extract date from collector/transcriber headers in document text.
+
+    Priority:
+    1. DATUM_TID (from collectors: Slack, Calendar, Gmail)
+    2. Rich Transcriber format (**Tid:** YYYY-MM-DD HH:MM:SS)
+    3. Legacy Transcriber format (DATUM + START)
+
+    Returns:
+        datetime or None
+    """
+    if not text:
+        return None
+    header_section = text[:_HEADER_SCAN_CHARS]
+
+    # 1. DATUM_TID (collectors)
+    match = _DATUM_TID_PATTERN.search(header_section)
+    if match:
+        ts_str = match.group(1).strip()
+        try:
+            dt = datetime.fromisoformat(ts_str)
+            LOGGER.debug(f"Content header: DATUM_TID -> {dt.isoformat()}")
+            return dt
+        except ValueError:
+            LOGGER.warning(f"Content header: Invalid DATUM_TID '{ts_str}'")
+
+    # 2. Rich Transcriber (**Tid:** YYYY-MM-DD HH:MM:SS)
+    match = _RICH_TRANSCRIBER_PATTERN.search(header_section)
+    if match:
+        ts_str = match.group(1).strip()
+        try:
+            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+            LOGGER.debug(f"Content header: Rich Transcriber -> {dt.isoformat()}")
+            return dt
+        except ValueError:
+            LOGGER.warning(f"Content header: Invalid Rich Transcriber format '{ts_str}'")
+
+    # 3. Legacy Transcriber (DATUM + START)
+    date_match = _TRANSCRIBER_DATE_PATTERN.search(header_section)
+    start_match = _TRANSCRIBER_START_PATTERN.search(header_section)
+    if date_match and start_match:
+        try:
+            dt = datetime.strptime(
+                f"{date_match.group(1)} {start_match.group(1)}", "%Y-%m-%d %H:%M"
+            )
+            LOGGER.debug(f"Content header: Transcriber -> {dt.isoformat()}")
+            return dt
+        except ValueError:
+            LOGGER.warning(
+                f"Content header: Invalid Transcriber format "
+                f"'{date_match.group(1)} {start_match.group(1)}'"
+            )
+    elif date_match:
+        try:
+            dt = datetime.strptime(f"{date_match.group(1)} 12:00", "%Y-%m-%d %H:%M")
+            LOGGER.debug(f"Content header: Transcriber (date only) -> {dt.isoformat()}")
+            return dt
+        except ValueError:
+            LOGGER.debug(f"Content header: Could not parse date '{date_match.group(1)}'")
+
+    return None
+
+
+# === PRIORITERAD LISTA AV EXTRACTORS (filbaserade) ===
 
 EXTRACTORS = [
     FrontmatterExtractor(),
@@ -311,6 +389,46 @@ def get_timestamp(filepath: str) -> datetime:
                 return result
     
     raise RuntimeError(f"HARDFAIL_DATE: Kunde inte extrahera datum från {filepath}")
+
+
+def get_content_timestamp(text: str, filename: str = None) -> tuple:
+    """
+    Extract timestamps for ingestion. Creates now once, uses for both.
+
+    Priority for timestamp_content:
+    1. Content headers (DATUM_TID, Transcriber formats)
+    2. Filename date patterns
+    3. Fallback: now (same as timestamp_ingestion)
+
+    Args:
+        text: Document text content
+        filename: Original filename (optional)
+
+    Returns:
+        (timestamp_ingestion, timestamp_content) as ISO format strings.
+        timestamp_ingestion is always now.
+        timestamp_content is extracted or falls back to now.
+    """
+    now = datetime.now()
+    now_iso = now.isoformat()
+
+    # 1. Content headers (DATUM_TID, Transcriber)
+    dt = _extract_from_content_headers(text)
+    if dt:
+        return now_iso, dt.isoformat()
+
+    # 2. Filename patterns
+    if filename:
+        extractor = GenericFilenameExtractor()
+        if extractor.can_extract(filename):
+            dt = extractor.extract(filename)
+            if dt:
+                LOGGER.debug(f"get_content_timestamp: Filename -> {dt.isoformat()}")
+                return now_iso, dt.isoformat()
+
+    # 3. Fallback: now
+    LOGGER.debug(f"get_content_timestamp: No date source, using now ({filename or 'no filename'})")
+    return now_iso, now_iso
 
 
 def get_date(filepath: str) -> str:

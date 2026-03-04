@@ -725,6 +725,9 @@ class GraphService:
                                 if item_key not in seen:
                                     seen.add(item_key)
                                     unique_list.append(item)
+                            # Sort chronologically if entries have timestamp (#117)
+                            if unique_list and "timestamp" in unique_list[0]:
+                                unique_list.sort(key=lambda e: e.get("timestamp", ""))
                             final_props[k] = unique_list
                         else:
                             final_props[k] = list(set(combined))

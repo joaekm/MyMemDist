@@ -18,76 +18,117 @@ from services.engines.dreamer.pass_merge import _build_edges_text
 LOGGER = logging.getLogger(__name__)
 
 
-def run(engine, dry_run: bool, limit: int) -> dict:
-    """Run rename pass. Returns stats dict."""
+def discover_and_evaluate(engine, dry_run: bool, limit: int) -> Tuple[dict, list]:
+    """Phase 1: Discovery + LLM evaluation (graph reads + LLM).
+
+    Returns (stats, decisions) where decisions is a list of tuples:
+        (node, result)
+    No writes happen here.
+    """
     config = engine.dreamer_config
     stats = {"candidates": 0, "renamed": 0, "skipped": 0, "decisions": []}
+    decisions = []
 
     rename_config = config.get('rename', {})
     if not rename_config.get('enabled', True):
-        return stats
+        return stats, decisions
 
-    LOGGER.info("Pass 3: RENAME")
+    LOGGER.info("Pass 3: RENAME (discover + evaluate)")
 
-    if dry_run:
-        candidates = _discover_candidates(engine, max_candidates=limit if limit else 0)
-    else:
-        candidates = _discover_candidates(engine, max_candidates=limit if limit else None)
-
+    candidates = _discover_candidates(engine, max_candidates=limit if limit else None)
     stats["candidates"] = len(candidates)
 
-    if not dry_run and candidates:
-        thresholds = config.get('thresholds', {})
-        threshold_normal = thresholds.get('rename_normal', 0.95)
-        threshold_weak = thresholds.get('rename_weak', 0.70)
+    if not candidates:
+        return stats, decisions
 
-        for node, suggested, reason in candidates:
-            result = _evaluate(engine, node, suggested, reason)
-            if not result:
-                continue
+    for node, suggested, reason in candidates:
+        result = _evaluate(engine, node, suggested, reason)
+        if not result:
+            continue
+        decisions.append((node, result))
 
-            decision = result.get("decision", "SKIP")
-            conf = result.get("confidence", 0)
-            new_name = result.get("new_name")
+    return stats, decisions
 
-            is_weak = is_weak_name(node_name(node))
-            threshold = threshold_weak if is_weak else threshold_normal
 
-            decision_record = {
-                "current_name": node_name(node), "decision": decision,
-                "confidence": conf, "reason": result.get("reason", ""),
-            }
+def execute_decisions(engine, stats: dict, decisions: list) -> dict:
+    """Phase 2: Execute rename decisions (graph + vector writes).
 
-            if decision == "RENAME" and conf >= threshold and new_name:
-                LOGGER.info(f"RENAME: {node_name(node)} -> {new_name} (conf={conf:.2f})")
-                engine.graph_service.record_dreamer_decision(
-                    "rename", "EXECUTE", node["id"], node_name(node),
-                    conf, result.get("reason", ""), {
-                        "old_name": node_name(node), "new_name": new_name,
-                    })
-                _execute(engine, node["id"], new_name)
-                decision_record["new_name"] = new_name
-                stats["renamed"] += 1
-            else:
-                LOGGER.info(f"RENAME SKIP: {node_name(node)} (conf={conf:.2f})")
-                engine.graph_service.record_dreamer_decision(
-                    "rename", "SKIP", node["id"], node_name(node),
-                    conf, result.get("reason", ""), {
-                        "old_name": node_name(node),
-                    })
-                stats["skipped"] += 1
+    Validates that nodes still exist before executing.
+    """
+    config = engine.dreamer_config
+    thresholds = config.get('thresholds', {})
+    threshold_normal = thresholds.get('rename_normal', 0.95)
+    threshold_weak = thresholds.get('rename_weak', 0.70)
 
-            stats["decisions"].append(decision_record)
+    for node, result in decisions:
+        # Exists-guard: verify node still exists
+        if not engine.graph_service.get_node(node["id"]):
+            LOGGER.info(f"RENAME SKIP (stale): {node_name(node)}")
+            continue
 
-    elif dry_run and candidates:
-        details = []
-        for node, suggested, reason in candidates:
-            details.append({
-                "current": node_name(node), "suggested": suggested, "reason": reason,
-            })
-            LOGGER.info(f"  [DRY] RENAME candidate: {node_name(node)} -> {suggested} ({reason})")
-        stats["details"] = details
+        decision = result.get("decision", "SKIP")
+        conf = result.get("confidence", 0)
+        new_name = result.get("new_name")
 
+        is_weak = is_weak_name(node_name(node))
+        threshold = threshold_weak if is_weak else threshold_normal
+
+        decision_record = {
+            "current_name": node_name(node), "decision": decision,
+            "confidence": conf, "reason": result.get("reason", ""),
+        }
+
+        if decision == "RENAME" and conf >= threshold and new_name:
+            LOGGER.info(f"RENAME: {node_name(node)} -> {new_name} (conf={conf:.2f})")
+            engine.graph_service.record_dreamer_decision(
+                "rename", "EXECUTE", node["id"], node_name(node),
+                conf, result.get("reason", ""), {
+                    "old_name": node_name(node), "new_name": new_name,
+                })
+            _execute(engine, node["id"], new_name)
+            decision_record["new_name"] = new_name
+            stats["renamed"] += 1
+        else:
+            LOGGER.info(f"RENAME SKIP: {node_name(node)} (conf={conf:.2f})")
+            engine.graph_service.record_dreamer_decision(
+                "rename", "SKIP", node["id"], node_name(node),
+                conf, result.get("reason", ""), {
+                    "old_name": node_name(node),
+                })
+            stats["skipped"] += 1
+
+        stats["decisions"].append(decision_record)
+
+    return stats
+
+
+def run(engine, dry_run: bool, limit: int) -> dict:
+    """Run rename pass. Returns stats dict.
+
+    Convenience wrapper: discover_and_evaluate + execute_decisions.
+    """
+    config = engine.dreamer_config
+    rename_config = config.get('rename', {})
+    if not rename_config.get('enabled', True):
+        return {"candidates": 0, "renamed": 0, "skipped": 0, "decisions": []}
+
+    if dry_run:
+        LOGGER.info("Pass 3: RENAME")
+        candidates = _discover_candidates(engine, max_candidates=limit if limit else 0)
+        stats = {"candidates": len(candidates), "renamed": 0, "skipped": 0, "decisions": []}
+        if candidates:
+            details = []
+            for node, suggested, reason in candidates:
+                details.append({
+                    "current": node_name(node), "suggested": suggested, "reason": reason,
+                })
+                LOGGER.info(f"  [DRY] RENAME candidate: {node_name(node)} -> {suggested} ({reason})")
+            stats["details"] = details
+        return stats
+
+    stats, decisions = discover_and_evaluate(engine, dry_run, limit)
+    if decisions:
+        stats = execute_decisions(engine, stats, decisions)
     return stats
 
 

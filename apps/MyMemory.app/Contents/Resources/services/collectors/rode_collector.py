@@ -89,10 +89,20 @@ def get_wav_files(volume_path):
     return sorted(wav_files)
 
 
+def _normalize_volume_name(volume_path):
+    """Normalisera volymnamn — strippa macOS suffix (t.ex. 'WirelessPRO 1' → 'WirelessPRO')."""
+    import re
+    name = os.path.basename(volume_path)
+    normalized = re.sub(r'\s+\d+$', '', name)
+    if normalized != name:
+        LOGGER.info(f"Volume name normalized: '{name}' -> '{normalized}'")
+    return normalized
+
+
 def load_state(volume_path):
     """Ladda importhistorik för en specifik volym."""
     os.makedirs(STATE_DIR, exist_ok=True)
-    vol_name = os.path.basename(volume_path)
+    vol_name = _normalize_volume_name(volume_path)
     state_file = os.path.join(STATE_DIR, f"{vol_name}.json")
 
     if os.path.exists(state_file):
@@ -105,7 +115,7 @@ def load_state(volume_path):
 def save_state(volume_path, state):
     """Spara importhistorik för en specifik volym."""
     os.makedirs(STATE_DIR, exist_ok=True)
-    vol_name = os.path.basename(volume_path)
+    vol_name = _normalize_volume_name(volume_path)
     state_file = os.path.join(STATE_DIR, f"{vol_name}.json")
 
     with open(state_file, 'w') as f:
@@ -231,6 +241,17 @@ def process_volume(volume_path):
         try:
             # Extrahera tidstämpel och generera namn
             recording_dt = get_recording_datetime(wav_path)
+            date_str = recording_dt.strftime("%Y%m%d_%H%M")
+
+            # Dedup: skippa om inspelning med samma datum redan finns i Recordings
+            existing = glob.glob(os.path.join(RECORDINGS_FOLDER, f"Inspelning_Rode_{date_str}_*.m4a"))
+            if existing:
+                LOGGER.info(f"Redan importerad (dedup): {filename} -> {os.path.basename(existing[0])}")
+                imported[sig] = {"source_file": filename, "dedup": True}
+                state["imported_files"] = imported
+                save_state(volume_path, state)
+                continue
+
             file_uuid = str(uuid.uuid4())
             target_name = generate_target_name(recording_dt, file_uuid)
             tmp_path = os.path.join(TMP_FOLDER, target_name)

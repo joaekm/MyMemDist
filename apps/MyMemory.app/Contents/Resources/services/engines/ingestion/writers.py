@@ -4,7 +4,6 @@ Storage writers for ingestion: Lake, Graph, Vector.
 Write order is important: Graph -> Vector -> Lake (Lake = commit receipt).
 """
 
-import datetime
 import logging
 import os
 import yaml
@@ -17,11 +16,9 @@ from services.engines.ingestion import _shared
 from services.engines.ingestion._shared import (
     CONFIG, LAKE_STORE, _get_schema_validator, LOGGER,
 )
-from services.engines.ingestion.content_date import extract_content_date
-
-
 def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
-               semantic_metadata: Dict, ingestion_payload: List) -> str:
+               semantic_metadata: Dict, ingestion_payload: List,
+               timestamp_ingestion: str = None, timestamp_content: str = None) -> str:
     """Write document to Lake with frontmatter."""
     base_name = os.path.splitext(filename)[0]
     lake_file = os.path.join(LAKE_STORE, f"{base_name}.md")
@@ -31,14 +28,16 @@ def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
     if not ai_model:
         raise RuntimeError(f"HARDFAIL: write_lake({filename}) — semantic_metadata missing 'ai_model'. metadata_service likely failed.")
 
-    timestamp_content = extract_content_date(raw_text, filename)
+    if not timestamp_ingestion or not timestamp_content:
+        raise RuntimeError(f"HARDFAIL: write_lake({filename}) — timestamps must be provided by caller")
+
     default_access_level = CONFIG.get('security', {}).get('default_access_level', 5)
 
     frontmatter = {
         "unit_id": unit_id,
         "source_ref": lake_file,
         "original_filename": filename,
-        "timestamp_ingestion": datetime.datetime.now().isoformat(),
+        "timestamp_ingestion": timestamp_ingestion,
         "timestamp_content": timestamp_content,
         "timestamp_updated": None,
         "source_type": source_type,
@@ -59,7 +58,7 @@ def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
 
 
 def write_graph(unit_id: str, filename: str, ingestion_payload: List,
-                source_type: str = None, timestamp_content: str = "UNKNOWN",
+                source_type: str = None, timestamp_content: str = None,
                 vector_service=None) -> tuple:
     """Write entities and edges to graph, and index nodes to vector."""
     if source_type is None:
@@ -173,12 +172,19 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List,
 
                 # Bygg relation_context entry om text finns
                 rc_text = entity.get("relation_context_text", "")
-                if rc_text:
+                if rc_text and timestamp_content and timestamp_content != "UNKNOWN":
                     edge_props["relation_context"] = [{
                         "text": rc_text,
                         "origin": unit_id,
                         "timestamp": timestamp_content
                     }]
+                elif rc_text:
+                    LOGGER.warning(
+                        f"relation_context dropped — invalid timestamp "
+                        f"'{timestamp_content}' for edge "
+                        f"{entity.get('source_name', '?')} -[{edge_type}]-> "
+                        f"{entity.get('target_name', '?')}"
+                    )
 
                 # Quality gate: drop edges that only have confidence AND require
                 # additional properties to be meaningful.

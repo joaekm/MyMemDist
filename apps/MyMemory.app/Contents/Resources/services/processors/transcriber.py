@@ -104,10 +104,10 @@ os.makedirs(FAILED_FOLDER, exist_ok=True)
 # Transcriber-specifika config
 TRANSCRIBER_CONFIG = CONFIG.get('transcriber', {})
 CHUNK_SIZE_BYTES = TRANSCRIBER_CONFIG.get('chunk_size_bytes', 10000000)  # 10MB default
-CHUNK_OVERLAP_SECONDS = TRANSCRIBER_CONFIG.get('chunk_overlap_seconds', 15)
+CHUNK_OVERLAP_SECONDS = TRANSCRIBER_CONFIG.get('chunk_overlap_seconds', 5)
 SILENCE_THRESHOLD_DB = TRANSCRIBER_CONFIG.get('silence_threshold_db', -35)
 SILENCE_MIN_DURATION = TRANSCRIBER_CONFIG.get('silence_min_duration', 0.3)
-NORMALIZE_AUDIO = TRANSCRIBER_CONFIG.get('normalize_audio', True)
+NORMALIZE_AUDIO = TRANSCRIBER_CONFIG.get('normalize_audio', False)
 CALENDAR_WINDOW_MINUTES = TRANSCRIBER_CONFIG.get('calendar_window_minutes', 30)
 PART_PREVIEW_LIMIT = TRANSCRIBER_CONFIG.get('part_preview_limit', 500)
 MAX_FILE_WORKERS = TRANSCRIBER_CONFIG.get('max_file_workers', 2)
@@ -342,12 +342,21 @@ def _deduplicate_overlap(
 
         overlap_ratio = info.overlap_seconds / chunk_duration
 
-        # Ta bort motsvarande andel ord från starten
+        # Ta bort motsvarande andel ord från starten, bevara formatering
         words = chunk.text.split()
         words_to_remove = int(len(words) * overlap_ratio)
 
         if words_to_remove > 0 and words_to_remove < len(words):
-            trimmed_text = ' '.join(words[words_to_remove:])
+            # Hitta positionen i originaltexten efter N:te ordet (bevara whitespace)
+            pos = 0
+            for _ in range(words_to_remove):
+                # Hoppa förbi whitespace
+                while pos < len(chunk.text) and chunk.text[pos] in ' \t\n\r':
+                    pos += 1
+                # Hoppa förbi ordet
+                while pos < len(chunk.text) and chunk.text[pos] not in ' \t\n\r':
+                    pos += 1
+            trimmed_text = chunk.text[pos:].lstrip()
             result.append(TranscriptChunk(
                 index=chunk.index,
                 text=trimmed_text,
@@ -987,10 +996,6 @@ def apply_speaker_mapping(chunks: List[TranscriptChunk], mappings: List[Dict[str
                 text = text.replace(f"[{speaker_label}]:", f"**{name}:**")
                 text = text.replace(f"{speaker_label}:", f"**{name}:**")
                 text = text.replace(f"[{speaker_label}]", f"**{name}**")
-
-        # Normalisera radbrytningar före talarmarkering
-        text = re.sub(r'\n*(\*\*[^*]+:\*\*)', r'\n\n\1', text)
-        text = text.lstrip('\n')
 
         mapped_chunks.append(text)
 

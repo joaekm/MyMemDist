@@ -16,12 +16,18 @@ from services.engines.dreamer.pass_merge import _build_edges_text
 LOGGER = logging.getLogger(__name__)
 
 
-def run(engine, dry_run: bool, limit: int) -> dict:
-    """Run recategorize pass. Returns stats dict."""
+def discover_and_evaluate(engine, dry_run: bool, limit: int) -> tuple:
+    """Phase 1: Discovery + LLM evaluation (graph reads + LLM).
+
+    Returns (stats, decisions) where decisions is a list of tuples:
+        (node, flag_reason, result)
+    No writes happen here.
+    """
     config = engine.dreamer_config
     stats = {"candidates": 0, "recategorized": 0, "skipped": 0, "decisions": []}
+    decisions = []
 
-    LOGGER.info("Pass 5: RECATEGORIZE (quality_flags)")
+    LOGGER.info("Pass 5: RECATEGORIZE (discover + evaluate)")
 
     recat_config = config.get('recategorize', {})
     max_recat = limit or recat_config.get('max_candidates_per_run', 10)
@@ -45,53 +51,110 @@ def run(engine, dry_run: bool, limit: int) -> dict:
 
     stats["candidates"] = len(candidates)
 
-    if not dry_run and candidates:
-        threshold = config.get('thresholds', {}).get('recategorize', 0.90)
+    if not candidates:
+        return stats, decisions
 
-        for node, flag_reason in candidates:
-            result = _evaluate(engine, node, flag_reason)
-            if not result:
-                _clear_flag(engine, node["id"])
-                continue
+    for node, flag_reason in candidates:
+        result = _evaluate(engine, node, flag_reason)
+        decisions.append((node, flag_reason, result))
 
-            decision = result.get("decision", "SKIP")
-            conf = result.get("confidence", 0)
-            new_type = result.get("new_type")
+    return stats, decisions
 
-            decision_record = {
-                "node_name": node_name(node), "current_type": node.get("type", "?"),
-                "flag_reason": flag_reason, "decision": decision,
-                "confidence": conf, "reason": result.get("reason", ""),
-            }
 
-            if decision == "RECATEGORIZE" and conf >= threshold and new_type:
-                LOGGER.info(f"RECAT: {node_name(node)} {node.get('type')} -> {new_type} (conf={conf:.2f})")
-                engine.graph_service.record_dreamer_decision(
-                    "recategorize", "EXECUTE", node["id"], node_name(node),
-                    conf, result.get("reason", ""), {
-                        "old_type": node.get("type", "?"), "new_type": new_type,
-                    })
-                _execute(engine, node["id"], new_type)
-                decision_record["new_type"] = new_type
-                stats["recategorized"] += 1
-            else:
-                engine.graph_service.record_dreamer_decision(
-                    "recategorize", "SKIP", node["id"], node_name(node),
-                    conf, result.get("reason", ""), {
-                        "old_type": node.get("type", "?"), "flag_reason": flag_reason,
-                    })
-                stats["skipped"] += 1
+def execute_decisions(engine, stats: dict, decisions: list) -> dict:
+    """Phase 2: Execute recategorize decisions (graph + vector writes).
 
-            stats["decisions"].append(decision_record)
+    Validates that nodes still exist before executing.
+    Clears quality flags after processing.
+    """
+    config = engine.dreamer_config
+    threshold = config.get('thresholds', {}).get('recategorize', 0.90)
+
+    for node, flag_reason, result in decisions:
+        # Exists-guard: verify node still exists
+        if not engine.graph_service.get_node(node["id"]):
+            LOGGER.info(f"RECAT SKIP (stale): {node_name(node)}")
+            continue
+
+        if not result:
             _clear_flag(engine, node["id"])
+            continue
 
-    elif dry_run and candidates:
-        details = []
-        for node, flag_reason in candidates:
-            details.append({"name": node_name(node), "type": node.get("type", "?"), "reason": flag_reason})
-            LOGGER.info(f"  [DRY] RECAT candidate: {node_name(node)} ({node.get('type')}) -- {flag_reason}")
-        stats["details"] = details
+        decision = result.get("decision", "SKIP")
+        conf = result.get("confidence", 0)
+        new_type = result.get("new_type")
 
+        decision_record = {
+            "node_name": node_name(node), "current_type": node.get("type", "?"),
+            "flag_reason": flag_reason, "decision": decision,
+            "confidence": conf, "reason": result.get("reason", ""),
+        }
+
+        if decision == "RECATEGORIZE" and conf >= threshold and new_type:
+            LOGGER.info(f"RECAT: {node_name(node)} {node.get('type')} -> {new_type} (conf={conf:.2f})")
+            engine.graph_service.record_dreamer_decision(
+                "recategorize", "EXECUTE", node["id"], node_name(node),
+                conf, result.get("reason", ""), {
+                    "old_type": node.get("type", "?"), "new_type": new_type,
+                })
+            _execute(engine, node["id"], new_type)
+            decision_record["new_type"] = new_type
+            stats["recategorized"] += 1
+        else:
+            engine.graph_service.record_dreamer_decision(
+                "recategorize", "SKIP", node["id"], node_name(node),
+                conf, result.get("reason", ""), {
+                    "old_type": node.get("type", "?"), "flag_reason": flag_reason,
+                })
+            stats["skipped"] += 1
+
+        stats["decisions"].append(decision_record)
+        _clear_flag(engine, node["id"])
+
+    return stats
+
+
+def run(engine, dry_run: bool, limit: int) -> dict:
+    """Run recategorize pass. Returns stats dict.
+
+    Convenience wrapper: discover_and_evaluate + execute_decisions.
+    """
+    if dry_run:
+        config = engine.dreamer_config
+        LOGGER.info("Pass 5: RECATEGORIZE (quality_flags)")
+
+        recat_config = config.get('recategorize', {})
+        max_recat = limit or recat_config.get('max_candidates_per_run', 10)
+
+        rows = engine.graph_service.conn.execute(
+            "SELECT id, properties FROM nodes WHERE "
+            "json_extract(properties, '$.quality_flags') IS NOT NULL"
+        ).fetchall()
+
+        candidates = []
+        for node_id, props_str in rows:
+            if len(candidates) >= max_recat:
+                break
+            props = json.loads(props_str) if props_str else {}
+            flags = props.get("quality_flags", [])
+            if "wrong_type" in flags:
+                node = engine.graph_service.get_node(node_id)
+                if node:
+                    flag_reason = props.get("quality_flag_reason", {}).get("wrong_type", "Flagged by enrichment")
+                    candidates.append((node, flag_reason))
+
+        stats = {"candidates": len(candidates), "recategorized": 0, "skipped": 0, "decisions": []}
+        if candidates:
+            details = []
+            for node, flag_reason in candidates:
+                details.append({"name": node_name(node), "type": node.get("type", "?"), "reason": flag_reason})
+                LOGGER.info(f"  [DRY] RECAT candidate: {node_name(node)} ({node.get('type')}) -- {flag_reason}")
+            stats["details"] = details
+        return stats
+
+    stats, decisions = discover_and_evaluate(engine, dry_run, limit)
+    if decisions:
+        stats = execute_decisions(engine, stats, decisions)
     return stats
 
 

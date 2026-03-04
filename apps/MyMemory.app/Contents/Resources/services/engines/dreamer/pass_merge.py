@@ -19,109 +19,152 @@ from services.engines.dreamer import skip_cache
 LOGGER = logging.getLogger(__name__)
 
 
-def run(engine, dry_run: bool, limit: int) -> dict:
-    """Run merge pass. Returns stats dict."""
+def discover_and_evaluate(engine, dry_run: bool, limit: int) -> Tuple[dict, list]:
+    """Phase 1: Discovery + cache check + LLM evaluation (graph reads + LLM).
+
+    Returns (stats, decisions) where decisions is a list of tuples:
+        (node_a, node_b, strategy, result, pair_key, hash_a, hash_b)
+    No writes happen here.
+    """
     config = engine.dreamer_config
     stats = {"candidates": 0, "merged": 0, "skipped": 0, "cached": 0, "decisions": []}
+    decisions = []
 
     merge_config = config.get('merge', {})
     if not merge_config.get('enabled', True):
-        return stats
+        return stats, decisions
 
-    LOGGER.info("Pass 2: MERGE")
+    LOGGER.info("Pass 2: MERGE (discover + evaluate)")
 
-    if dry_run:
-        candidates = _discover_candidates(engine, max_candidates=limit if limit else 0)
-    else:
-        candidates = _discover_candidates(engine, max_candidates=limit if limit else None)
-
+    candidates = _discover_candidates(engine, max_candidates=limit if limit else None)
     stats["candidates"] = len(candidates)
 
-    if not dry_run and candidates:
-        cache = skip_cache.load(config)
-        threshold = config.get('thresholds', {}).get('merge', 0.90)
+    if not candidates:
+        return stats, decisions
 
-        for node_a, node_b, strategy in candidates:
-            pair_key = skip_cache.compute_pair_key(node_a["id"], node_b["id"])
-            hash_a = skip_cache.compute_node_hash(node_a, _get_edge_count(engine, node_a["id"]))
-            hash_b = skip_cache.compute_node_hash(node_b, _get_edge_count(engine, node_b["id"]))
+    cache = skip_cache.load(config)
 
-            # Check skip-cache
-            cached = cache.get(pair_key)
-            if cached:
-                if cached.get("hash_a") == hash_a and cached.get("hash_b") == hash_b:
-                    stats["cached"] += 1
-                    continue
+    for node_a, node_b, strategy in candidates:
+        pair_key = skip_cache.compute_pair_key(node_a["id"], node_b["id"])
+        hash_a = skip_cache.compute_node_hash(node_a, _get_edge_count(engine, node_a["id"]))
+        hash_b = skip_cache.compute_node_hash(node_b, _get_edge_count(engine, node_b["id"]))
 
-            result = _evaluate(engine, node_a, node_b)
-            if not result:
+        # Check skip-cache
+        cached_entry = cache.get(pair_key)
+        if cached_entry:
+            if cached_entry.get("hash_a") == hash_a and cached_entry.get("hash_b") == hash_b:
+                stats["cached"] += 1
                 continue
 
-            decision = result.get("decision", "SKIP")
-            conf = result.get("confidence", 0)
-            reason = result.get("reason", "")
+        result = _evaluate(engine, node_a, node_b)
+        if not result:
+            continue
 
-            decision_record = {
-                "node_a": node_name(node_a), "node_b": node_name(node_b),
-                "strategy": strategy, "decision": decision,
-                "confidence": conf, "reason": reason,
-            }
+        decisions.append((node_a, node_b, strategy, result, pair_key, hash_a, hash_b))
 
-            if decision == "MERGE" and conf >= threshold:
-                # Map LLM's primary choice back to known UUIDs by name.
-                # Never trust LLM to echo UUIDs correctly.
-                llm_primary = result.get("primary_node", "")
-                name_b = node_b.get("properties", {}).get("name", "")
-                if llm_primary == name_b:
-                    primary, secondary = node_b["id"], node_a["id"]
-                else:
-                    primary, secondary = node_a["id"], node_b["id"]
-                LOGGER.info(f"MERGE: {short_id(secondary)} -> {short_id(primary)} "
-                            f"(conf={conf:.2f}, strategy={strategy})")
-                primary_node = node_a if primary == node_a["id"] else node_b
-                secondary_node = node_b if primary == node_a["id"] else node_a
-                engine.graph_service.record_dreamer_decision(
-                    "merge", "EXECUTE", primary, node_name(primary_node),
-                    conf, reason, {
-                        "node_id_secondary": secondary,
-                        "node_name_secondary": node_name(secondary_node),
-                        "strategy": strategy,
-                    })
-                _execute(engine, primary, secondary)
-                decision_record["primary"] = node_name(primary_node)
-                stats["merged"] += 1
-                cache.pop(pair_key, None)
+    return stats, decisions
+
+
+def execute_decisions(engine, stats: dict, decisions: list) -> dict:
+    """Phase 2: Execute merge decisions (graph + vector writes).
+
+    Validates that nodes still exist before executing.
+    Updates skip-cache and saves it.
+    """
+    config = engine.dreamer_config
+    threshold = config.get('thresholds', {}).get('merge', 0.90)
+    cache = skip_cache.load(config)
+
+    for node_a, node_b, strategy, result, pair_key, hash_a, hash_b in decisions:
+        # Exists-guard: verify nodes still exist
+        if not engine.graph_service.get_node(node_a["id"]) or not engine.graph_service.get_node(node_b["id"]):
+            LOGGER.info(f"MERGE SKIP (stale): {node_name(node_a)} <-> {node_name(node_b)}")
+            continue
+
+        decision = result.get("decision", "SKIP")
+        conf = result.get("confidence", 0)
+        reason = result.get("reason", "")
+
+        decision_record = {
+            "node_a": node_name(node_a), "node_b": node_name(node_b),
+            "strategy": strategy, "decision": decision,
+            "confidence": conf, "reason": reason,
+        }
+
+        if decision == "MERGE" and conf >= threshold:
+            llm_primary = result.get("primary_node", "")
+            name_b = node_b.get("properties", {}).get("name", "")
+            if llm_primary == name_b:
+                primary, secondary = node_b["id"], node_a["id"]
             else:
-                LOGGER.info(f"MERGE SKIP: {node_name(node_a)} <-> {node_name(node_b)} "
-                            f"(conf={conf:.2f})")
-                engine.graph_service.record_dreamer_decision(
-                    "merge", "SKIP", node_a["id"], node_name(node_a),
-                    conf, reason, {
-                        "node_id_secondary": node_b["id"],
-                        "node_name_secondary": node_name(node_b),
-                        "strategy": strategy,
-                    })
-                cache[pair_key] = {
-                    "hash_a": hash_a, "hash_b": hash_b,
-                    "decision": decision, "confidence": conf,
-                    "timestamp": datetime.now().isoformat(),
-                }
-                stats["skipped"] += 1
+                primary, secondary = node_a["id"], node_b["id"]
+            LOGGER.info(f"MERGE: {short_id(secondary)} -> {short_id(primary)} "
+                        f"(conf={conf:.2f}, strategy={strategy})")
+            primary_node = node_a if primary == node_a["id"] else node_b
+            secondary_node = node_b if primary == node_a["id"] else node_a
+            engine.graph_service.record_dreamer_decision(
+                "merge", "EXECUTE", primary, node_name(primary_node),
+                conf, reason, {
+                    "node_id_secondary": secondary,
+                    "node_name_secondary": node_name(secondary_node),
+                    "strategy": strategy,
+                })
+            _execute(engine, primary, secondary)
+            decision_record["primary"] = node_name(primary_node)
+            stats["merged"] += 1
+            cache.pop(pair_key, None)
+        else:
+            LOGGER.info(f"MERGE SKIP: {node_name(node_a)} <-> {node_name(node_b)} "
+                        f"(conf={conf:.2f})")
+            engine.graph_service.record_dreamer_decision(
+                "merge", "SKIP", node_a["id"], node_name(node_a),
+                conf, reason, {
+                    "node_id_secondary": node_b["id"],
+                    "node_name_secondary": node_name(node_b),
+                    "strategy": strategy,
+                })
+            cache[pair_key] = {
+                "hash_a": hash_a, "hash_b": hash_b,
+                "decision": decision, "confidence": conf,
+                "timestamp": datetime.now().isoformat(),
+            }
+            stats["skipped"] += 1
 
-            stats["decisions"].append(decision_record)
+        stats["decisions"].append(decision_record)
 
-        skip_cache.save(config, cache)
+    skip_cache.save(config, cache)
+    return stats
 
-    elif dry_run and candidates:
-        details = []
-        for node_a, node_b, strategy in candidates:
-            details.append({
-                "a": node_name(node_a), "b": node_name(node_b),
-                "type": node_a.get("type", "?"), "strategy": strategy,
-            })
-            LOGGER.info(f"  [DRY] MERGE candidate: {node_name(node_a)} <-> {node_name(node_b)} ({strategy})")
-        stats["details"] = details
 
+def run(engine, dry_run: bool, limit: int) -> dict:
+    """Run merge pass. Returns stats dict.
+
+    Convenience wrapper: discover_and_evaluate + execute_decisions.
+    """
+    config = engine.dreamer_config
+    merge_config = config.get('merge', {})
+    if not merge_config.get('enabled', True):
+        return {"candidates": 0, "merged": 0, "skipped": 0, "cached": 0, "decisions": []}
+
+    if dry_run:
+        # Dry run: just discover candidates, no evaluation
+        LOGGER.info("Pass 2: MERGE")
+        candidates = _discover_candidates(engine, max_candidates=limit if limit else 0)
+        stats = {"candidates": len(candidates), "merged": 0, "skipped": 0, "cached": 0, "decisions": []}
+        if candidates:
+            details = []
+            for node_a, node_b, strategy in candidates:
+                details.append({
+                    "a": node_name(node_a), "b": node_name(node_b),
+                    "type": node_a.get("type", "?"), "strategy": strategy,
+                })
+                LOGGER.info(f"  [DRY] MERGE candidate: {node_name(node_a)} <-> {node_name(node_b)} ({strategy})")
+            stats["details"] = details
+        return stats
+
+    stats, decisions = discover_and_evaluate(engine, dry_run, limit)
+    if decisions:
+        stats = execute_decisions(engine, stats, decisions)
     return stats
 
 

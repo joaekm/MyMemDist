@@ -278,9 +278,16 @@ if __name__ == "__main__":
     try:
         while True:
             time.sleep(5)
-            # Kolla om någon process dött
+            # Kolla om någon process dött (logga en gång, ta sedan bort ur listan)
+            still_running = []
             for svc in processes:
-                if svc["process"].poll() is not None:
-                    LOGGER.warning(f"{svc['name']} exited unexpectedly")
+                rc = svc["process"].poll()
+                if rc is None:
+                    still_running.append(svc)
+                elif rc == 0:
+                    LOGGER.info(f"{svc['name']} exited cleanly")
+                else:
+                    LOGGER.warning(f"{svc['name']} exited unexpectedly (code {rc})")
+            processes[:] = still_running
     except KeyboardInterrupt:
         stop_all(None, None)

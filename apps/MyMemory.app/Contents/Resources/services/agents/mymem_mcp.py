@@ -1575,10 +1575,12 @@ def ingest_content(
     filename: str,
     content: str,
     source: str = "mcp_ingest",
-    metadata: dict = None
+    metadata: dict = None,
+    unit_id: str = None
 ) -> str:
     """
     Skapar ett nytt dokument direkt från innehåll och ingesterar det.
+    Om unit_id anges uppdateras ett befintligt dokument istället.
 
     Perfekt för AI-genererat innehåll som mötesanteckningar, sammanfattningar,
     eller annat material som skapas i konversationen.
@@ -1586,6 +1588,7 @@ def ingest_content(
     ANVÄNDNING:
     - ingest_content("mote_2026-01-18.md", "# Mötesanteckningar\\n\\nVi diskuterade...")
     - ingest_content("sammanfattning.md", content, source="claude", metadata={"topic": "projekt"})
+    - ingest_content("rapport.md", updated_content, unit_id="550e8400-...") ← uppdaterar befintligt
 
     INNEHÅLLSFORMAT:
     - Ren markdown fungerar bra
@@ -1596,6 +1599,8 @@ def ingest_content(
         content: Dokumentets innehåll (markdown)
         source: Källmarkering för spårbarhet (default: "mcp_ingest")
         metadata: Extra metadata att inkludera i frontmatter (valfritt)
+        unit_id: UUID för befintligt dokument att uppdatera (valfritt). Om angivet skrivs
+                 befintlig Asset-fil över och Ingestion Engine triggar re-ingest automatiskt.
 
     Returnerar: Status med UUID och sökväg.
     """
@@ -1617,29 +1622,34 @@ def ingest_content(
         if ext.lower() not in valid_extensions:
             return f"❌ FEL: Endast {', '.join(valid_extensions)} stöds för innehållsingestion"
 
-        # Generera UUID och filnamn
+        # --- Uppdatering av befintligt dokument ---
+        if unit_id:
+            target_path = _find_asset_by_unit_id(unit_id)
+            if not target_path:
+                return f"❌ FEL: Inget dokument med unit_id '{unit_id}' hittades"
+
+            # Bygg innehåll med header
+            final_content = _build_content_with_header(content, source, metadata)
+
+            with open(target_path, 'w', encoding='utf-8') as f:
+                f.write(final_content)
+
+            logging.info(f"ingest_content: Uppdaterade {os.path.basename(target_path)} ({len(content)} tecken)")
+
+            return (
+                f"✅ Dokument uppdaterat!\n"
+                f"  Filnamn: {os.path.basename(target_path)}\n"
+                f"  UUID: {unit_id}\n"
+                f"  Storlek: {len(content):,} tecken\n"
+                f"  Källa: {source}\n"
+                f"  Status: Väntar på re-ingest via Ingestion Engine"
+            )
+
+        # --- Nytt dokument ---
         file_uuid = str(uuid.uuid4())
         new_filename = f"{name_part}_{file_uuid}{ext}"
 
-        # Bygg innehåll med header om det inte redan har frontmatter
-        final_content = content
-        if not content.strip().startswith('---'):
-            # Lägg till minimal header för spårbarhet
-            header_lines = [
-                "---",
-                f"source: {source}",
-                f"created_via: mcp_ingest",
-                f"created_at: {datetime.now().isoformat()}",
-            ]
-            if metadata:
-                for key, value in metadata.items():
-                    if isinstance(value, (str, int, float, bool)):
-                        header_lines.append(f"{key}: {value}")
-                    elif isinstance(value, list):
-                        header_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
-            header_lines.append("---")
-            header_lines.append("")
-            final_content = "\n".join(header_lines) + content
+        final_content = _build_content_with_header(content, source, metadata)
 
         # Säkerställ att målmappen finns
         os.makedirs(AI_GENERATED_PATH, exist_ok=True)
@@ -1664,6 +1674,62 @@ def ingest_content(
     except Exception as e:
         logging.error(f"ingest_content: Fel vid skapande av {filename}: {e}")
         return f"❌ FEL: Kunde inte skapa dokumentet: {e}"
+
+
+def _build_content_with_header(content, source, metadata):
+    """Bygg innehåll med frontmatter-header om det saknas."""
+    if content.strip().startswith('---'):
+        return content
+    header_lines = [
+        "---",
+        f"source: {source}",
+        f"created_via: mcp_ingest",
+        f"created_at: {datetime.now().isoformat()}",
+    ]
+    if metadata:
+        for key, value in metadata.items():
+            if isinstance(value, (str, int, float, bool)):
+                header_lines.append(f"{key}: {value}")
+            elif isinstance(value, list):
+                header_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+    header_lines.append("---")
+    header_lines.append("")
+    return "\n".join(header_lines) + content
+
+
+def _find_asset_by_unit_id(unit_id):
+    """Hitta befintlig Asset-fil via Lake-frontmatter."""
+    lake_path = _get_lake_path()
+    if not os.path.isdir(lake_path):
+        return None
+
+    # Sök Lake-fil med matchande UUID
+    for f in os.listdir(lake_path):
+        if unit_id in f and f.endswith('.md'):
+            full_path = os.path.join(lake_path, f)
+            try:
+                with open(full_path, 'r', encoding='utf-8') as fh:
+                    content = fh.read()
+                if not content.startswith('---'):
+                    continue
+                parts = content.split('---', 2)
+                if len(parts) < 3:
+                    continue
+                import yaml
+                meta = yaml.safe_load(parts[1]) or {}
+                original_filename = meta.get('original_filename', '')
+                if not original_filename:
+                    continue
+
+                # Sök Asset-fil i alla Asset-undermappar
+                asset_store = os.path.expanduser(PATHS.get('asset_store', '~/MyMemory/Assets'))
+                for dirpath, _, filenames in os.walk(asset_store):
+                    if original_filename in filenames:
+                        return os.path.join(dirpath, original_filename)
+            except Exception:
+                continue
+
+    return None
 
 
 # --- TOOL 11-14: MEETING TRANSCRIBER ---

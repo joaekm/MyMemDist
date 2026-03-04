@@ -444,18 +444,12 @@ class Enrichment:
     # MAIN CYCLE
     # =====================================================================
 
-    def run_enrichment_cycle(self, dry_run: bool = False) -> Dict:
-        """
-        Main 2-step enrichment cycle (OBJEKT-107).
+    def prepare_cycle(self) -> Dict:
+        """Phase 1: Gather candidates and build prompt (graph reads only).
 
-        Step 1: LLM enrichment (properties, edges, Lake metadata, quality_flags)
-        Step 2: Write enrichments + quality_flags to graph/Lake/vector
+        Returns dict with 'prompt', 'prompt_stats' keys, or {"status": "no_candidates"/"prompt_build_failed"}.
+        Reads graph (can use read-only connection) and vector (via _get_chunks_for_entities).
         """
-        model_key = ENRICHMENT_CONFIG.get('model', 'fast')
-        model_id = self.llm_service.models.get(model_key, self.llm_service.models['fast'])
-        max_output_tokens = ENRICHMENT_CONFIG.get('max_output_tokens', 32768)
-
-        # --- Data gathering ---
         LOGGER.info("Enrichment cycle: gathering candidates...")
         all_nodes = self._get_candidate_nodes()
 
@@ -465,7 +459,6 @@ class Enrichment:
 
         LOGGER.info(f"Enrichment cycle: {len(all_nodes)} candidate nodes")
 
-        # --- Step 1: Build enrich prompt ---
         prompt, prompt_stats, selected_entities, edges, neighbor_summaries = build_enrich_prompt(self, all_nodes)
 
         if not prompt:
@@ -479,10 +472,18 @@ class Enrichment:
                      f"{chunks_str}, {prompt_stats['total_tokens']} tokens "
                      f"({prompt_stats['utilization']:.0%} of budget)")
 
-        if dry_run:
-            return {"status": "dry_run", "prompt_stats": prompt_stats}
+        return {"status": "ready", "prompt": prompt, "prompt_stats": prompt_stats}
 
-        # --- Step 1: LLM call ENRICH ---
+    def call_enrich_llm(self, prompt: str, prompt_stats: Dict) -> Dict:
+        """Phase 2: LLM call (no DB access needed).
+
+        Returns dict with 'enrich_result', 'usage', 'prompt_stats' keys,
+        or {"status": "enrich_llm_failed", ...}.
+        """
+        model_key = ENRICHMENT_CONFIG.get('model', 'fast')
+        model_id = self.llm_service.models.get(model_key, self.llm_service.models['fast'])
+        max_output_tokens = ENRICHMENT_CONFIG.get('max_output_tokens', 32768)
+
         LOGGER.info(f"LLM call: ENRICH (model: {model_id})...")
         terminal_status("enrichment", "ENRICH LLM call", "processing")
         self.llm_service.reset_token_usage()
@@ -498,22 +499,25 @@ class Enrichment:
         n_lake = len(enrich_result.get("lake_updates", []))
         LOGGER.info(f"Enrich result: {n_nodes} nodes, {n_edges} edges, {n_lake} lake")
 
-        # --- Step 2: Write enrich ---
-        LOGGER.info("Step 2: Writing enrichments...")
+        return {
+            "status": "ready",
+            "enrich_result": enrich_result,
+            "usage": total_usage,
+            "prompt_stats": prompt_stats,
+        }
+
+    def write_cycle_results(self, enrich_result: Dict) -> Dict:
+        """Phase 3: Write enrichments to graph/vector/Lake (requires exclusive locks).
+
+        Short duration (~1-3s). Requires self.graph_service (rw) and self.vector_service.
+        Returns summary dict.
+        """
+        LOGGER.info("Writing enrichments...")
         terminal_status("enrichment", "Writing enrichments", "processing")
         enrich_stats = execute_enrich_writes(self, enrich_result)
 
-        # --- Step 2b: Write quality_flags (OBJEKT-107) ---
         flags_written = write_quality_flags(self, enrich_result)
         enrich_stats["quality_flags"] = flags_written
-
-        # --- Summary ---
-        summary = {
-            "status": "completed",
-            "enrich": enrich_stats,
-            "prompt_stats": prompt_stats,
-            "usage": total_usage,
-        }
 
         summary_str = (f"Enrichment cycle complete: "
                         f"{enrich_stats.get('nodes_updated', 0)} enriched, "
@@ -521,7 +525,46 @@ class Enrichment:
         LOGGER.info(summary_str)
         terminal_status("enrichment", "Enrichment cycle", "done", detail=summary_str)
 
-        return summary
+        return enrich_stats
+
+    def run_enrichment_cycle(self, dry_run: bool = False) -> Dict:
+        """
+        Main 2-step enrichment cycle (OBJEKT-107).
+
+        Convenience wrapper that runs all three phases sequentially.
+        Used by tests, dry-run, and rebuild (where caller holds locks).
+
+        Step 1: LLM enrichment (properties, edges, Lake metadata, quality_flags)
+        Step 2: Write enrichments + quality_flags to graph/Lake/vector
+        """
+        # Phase 1: Prepare
+        prepare_result = self.prepare_cycle()
+        if prepare_result.get("status") != "ready":
+            return prepare_result
+
+        prompt = prepare_result["prompt"]
+        prompt_stats = prepare_result["prompt_stats"]
+
+        if dry_run:
+            return {"status": "dry_run", "prompt_stats": prompt_stats}
+
+        # Phase 2: LLM call
+        llm_result = self.call_enrich_llm(prompt, prompt_stats)
+        if llm_result.get("status") != "ready":
+            return llm_result
+
+        enrich_result = llm_result["enrich_result"]
+        total_usage = llm_result["usage"]
+
+        # Phase 3: Write
+        enrich_stats = self.write_cycle_results(enrich_result)
+
+        return {
+            "status": "completed",
+            "enrich": enrich_stats,
+            "prompt_stats": prompt_stats,
+            "usage": total_usage,
+        }
 
     # =====================================================================
     # HELPER METHODS

@@ -6,7 +6,6 @@ text extraction -> entity extraction -> resolve -> critic -> post-process -> wri
 """
 
 import copy
-import datetime
 import json
 import logging
 import os
@@ -30,7 +29,7 @@ from services.engines.ingestion.entity_resolver import resolve_entities
 from services.engines.ingestion.critic_filter import critic_filter_resolved
 from services.engines.ingestion.source_profile import get_source_profile, apply_source_profile
 from services.engines.ingestion.edge_postprocessor import post_process_edges
-from services.engines.ingestion.content_date import extract_content_date
+from services.utils.date_service import get_content_timestamp
 from services.engines.ingestion.writers import (
     write_lake, write_graph, write_vector, clean_before_reingest,
 )
@@ -141,26 +140,30 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
     LOGGER.info(f"{'Re-processing' if is_reingest else 'Processing'}: {filename}")
     terminal_status("ingestion", filename, "processing")
 
-    def _do_process(vector_service=None):
-        """Inner processing logic."""
+    def _prepare(vector_service=None):
+        """Phase 1: Extract text, entities, resolve — no exclusive locks needed.
+
+        Returns all data needed for writing, or None if document should be skipped.
+        For _lock_held (rebuild) scenario, also handles re-ingest cleanup.
+        """
         # Reset token counter for per-document tracking
         llm_svc = _shared._LLM_SERVICE
         if llm_svc:
             llm_svc.reset_token_usage()
 
-        # 0. Clean stale data before re-ingestion
-        if is_reingest:
+        # 0. Clean stale data before re-ingestion (needs locks if held by caller)
+        if is_reingest and _lock_held:
             terminal_status("ingestion", filename, "re-ingest cleanup")
             clean_before_reingest(unit_id, filename, lake_file, vector_service=vector_service)
 
-        # 1. Extract text (via text_extractor)
+        # 1. Extract text (via text_extractor) — no DB dependency
         raw_text = extract_text(filepath)
 
         if not raw_text or len(raw_text) < 10:
             LOGGER.debug(f"File {filename} appears incomplete ({len(raw_text) if raw_text else 0} chars). Waiting for on_modified.")
             with PROCESS_LOCK:
                 PROCESSED_FILES.discard(filename)
-            return
+            return None
 
         # 2. Determine source type (schema-driven via processing_policy.source_mappings)
         validator = _get_schema_validator()
@@ -176,12 +179,13 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
         profile = get_source_profile(source_type)
         LOGGER.info(f"Source profile: {source_type} — create={profile['allow_create']}, edges={profile['allow_edges']}, skip_critic={profile['skip_critic']}")
 
-        # 3. Extract entities via MCP
+        # 3. Extract entities via MCP — LLM call, no DB dependency
         entity_data = extract_entities_mcp(raw_text, source_hint=source_type)
         nodes = entity_data.get('nodes', [])
         edges = entity_data.get('edges', [])
 
         # 4. Resolve ALLA noder mot graf FÖRST (edges behöver alla för UUID-lookup)
+        # Uses graph reads — safe without exclusive lock (idempotent LINK/CREATE)
         ingestion_payload = resolve_entities(nodes, edges, source_type, filename)
 
         # 4b. Apply source type profile (filter CREATE/edges based on profile)
@@ -218,8 +222,37 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
 
         _shared._last_semantic_metadata = copy.deepcopy(semantic_metadata) if semantic_metadata else {}
 
-        # 7. Write to Graph
-        timestamp_content = extract_content_date(raw_text, filename)
+        # 7. Timestamps — create once, use everywhere
+        timestamp_ingestion, timestamp_content = get_content_timestamp(raw_text, filename)
+
+        return {
+            "raw_text": raw_text,
+            "source_type": source_type,
+            "profile": profile,
+            "ingestion_payload": ingestion_payload,
+            "semantic_metadata": semantic_metadata,
+            "timestamp_ingestion": timestamp_ingestion,
+            "timestamp_content": timestamp_content,
+        }
+
+    def _write(prepared, vector_service=None):
+        """Phase 2: Write to Graph, Vector, Lake — requires exclusive locks.
+
+        Short duration (~2-5s), only DB writes.
+        """
+        raw_text = prepared["raw_text"]
+        source_type = prepared["source_type"]
+        ingestion_payload = prepared["ingestion_payload"]
+        semantic_metadata = prepared["semantic_metadata"]
+        timestamp_ingestion = prepared["timestamp_ingestion"]
+        timestamp_content = prepared["timestamp_content"]
+
+        # 0. Clean stale data before re-ingestion (realtime — needs exclusive lock)
+        if is_reingest and not _lock_held:
+            terminal_status("ingestion", filename, "re-ingest cleanup")
+            clean_before_reingest(unit_id, filename, lake_file, vector_service=vector_service)
+
+        # 8. Write to Graph
         nodes_written, edges_written = write_graph(
             unit_id, filename, ingestion_payload,
             source_type=source_type,
@@ -227,15 +260,15 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
             vector_service=vector_service
         )
 
-        # 7b. Update Enrichment daemon counter (OBJEKT-76)
+        # 8b. Update Enrichment daemon counter (OBJEKT-76)
         _increment_enrichment_node_counter(nodes_written)
 
-        # 8. Write to Vector
-        timestamp_ingestion = datetime.datetime.now().isoformat()
+        # 9. Write to Vector
         write_vector(unit_id, filename, raw_text, source_type, semantic_metadata, timestamp_ingestion, vector_service=vector_service)
 
-        # 9. Write to Lake (SIST - fungerar som "commit" att allt lyckades)
-        write_lake(unit_id, filename, raw_text, source_type, semantic_metadata, ingestion_payload)
+        # 10. Write to Lake (SIST - fungerar som "commit" att allt lyckades)
+        write_lake(unit_id, filename, raw_text, source_type, semantic_metadata, ingestion_payload,
+                   timestamp_ingestion=timestamp_ingestion, timestamp_content=timestamp_content)
 
         # Done - log token usage and terminal
         action = "Re-ingested" if is_reingest else "Completed"
@@ -253,14 +286,18 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
 
     try:
         if _lock_held:
-            # Caller holds locks (rebuild scenario)
-            _do_process()
+            # Caller holds locks (rebuild scenario) — run both phases inline
+            prepared = _prepare()
+            if prepared:
+                _write(prepared)
         else:
-            # Acquire locks for this document (realtime scenario)
+            # Realtime scenario: prepare without exclusive locks, then write briefly
             from services.utils.vector_service import vector_scope
-            with resource_lock("graph", exclusive=True):
-                with vector_scope(exclusive=True) as vs:
-                    _do_process(vector_service=vs)
+            prepared = _prepare()
+            if prepared:
+                with resource_lock("graph", exclusive=True):
+                    with vector_scope(exclusive=True) as vs:
+                        _write(prepared, vector_service=vs)
 
     except Exception as e:
         LOGGER.error(f"HARDFAIL {filename}: {e}")

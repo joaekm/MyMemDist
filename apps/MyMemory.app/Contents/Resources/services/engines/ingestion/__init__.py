@@ -28,7 +28,6 @@ from services.engines.ingestion.source_profile import (
     apply_source_profile,
 )
 from services.engines.ingestion.edge_postprocessor import post_process_edges
-from services.engines.ingestion.content_date import extract_content_date
 
 # Module-level access to mutable shared state (rebuild_graph.py redirects paths here)
 from services.engines.ingestion import _shared
@@ -57,5 +56,4 @@ __all__ = [
     'get_source_profile',
     'apply_source_profile',
     'post_process_edges',
-    'extract_content_date',
 ]
