@@ -1,7 +1,7 @@
 {
-  "version": "0.12.4",
+  "version": "0.12.5",
   "date": "2026-03-04",
-  "description": "# Release Notes ## Nytt - **Dokumentidentitet vid re-drop** — Droppar du samma fil igen känner systemet igen den. En alert frågar: \"Uppdatera\", \"Lägg till som nytt\" eller \"Hoppa över\". Uppdatering bevarar dokumentets UUID och lärandehistorik. - **Automatisk config-upgrade** — Vid appuppdatering migreras din config till ny struktur utan att API-nycklar, kanaler eller andra inställningar går förlorade. - **Snabbare MCP-verktyg** — LLM-anrop körs nu utanför exklusiva databaslås, vilket eliminerar timeout vid pågående ingestion. ## Buggfixar - **Fix: Rode Collector skapade dubletter** vid ändrat volymnamn på trådlös mikrofon. - **Fix: Kronologisk sortering** av relationskontext i kunskapsgrafen (sorterades tidigare i ingestion-ordning). - **Fix: Transcriber-tuning** — förbättrad overlap-dedup och normaliseringsinställningar. - **Fix: Tyst logg** — valfria tjänster som avslutas rent spammar inte längre loggen. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.4/MyMemory-Installer.dmg",
+  "description": "# Release Notes ## Buggfixar - **Fix: Ingestion förlorade filer vid DuckDB-låskonflikt** — När en annan process (t.ex. Dreamer) höll databaslåset gav Ingestion upp permanent (HARDFAIL). Filerna processades aldrig om. Nu retryar Ingestion upp till 3 gånger med backoff och loggar vilken process som blockerar. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.5/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

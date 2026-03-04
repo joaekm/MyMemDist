@@ -9,6 +9,8 @@ import copy
 import json
 import logging
 import os
+import re
+import time
 from typing import List
 
 from services.processors.text_extractor import extract_text
@@ -92,6 +94,36 @@ def reset_enrichment_counter():
 
         except (OSError, json.JSONDecodeError) as e:
             LOGGER.warning(f"Could not reset Enrichment state: {e}")
+
+
+_DUCKDB_LOCK_PATTERN = re.compile(
+    r'Could not set lock on file.*?held in (.+?) \(PID (\d+)\)'
+)
+
+_LOCK_RETRY_ATTEMPTS = 3
+_LOCK_RETRY_BACKOFF = [5, 10, 20]  # seconds
+
+
+def _write_with_retry(write_fn, prepared, filename, vector_scope):
+    """Write phase with retry on DuckDB lock contention (#121)."""
+    for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        try:
+            with resource_lock("graph", exclusive=True):
+                with vector_scope(exclusive=True) as vs:
+                    return write_fn(prepared, vector_service=vs)
+        except Exception as e:
+            match = _DUCKDB_LOCK_PATTERN.search(str(e))
+            if match and attempt < _LOCK_RETRY_ATTEMPTS - 1:
+                blocker_path, blocker_pid = match.group(1), match.group(2)
+                blocker_name = os.path.basename(blocker_path)
+                wait = _LOCK_RETRY_BACKOFF[attempt]
+                LOGGER.warning(
+                    f"GraphDB locked by {blocker_name} (PID {blocker_pid}), "
+                    f"retrying {filename} in {wait}s ({attempt + 1}/{_LOCK_RETRY_ATTEMPTS})"
+                )
+                time.sleep(wait)
+            else:
+                raise
 
 
 def _needs_reingest(filepath: str, lake_file: str) -> bool:
@@ -295,9 +327,7 @@ def process_document(filepath: str, filename: str, _lock_held: bool = False):
             from services.utils.vector_service import vector_scope
             prepared = _prepare()
             if prepared:
-                with resource_lock("graph", exclusive=True):
-                    with vector_scope(exclusive=True) as vs:
-                        _write(prepared, vector_service=vs)
+                _write_with_retry(_write, prepared, filename, vector_scope)
 
     except Exception as e:
         LOGGER.error(f"HARDFAIL {filename}: {e}")
