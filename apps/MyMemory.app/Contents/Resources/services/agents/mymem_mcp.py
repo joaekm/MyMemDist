@@ -1211,6 +1211,7 @@ def parse_relative_date(expression: str) -> str:
 
     Returnerar JSON med start_date och end_date i YYYY-MM-DD format.
     """
+    _check_active_index()
     today = _system_date_override or datetime.now().date()
     result = {
         "today": today.isoformat(),

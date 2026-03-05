@@ -1,7 +1,7 @@
 {
-  "version": "0.12.7",
+  "version": "0.12.8",
   "date": "2026-03-05",
-  "description": "# Release Notes ## Automatisk index-synk mellan menubar och Claude Desktop Byt index i menubar-appen — Claude Desktop följer med automatiskt. Ingen manuell `switch_index()` behövs längre. ### Nytt - **Pekfil-mekanism:** Menubar skriver aktivt index till en pekfil, MCP-servern läser den vid varje anrop och laddar om sökvägar + datum (`system_date_override`) vid ändring - Demo-index (t.ex. Midgård) fungerar nu sömlöst: byt index i menubar → `parse_relative_date(\"idag\")` returnerar rätt datum direkt ### Borttaget - MCP-verktygen `switch_index()` och `get_current_index()` — ersatta av pekfil-mekanismen ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.7/MyMemory-Installer.dmg",
+  "description": "# Release Notes **Buggfix:** - parse_relative_date ignorerade aktivt index — returnerade alltid dagens datum istället för indexets system_date_override vid byte till annat index (t.ex. Gandalf) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.8/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
