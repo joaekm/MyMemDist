@@ -1,7 +1,7 @@
 {
-  "version": "0.12.6",
+  "version": "0.12.7",
   "date": "2026-03-05",
-  "description": "# Release Notes ## Index-väljare och demo-stöd - **Menubar index-väljare** — Byt mellan index (t.ex. Standard och Gandalf) via Settings → Allmänt. Valet sparas mellan omstarter. Tjänster startas om automatiskt med rätt config. - **Index-namn i menyraden** — Visar aktivt index i headern (t.ex. \"v0.12.6 · Gandalf\") när ett icke-standard-index är valt. - **switch_index stöder vektor** — MCP-verktyget switch_index byter nu även VectorDB-sökväg (tidigare bara graf och lake). - **system_date_override** — Ny config-nyckel för demo-index med framtida/historiska datum. Styr parse_relative_date utan att påverka produktionsindex. - **MYMEMORY_CONFIG env var** — Alla tjänster startas med rätt config-sökväg via miljövariabel. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.6/MyMemory-Installer.dmg",
+  "description": "# Release Notes ## Automatisk index-synk mellan menubar och Claude Desktop Byt index i menubar-appen — Claude Desktop följer med automatiskt. Ingen manuell `switch_index()` behövs längre. ### Nytt - **Pekfil-mekanism:** Menubar skriver aktivt index till en pekfil, MCP-servern läser den vid varje anrop och laddar om sökvägar + datum (`system_date_override`) vid ändring - Demo-index (t.ex. Midgård) fungerar nu sömlöst: byt index i menubar → `parse_relative_date(\"idag\")` returnerar rätt datum direkt ### Borttaget - MCP-verktygen `switch_index()` och `get_current_index()` — ersatta av pekfil-mekanismen ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.7/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

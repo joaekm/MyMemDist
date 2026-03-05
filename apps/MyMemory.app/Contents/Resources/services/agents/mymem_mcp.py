@@ -83,7 +83,7 @@ LAKE_PATH = os.path.expanduser(PATHS.get('lake_dir', '~/MyMemory/Lake'))
 VECTOR_PATH = os.path.expanduser(PATHS.get('vector_db', '~/MyMemory/Index/VectorDB'))
 AI_GENERATED_PATH = os.path.expanduser(PATHS.get('asset_ai_generated', '~/MyMemory/Assets/AIGenerated'))
 
-# Aktuella sökvägar (kan bytas runtime)
+# Aktuella sökvägar (kan bytas runtime via pekfil från menubar-appen)
 _current_paths = {
     "graph": GRAPH_PATH,
     "lake": LAKE_PATH,
@@ -91,13 +91,83 @@ _current_paths = {
     "label": "default"
 }
 
+# Pekfil: menubar-appen skriver hit, MCP läser vid varje tool-anrop
+_ACTIVE_INDEX_FILE = os.path.expanduser(
+    "~/Library/Application Support/MyMemory/.active_index"
+)
+_active_config_path = None  # senast lästa config-sökväg från pekfilen
+
+
+def _check_active_index():
+    """Läs pekfil och ladda om index vid ändring. Billig no-op om oförändrad."""
+    global _active_config_path
+    try:
+        new_path = open(_ACTIVE_INDEX_FILE).read().strip()
+    except (FileNotFoundError, PermissionError):
+        return
+    if not new_path or new_path == _active_config_path:
+        return
+    if not os.path.isfile(new_path):
+        logging.warning(f"MCP: .active_index pekar på saknad fil: {new_path}")
+        return
+    _active_config_path = new_path
+    _reload_index(new_path)
+
+
+def _reload_index(config_path: str):
+    """Ladda om sökvägar och datum-override från en annan config-fil."""
+    global _current_paths, _system_date_override
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+    except Exception as e:
+        logging.error(f"MCP: Kunde inte läsa config {config_path}: {e}")
+        return
+
+    paths = cfg.get('paths', {})
+    _current_paths["graph"] = os.path.expanduser(
+        paths.get('graph_db', '~/MyMemory/Index/GraphDB'))
+    _current_paths["lake"] = os.path.expanduser(
+        paths.get('lake_dir', '~/MyMemory/Lake'))
+    _current_paths["vector"] = os.path.expanduser(
+        paths.get('vector_db', '~/MyMemory/Index/VectorDB'))
+
+    # Härleda label från config-sökväg: .../MyMemory_Midgard/Settings/... → Midgard
+    for part in config_path.split('/'):
+        if part.startswith('MyMemory'):
+            _current_paths["label"] = (
+                part.split('_', 1)[1] if '_' in part else "default"
+            )
+            break
+    else:
+        _current_paths["label"] = "custom"
+
+    # Uppdatera system_date_override
+    raw = cfg.get('validation', {}).get('system_date_override')
+    if raw:
+        try:
+            _system_date_override = datetime.fromisoformat(str(raw)).date()
+        except (ValueError, TypeError):
+            _system_date_override = None
+    else:
+        _system_date_override = None
+
+    _lake_cache.invalidate()
+    logging.info(
+        f"MCP: Bytte till index '{_current_paths['label']}' via .active_index"
+    )
+
+
 def _get_graph_path():
+    _check_active_index()
     return _current_paths["graph"]
 
 def _get_lake_path():
+    _check_active_index()
     return _current_paths["lake"]
 
 def _get_vector_path():
+    _check_active_index()
     return _current_paths["vector"]
 
 # Search limits och tröskelvärden från config
@@ -227,80 +297,6 @@ def _stop_transcriber_process():
             logging.error(f"Error stopping transcriber: {e}")
         finally:
             _transcriber_process = None
-
-# --- TOOL 0: INDEX SWITCHING ---
-
-@mcp.tool()
-def switch_index(backup_path: str = None) -> str:
-    """
-    Byt vilket index som söks – för att jämföra backup med nuvarande.
-
-    ANVÄNDNING:
-    - switch_index("/Users/jekman/MyMemory_backup_20260117_2100") → Byt till backup
-    - switch_index() → Återgå till default
-
-    Efter byte påverkas ALLA sökverktyg (graf, vektor, lake).
-    Perfekt för kvalitetsjämförelser före/efter rebuild.
-
-    Args:
-        backup_path: Sökväg till MyMemory-backup (eller None för att återställa default)
-    """
-    global _current_paths
-
-    if backup_path is None:
-        # Återställ till default
-        _current_paths["graph"] = GRAPH_PATH
-        _current_paths["lake"] = LAKE_PATH
-        _current_paths["vector"] = VECTOR_PATH
-        _current_paths["label"] = "default"
-        _lake_cache.invalidate()
-        return f"✅ Återställt till DEFAULT index:\n  Graf: {GRAPH_PATH}\n  Lake: {LAKE_PATH}\n  Vektor: {VECTOR_PATH}"
-
-    # Expandera och validera sökvägen
-    backup_path = os.path.expanduser(backup_path)
-
-    if not os.path.exists(backup_path):
-        return f"❌ Sökvägen finns inte: {backup_path}"
-
-    # Sök efter index-mappar i backup
-    graph_path = os.path.join(backup_path, "Index", "GraphDB")
-    lake_path = os.path.join(backup_path, "Lake")
-    vector_path = os.path.join(backup_path, "Index", "VectorDB")
-
-    missing = []
-    if not os.path.exists(graph_path):
-        missing.append(f"Graf: {graph_path}")
-    if not os.path.exists(lake_path):
-        missing.append(f"Lake: {lake_path}")
-    if not os.path.exists(vector_path):
-        missing.append(f"Vektor: {vector_path}")
-
-    if missing:
-        return f"❌ Backup saknar komponenter:\n  " + "\n  ".join(missing)
-
-    # Byt till backup
-    _current_paths["graph"] = graph_path
-    _current_paths["lake"] = lake_path
-    _current_paths["vector"] = vector_path
-    _current_paths["label"] = os.path.basename(backup_path)
-    _lake_cache.invalidate()
-
-    return (
-        f"✅ Bytte till index ({_current_paths['label']}):\n"
-        f"  Graf: {graph_path}\n"
-        f"  Lake: {lake_path}\n"
-        f"  Vektor: {vector_path}\n"
-        f"\nAlla sökverktyg pekar nu på detta index."
-    )
-
-
-@mcp.tool()
-def get_current_index() -> str:
-    """
-    Visa vilket index som är aktivt just nu.
-    """
-    return f"Aktivt index: {_current_paths['label']}\n  Graf: {_current_paths['graph']}\n  Lake: {_current_paths['lake']}\n  Vektor: {_current_paths['vector']}"
-
 
 # --- HELPERS ---
 
