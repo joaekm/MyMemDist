@@ -143,7 +143,7 @@ dreamer:
   daemon:
     enabled: true
     node_threshold: 15
-    max_hours_between_runs: 24
+    run_interval_hours: 12              # Tidsfallback — kör minst var 12:e timme
     poll_interval_seconds: 300
     state_file: "~/MyMemory/Index/.dreamer_state.json"
 
@@ -185,6 +185,7 @@ collectors:
 # Validation
 validation:
   min_year: 2015
+  system_date_override: null  # ISO-datum, t.ex. "7050-03-22". Används av parse_relative_date. null = datetime.now()
   entity_extraction_max_attempts: 7
 
 # --- FILTYPER FÖR SORTERING ---

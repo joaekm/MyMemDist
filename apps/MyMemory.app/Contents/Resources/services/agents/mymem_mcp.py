@@ -61,6 +61,15 @@ except FileNotFoundError as e:
 PATHS = CONFIG.get('paths', {})
 SEARCH_CONFIG = CONFIG.get('search', {})
 
+# System date override (för demo-index med fiktiva datum)
+_system_date_override = None
+_raw_date_override = CONFIG.get('validation', {}).get('system_date_override')
+if _raw_date_override:
+    try:
+        _system_date_override = datetime.fromisoformat(str(_raw_date_override)).date()
+    except (ValueError, TypeError):
+        pass
+
 _SCHEMA_VALIDATOR = None
 
 def _get_schema_validator() -> SchemaValidator:
@@ -87,6 +96,9 @@ def _get_graph_path():
 
 def _get_lake_path():
     return _current_paths["lake"]
+
+def _get_vector_path():
+    return _current_paths["vector"]
 
 # Search limits och tröskelvärden från config
 GRAPH_SEARCH_LIMIT = SEARCH_CONFIG.get('graph_limit', 15)
@@ -274,11 +286,11 @@ def switch_index(backup_path: str = None) -> str:
     _lake_cache.invalidate()
 
     return (
-        f"✅ Bytte till BACKUP index ({_current_paths['label']}):\n"
+        f"✅ Bytte till index ({_current_paths['label']}):\n"
         f"  Graf: {graph_path}\n"
         f"  Lake: {lake_path}\n"
-        f"  ⚠️ Vektor: Använder fortfarande default (singleton-begränsning)\n"
-        f"\nAnvänd search_graph_nodes och get_graph_statistics för jämförelser."
+        f"  Vektor: {vector_path}\n"
+        f"\nAlla sökverktyg pekar nu på detta index."
     )
 
 
@@ -469,7 +481,7 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
         # Vektor-fallback: grafens ILIKE kan approximeras via semantisk sökning
         fallback_msg = "Grafen är upptagen (ingestion/dreamer pågår).\nFörsöker vektor-sökning som fallback..."
         try:
-            with vector_scope(exclusive=False, timeout=10.0) as vs:
+            with vector_scope(exclusive=False, timeout=10.0, db_path=_get_vector_path()) as vs:
                 results = vs.search(query_text=query, limit=GRAPH_SEARCH_LIMIT)
             if results:
                 lines = [f"=== VEKTOR-FALLBACK ({len(results)} träffar, graf upptagen) ==="]
@@ -533,7 +545,7 @@ def query_vector_memory(query_text: str, n_results: int = 5, node_type: str = No
                 return f"Ogiltig node_type: '{node_type}'. Giltiga: {', '.join(sorted(valid_types))}"
             where_filter = {"$and": [{"type": node_type}, {"source": "graph_node"}]}
 
-        with vector_scope(exclusive=False, timeout=10.0) as vs:
+        with vector_scope(exclusive=False, timeout=10.0, db_path=_get_vector_path()) as vs:
             results = vs.search(query_text=query_text, limit=n_results, where=where_filter)
             model_name = vs.model_name
 
@@ -1110,7 +1122,7 @@ def get_system_health() -> str:
 
     # Vektor
     try:
-        with vector_scope(exclusive=False, timeout=10.0) as vs:
+        with vector_scope(exclusive=False, timeout=10.0, db_path=_get_vector_path()) as vs:
             count = vs.count()
         output.append(f"\nVektor: Tillgänglig")
         output.append(f"  Vektorer: {count}")
@@ -1203,7 +1215,7 @@ def parse_relative_date(expression: str) -> str:
 
     Returnerar JSON med start_date och end_date i YYYY-MM-DD format.
     """
-    today = datetime.now().date()
+    today = _system_date_override or datetime.now().date()
     result = {
         "today": today.isoformat(),
         "expression": expression,

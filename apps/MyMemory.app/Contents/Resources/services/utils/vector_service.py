@@ -58,16 +58,21 @@ class VectorService:
     _instances = {}
     _lock = threading.Lock()
 
-    def __init__(self, config_path: str = None, collection_name: str = "knowledge_base"):
+    def __init__(self, config_path: str = None, collection_name: str = "knowledge_base", db_path: str = None):
         self.config = self._load_config(config_path)
-        # Robust path lookup: Stödjer både 'chroma_db' och 'vector_db'
-        paths = self.config.get('paths', {})
-        db_path_raw = paths.get('chroma_db') or paths.get('vector_db')
 
-        if not db_path_raw:
-             raise KeyError("Config 'paths' saknar 'chroma_db' eller 'vector_db'")
+        if db_path:
+            # Explicit sökväg (t.ex. från switch_index)
+            self.db_path = os.path.expanduser(db_path)
+        else:
+            # Robust path lookup: Stödjer både 'chroma_db' och 'vector_db'
+            paths = self.config.get('paths', {})
+            db_path_raw = paths.get('chroma_db') or paths.get('vector_db')
 
-        self.db_path = os.path.expanduser(db_path_raw)
+            if not db_path_raw:
+                 raise KeyError("Config 'paths' saknar 'chroma_db' eller 'vector_db'")
+
+            self.db_path = os.path.expanduser(db_path_raw)
         self.collection_name = collection_name
 
         # Init Chroma
@@ -223,7 +228,8 @@ def get_vector_service(collection_name: str = "knowledge_base"):
 
 @contextmanager
 def vector_scope(collection_name: str = "knowledge_base",
-                 exclusive: bool = True, timeout: float = None):
+                 exclusive: bool = True, timeout: float = None,
+                 db_path: str = None):
     """
     Ephemeral VectorDB access: acquire lock, open client, yield, close, release.
 
@@ -235,6 +241,7 @@ def vector_scope(collection_name: str = "knowledge_base",
         collection_name: ChromaDB collection name
         exclusive: True för skrivoperationer, False för enbart läsning
         timeout: Lock timeout i sekunder (None = vänta oändligt)
+        db_path: Explicit sökväg till VectorDB (t.ex. från switch_index). None = config default.
 
     Usage:
         with vector_scope(exclusive=True) as vs:
@@ -250,7 +257,7 @@ def vector_scope(collection_name: str = "knowledge_base",
         with VectorService._lock:
             VectorService._instances.pop(collection_name, None)
 
-        vs = VectorService(collection_name=collection_name)
+        vs = VectorService(collection_name=collection_name, db_path=db_path)
         try:
             yield vs
         finally:
