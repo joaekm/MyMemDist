@@ -1,7 +1,7 @@
 {
-  "version": "0.12.8",
+  "version": "0.12.9",
   "date": "2026-03-05",
-  "description": "# Release Notes **Buggfix:** - parse_relative_date ignorerade aktivt index — returnerade alltid dagens datum istället för indexets system_date_override vid byte till annat index (t.ex. Gandalf) ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.8/MyMemory-Installer.dmg",
+  "description": "# Release Notes **Buggfix:** - Index-byte via pekfil läste fel config-nycklar för Lake och VectorDB — `lake_dir`/`vector_db` istället för `lake_store`/`chroma_db`. Resulterade i att graf byttes korrekt men Lake och Vektor fortsatte läsa från Standard-indexet. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.9/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

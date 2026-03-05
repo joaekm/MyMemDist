@@ -79,8 +79,8 @@ def _get_schema_validator() -> SchemaValidator:
     return _SCHEMA_VALIDATOR
 
 GRAPH_PATH = os.path.expanduser(PATHS.get('graph_db', '~/MyMemory/Index/GraphDB'))
-LAKE_PATH = os.path.expanduser(PATHS.get('lake_dir', '~/MyMemory/Lake'))
-VECTOR_PATH = os.path.expanduser(PATHS.get('vector_db', '~/MyMemory/Index/VectorDB'))
+LAKE_PATH = os.path.expanduser(PATHS.get('lake_store', '~/MyMemory/Lake'))
+VECTOR_PATH = os.path.expanduser(PATHS.get('chroma_db', '~/MyMemory/Index/VectorDB'))
 AI_GENERATED_PATH = os.path.expanduser(PATHS.get('asset_ai_generated', '~/MyMemory/Assets/AIGenerated'))
 
 # Aktuella sökvägar (kan bytas runtime via pekfil från menubar-appen)
@@ -128,9 +128,9 @@ def _reload_index(config_path: str):
     _current_paths["graph"] = os.path.expanduser(
         paths.get('graph_db', '~/MyMemory/Index/GraphDB'))
     _current_paths["lake"] = os.path.expanduser(
-        paths.get('lake_dir', '~/MyMemory/Lake'))
+        paths.get('lake_store', '~/MyMemory/Lake'))
     _current_paths["vector"] = os.path.expanduser(
-        paths.get('vector_db', '~/MyMemory/Index/VectorDB'))
+        paths.get('chroma_db', '~/MyMemory/Index/VectorDB'))
 
     # Härleda label från config-sökväg: .../MyMemory_Midgard/Settings/... → Midgard
     for part in config_path.split('/'):
