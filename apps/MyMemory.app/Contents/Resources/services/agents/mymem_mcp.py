@@ -88,6 +88,7 @@ _current_paths = {
     "graph": GRAPH_PATH,
     "lake": LAKE_PATH,
     "vector": VECTOR_PATH,
+    "asset_ai_generated": AI_GENERATED_PATH,
     "label": "default"
 }
 
@@ -131,6 +132,8 @@ def _reload_index(config_path: str):
         paths.get('lake_store', '~/MyMemory/Lake'))
     _current_paths["vector"] = os.path.expanduser(
         paths.get('chroma_db', '~/MyMemory/Index/VectorDB'))
+    _current_paths["asset_ai_generated"] = os.path.expanduser(
+        paths.get('asset_ai_generated', '~/MyMemory/Assets/AIGenerated'))
 
     # Härleda label från config-sökväg: .../MyMemory_Midgard/Settings/... → Midgard
     for part in config_path.split('/'):
@@ -169,6 +172,10 @@ def _get_lake_path():
 def _get_vector_path():
     _check_active_index()
     return _current_paths["vector"]
+
+def _get_asset_ai_generated_path():
+    _check_active_index()
+    return _current_paths["asset_ai_generated"]
 
 # Search limits och tröskelvärden från config
 GRAPH_SEARCH_LIMIT = SEARCH_CONFIG.get('graph_limit', 15)
@@ -406,21 +413,19 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
     """
     Sök specifika entiteter i grafen via namn, alias, e-post eller ID.
 
-    SÖKMETOD: ILIKE-matchning (%query%) — söker i id, aliases och hela
-    properties-objektet (name, email, context_summary, etc.). Hittar
-    delmatchningar, t.ex. "Johan" matchar "Johan Ekman".
+    SÖKMETOD: ILIKE-matchning (%query%) i identitetsfält (id, aliases,
+    name, email). Hittar delmatchningar, t.ex. "Projekt" matchar "Projekt Alpha".
 
     ANVÄND FÖR:
-    - Hitta en specifik person: query="Johan"
-    - Kolla om en organisation finns: query="Acme AB", node_type="Organization"
-    - Söka på e-post: query="johan@example.com"
-    - Söka i identitetsbeskrivning: query="projektledare"
+    - Hitta en specifik person: query="Person X"
+    - Kolla om en organisation finns: query="Företag Y", node_type="Organization"
+    - Söka på e-post: query="namn@example.com"
 
     FILTRERA PÅ TYP (node_type):
     Person, Organization, Group, Project, Event, Roles, Source
 
     SKILLNAD MOT query_vector_memory:
-    - search_graph_nodes = "Finns noden X?" (textsökning i namn/properties)
+    - search_graph_nodes = "Finns noden X?" (exakt textsökning i identitetsfält)
     - query_vector_memory = "Vem jobbar med AI-projekt?" (semantisk sökning)
 
     TIPS: Börja här för att hitta rätt node_id,
@@ -435,21 +440,25 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
                 return f"Ogiltig node_type: '{node_type}'. Giltiga: {', '.join(sorted(valid_types))}"
 
         with resource_lock("graph", exclusive=False, timeout=10.0):
-            graph = GraphService(_get_graph_path(), read_only=True)
-            limit = GRAPH_SEARCH_LIMIT
+            with GraphService(_get_graph_path(), read_only=True) as graph:
+                limit = GRAPH_SEARCH_LIMIT
+                like_q = f"%{query}%"
+                type_clause = " AND type = ?" if node_type else ""
 
-            sql = "SELECT id, type, aliases, properties FROM nodes WHERE (id ILIKE ? OR aliases ILIKE ? OR properties ILIKE ?)"
-            params = [f"%{query}%", f"%{query}%", f"%{query}%"]
+                # Identity-field search only: id, aliases, name, email (#129)
+                sql = (
+                    "SELECT id, type, aliases, properties FROM nodes "
+                    "WHERE (id ILIKE ? OR aliases ILIKE ? "
+                    "OR json_extract_string(properties, 'name') ILIKE ? "
+                    "OR json_extract_string(properties, 'email') ILIKE ?)"
+                    + type_clause + " LIMIT ?"
+                )
+                params = [like_q, like_q, like_q, like_q]
+                if node_type:
+                    params.append(node_type)
+                params.append(limit)
 
-            if node_type:
-                sql += " AND type = ?"
-                params.append(node_type)
-
-            sql += " LIMIT ?"
-            params.append(limit)
-
-            rows = graph.conn.execute(sql, params).fetchall()
-            graph.close()
+                rows = graph.conn.execute(sql, params).fetchall()
 
         if not rows:
             return f"GRAF: Inga träffar för '{query}'" + (f" (Typ: {node_type})" if node_type else "")
@@ -518,8 +527,8 @@ def query_vector_memory(query_text: str, n_results: int = 5, node_type: str = No
     ✅ "vem arbetar med upphandlingar"
     ✅ "projekt med faktureringsproblem"
     ✅ "personer som haft kundmöten"
-    ✅ "vem jobbar på Digitalist" (hittar via relationsdata)
-    ❌ "Johan" (använd search_graph_nodes för exakta namn)
+    ✅ "vem jobbar på Organisation X" (hittar via relationsdata)
+    ❌ "Person Y" (använd search_graph_nodes för exakta namn)
 
     FILTRERA PÅ NODTYP (node_type):
     Person, Organization, Group, Project, Event, Roles
@@ -634,7 +643,7 @@ def search_by_date_range(
         return f"⚠️ Ogiltigt datumformat: {e}. Använd YYYY-MM-DD"
 
     if not os.path.exists(_get_lake_path()):
-        return f"⚠️ LAKE-FEL: Mappen {LAKE_PATH} finns inte."
+        return f"⚠️ LAKE-FEL: Mappen {_get_lake_path()} finns inte."
 
     matches = []
     skipped_unknown = 0
@@ -723,7 +732,7 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
     - Alla mail: keyword="Email Thread", field="source_type"
     - Alla transkript: keyword="Transcript", field="source_type"
     - Dokument om upphandling: keyword="upphandling", field="document_keywords"
-    - Fritextsökning i alla fält: keyword="Besqab" (utan field)
+    - Fritextsökning i alla fält: keyword="Företag X" (utan field)
 
     KOMBINERA MED:
     - read_document_content(doc_id) för att läsa matchande filer
@@ -735,7 +744,7 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
 
     try:
         if not os.path.exists(_get_lake_path()):
-             return f"⚠️ LAKE-FEL: Mappen {LAKE_PATH} finns inte."
+             return f"⚠️ LAKE-FEL: Mappen {_get_lake_path()} finns inte."
 
         all_metadata = _lake_cache.get_all()
         keyword_lower = keyword.lower()
@@ -837,39 +846,35 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
     Filtrerar relation_context-händelser till angiven period.
 
     ANVÄNDNINGSFLÖDE:
-    1. search_graph_nodes("Johan") → node_id
+    1. search_graph_nodes("Person X") → node_id
     2. get_neighbor_network(node_id) → Se alla kopplingar
     3. get_entity_summary(granne_id) → Djupdyk i intressant koppling
     """
     _t0 = time.monotonic()
     try:
         with resource_lock("graph", exclusive=False, timeout=10.0):
-            graph = GraphService(_get_graph_path(), read_only=True)
+            with GraphService(_get_graph_path(), read_only=True) as graph:
+                center_node = graph.get_node(node_id)
+                if not center_node:
+                    return f"Noden '{node_id}' hittades inte."
 
-            center_node = graph.get_node(node_id)
-            if not center_node:
-                graph.close()
-                return f"Noden '{node_id}' hittades inte."
+                out_edges = graph.get_edges_from(node_id)
+                in_edges = graph.get_edges_to(node_id)
 
-            out_edges = graph.get_edges_from(node_id)
-            in_edges = graph.get_edges_to(node_id)
+                neighbor_ids = set()
+                for e in out_edges:
+                    neighbor_ids.add(e['target'])
+                for e in in_edges:
+                    neighbor_ids.add(e['source'])
 
-            neighbor_ids = set()
-            for e in out_edges:
-                neighbor_ids.add(e['target'])
-            for e in in_edges:
-                neighbor_ids.add(e['source'])
-
-            neighbor_map = {}
-            for nid in neighbor_ids:
-                n = graph.get_node(nid)
-                if n:
-                    props = n.get('properties', {})
-                    neighbor_map[nid] = props.get('name', nid)
-                else:
-                    neighbor_map[nid] = nid
-
-            graph.close()
+                neighbor_map = {}
+                for nid in neighbor_ids:
+                    n = graph.get_node(nid)
+                    if n:
+                        props = n.get('properties', {})
+                        neighbor_map[nid] = props.get('name', nid)
+                    else:
+                        neighbor_map[nid] = nid
 
         c_props = center_node.get('properties', {})
         c_name = c_props.get('name', node_id)
@@ -913,6 +918,97 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
         _log_tool_time("get_neighbor_network", _t0)
 
 
+# --- TOOL 5b: SEARCH RELATION CONTEXT ---
+
+@mcp.tool()
+def search_relation_context(node_id: str, query: str) -> str:
+    """
+    Sök i relation_context på alla kanter kring en entitet.
+
+    Besvarar temporala frågor som "När blev Organisation X kund?"
+    genom att söka i kronologiska händelseposter och returnera
+    matchande poster med tidsstämpel, källa och relationskontext.
+
+    RETURNERAR per träff:
+    - Tidsstämpel (ISO-8601)
+    - Relationstyp och motpart
+    - Matchande text
+    - Källdokument (origin)
+
+    ANVÄNDNING:
+    1. search_graph_nodes("Organisation X") → node_id
+    2. search_relation_context(node_id, "kund") → tidsstämplade träffar
+
+    SKILLNAD MOT get_neighbor_network:
+    - get_neighbor_network = "Vilka relationer finns?" (struktur)
+    - search_relation_context = "Vad står det om X i relationerna?" (innehåll + tid)
+    """
+    _t0 = time.monotonic()
+    try:
+        with resource_lock("graph", exclusive=False, timeout=10.0):
+            with GraphService(_get_graph_path(), read_only=True) as graph:
+                center_node = graph.get_node(node_id)
+                if not center_node:
+                    return f"Noden '{node_id}' hittades inte."
+
+                out_edges = graph.get_edges_from(node_id)
+                in_edges = graph.get_edges_to(node_id)
+
+                # Build neighbor name map
+                neighbor_map = {}
+                for e in out_edges + in_edges:
+                    nid = e['target'] if e['source'] == node_id else e['source']
+                    if nid not in neighbor_map:
+                        n = graph.get_node(nid)
+                        neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
+
+        c_props = center_node.get('properties', {})
+        c_name = c_props.get('name', node_id)
+        query_lower = query.lower()
+        hits = []
+
+        for e in out_edges + in_edges:
+            rc = e.get('properties', {}).get('relation_context', [])
+            if not rc:
+                continue
+            nid = e['target'] if e['source'] == node_id else e['source']
+            neighbor_name = neighbor_map.get(nid, nid)
+            edge_type = e.get('type', '?')
+
+            for entry in rc:
+                text = entry.get('text', '')
+                if query_lower in text.lower():
+                    hits.append({
+                        'timestamp': entry.get('timestamp', 'UNKNOWN'),
+                        'text': text,
+                        'origin': entry.get('origin', ''),
+                        'neighbor': neighbor_name,
+                        'edge_type': edge_type,
+                    })
+
+        # Sort chronologically
+        hits.sort(key=lambda h: h['timestamp'] if h['timestamp'] != 'UNKNOWN' else '')
+
+        if not hits:
+            return f"Inga träffar för '{query}' i relation_context kring {c_name}."
+
+        output = [f"=== RELATION_CONTEXT SÖKNING: '{query}' kring {c_name} ({len(hits)} träffar) ==="]
+        for h in hits:
+            output.append(f"  [{h['timestamp']}] {h['edge_type']} → {h['neighbor']}")
+            output.append(f"    {h['text']}")
+            if h['origin']:
+                output.append(f"    Källa: {h['origin']}")
+
+        return "\n".join(output)
+
+    except TimeoutError:
+        return "Sökning misslyckades: Grafen är upptagen. Försök igen om 30 sekunder."
+    except Exception as e:
+        return f"Sökning misslyckades: {e}"
+    finally:
+        _log_tool_time("search_relation_context", _t0)
+
+
 # --- TOOL 6: ENTITY SUMMARY ---
 
 @mcp.tool()
@@ -932,42 +1028,39 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
     Format: YYYY-MM-DD
 
     ANVÄNDNING:
-    1. Hitta entitet med search_graph_nodes: "Johan" → node_id="abc123"
-    2. Hämta allt om Johan: get_entity_summary(node_id="abc123")
+    1. Hitta entitet med search_graph_nodes: "Person X" → node_id="abc123"
+    2. Hämta allt: get_entity_summary(node_id="abc123")
 
     Perfekt för att svara på "Berätta allt du vet om X".
     """
     _t0 = time.monotonic()
     try:
         with resource_lock("graph", exclusive=False, timeout=10.0):
-            graph = GraphService(_get_graph_path(), read_only=True)
-            node = graph.get_node(node_id)
+            with GraphService(_get_graph_path(), read_only=True) as graph:
+                node = graph.get_node(node_id)
 
-            if not node:
-                graph.close()
-                return f"Noden '{node_id}' hittades inte."
+                if not node:
+                    return f"Noden '{node_id}' hittades inte."
 
-            props = node.get('properties', {})
-            name = props.get('name', node_id)
-            aliases = node.get('aliases', [])
-            # Fetch edges for relation_context display
-            out_edges = graph.get_edges_from(node_id)
-            in_edges = graph.get_edges_to(node_id)
+                props = node.get('properties', {})
+                name = props.get('name', node_id)
+                aliases = node.get('aliases', [])
+                # Fetch edges for relation_context display
+                out_edges = graph.get_edges_from(node_id)
+                in_edges = graph.get_edges_to(node_id)
 
-            # Build neighbor name map
-            neighbor_map = {}
-            for e in out_edges:
-                nid = e['target']
-                if nid not in neighbor_map:
-                    n = graph.get_node(nid)
-                    neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
-            for e in in_edges:
-                nid = e['source']
-                if nid not in neighbor_map:
-                    n = graph.get_node(nid)
-                    neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
-
-            graph.close()
+                # Build neighbor name map
+                neighbor_map = {}
+                for e in out_edges:
+                    nid = e['target']
+                    if nid not in neighbor_map:
+                        n = graph.get_node(nid)
+                        neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
+                for e in in_edges:
+                    nid = e['source']
+                    if nid not in neighbor_map:
+                        n = graph.get_node(nid)
+                        neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
 
         output = [f"=== SUMMERING: {name} ==="]
         output.append(f"Typ: {node['type']}")
@@ -1034,10 +1127,9 @@ def get_graph_statistics() -> str:
     _t0 = time.monotonic()
     try:
         with resource_lock("graph", exclusive=False, timeout=10.0):
-            graph = GraphService(_get_graph_path(), read_only=True)
-            stats = graph.get_stats()
-            quality = graph.get_quality_stats()
-            graph.close()
+            with GraphService(_get_graph_path(), read_only=True) as graph:
+                stats = graph.get_stats()
+                quality = graph.get_quality_stats()
 
         output = ["=== GRAF STATISTIK ==="]
         output.append(f"Totalt antal noder: {stats['total_nodes']}")
@@ -1095,9 +1187,8 @@ def get_system_health() -> str:
     # Graf
     try:
         with resource_lock("graph", exclusive=False, timeout=10.0):
-            graph = GraphService(_get_graph_path(), read_only=True)
-            health = graph.get_system_health()
-            graph.close()
+            with GraphService(_get_graph_path(), read_only=True) as graph:
+                health = graph.get_system_health()
         output.append(f"\nGraf: Tillgänglig")
         output.append(f"  Noder: {health.get('total_nodes', '?')}")
         output.append(f"  Kanter: {health.get('total_edges', '?')}")
@@ -1453,7 +1544,7 @@ def get_source_connections(entity_id: str = None, doc_id: str = None) -> str:
     Exakt en av entity_id eller doc_id måste anges.
 
     ANVÄNDNINGSFLÖDE:
-    1. search_graph_nodes("Kajsa") → node_id
+    1. search_graph_nodes("Person X") → node_id
     2. get_source_connections(entity_id=node_id) → Lista dokument
     3. read_document_content(doc_id) → Läs dokumentet
 
@@ -1479,81 +1570,74 @@ def get_source_connections(entity_id: str = None, doc_id: str = None) -> str:
         doc_node_type = sv.get_document_node_type()
 
         with resource_lock("graph", exclusive=False, timeout=10.0):
-            graph = GraphService(_get_graph_path(), read_only=True)
+            with GraphService(_get_graph_path(), read_only=True) as graph:
+                if entity_id:
+                    # Riktning: entitet → vilka dokument nämner den?
+                    entity_node = graph.get_node(entity_id)
+                    if not entity_node:
+                        return f"Noden '{entity_id}' hittades inte."
 
-            if entity_id:
-                # Riktning: entitet → vilka dokument nämner den?
-                entity_node = graph.get_node(entity_id)
-                if not entity_node:
-                    graph.close()
-                    return f"Noden '{entity_id}' hittades inte."
+                    in_edges = graph.get_edges_to(entity_id)
+                    mentions = [e for e in in_edges if e.get('type') in source_edge_types]
 
-                in_edges = graph.get_edges_to(entity_id)
-                mentions = [e for e in in_edges if e.get('type') in source_edge_types]
+                    # Hämta Source-noders properties
+                    sources = []
+                    for e in mentions:
+                        source_node = graph.get_node(e['source'])
+                        if source_node:
+                            s_props = source_node.get('properties', {})
+                            edge_conf = e.get('properties', {}).get('confidence', '')
+                            sources.append({
+                                'id': e['source'],
+                                'title': s_props.get('title', e['source']),
+                                'source_type': s_props.get('source_type', ''),
+                                'confidence': edge_conf
+                            })
 
-                # Hämta Source-noders properties
-                sources = []
-                for e in mentions:
-                    source_node = graph.get_node(e['source'])
-                    if source_node:
-                        s_props = source_node.get('properties', {})
-                        edge_conf = e.get('properties', {}).get('confidence', '')
-                        sources.append({
-                            'id': e['source'],
-                            'title': s_props.get('title', e['source']),
-                            'source_type': s_props.get('source_type', ''),
-                            'confidence': edge_conf
-                        })
+                    e_name = entity_node.get('properties', {}).get('name', entity_id)
+                    output = [f"=== DOKUMENT SOM NÄMNER: {e_name} ({len(sources)} träffar) ==="]
 
-                graph.close()
+                    if not sources:
+                        output.append("Inga dokument hittade via Source-kanter.")
+                        return "\n".join(output)
 
-                e_name = entity_node.get('properties', {}).get('name', entity_id)
-                output = [f"=== DOKUMENT SOM NÄMNER: {e_name} ({len(sources)} träffar) ==="]
+                    for s in sources:
+                        conf_str = f" (conf: {s['confidence']})" if s['confidence'] else ""
+                        output.append(f"  [{s['source_type']}] {s['title']}{conf_str}")
+                        output.append(f"    ID: {s['id']}")
 
-                if not sources:
-                    output.append("Inga dokument hittade via Source-kanter.")
                     return "\n".join(output)
 
-                for s in sources:
-                    conf_str = f" (conf: {s['confidence']})" if s['confidence'] else ""
-                    output.append(f"  [{s['source_type']}] {s['title']}{conf_str}")
-                    output.append(f"    ID: {s['id']}")
+                else:
+                    # Riktning: dokument → vilka entiteter nämns?
+                    # Hitta Source-noden via uuid-property
+                    sql = "SELECT id, properties FROM nodes WHERE type = ? AND (id ILIKE ? OR properties ILIKE ?)"
+                    params = [doc_node_type, f"%{doc_id}%", f"%{doc_id}%"]
+                    rows = graph.conn.execute(sql, params).fetchall()
 
-                return "\n".join(output)
+                    if not rows:
+                        return f"Ingen {doc_node_type}-nod hittades för '{doc_id}'."
 
-            else:
-                # Riktning: dokument → vilka entiteter nämns?
-                # Hitta Source-noden via uuid-property
-                sql = "SELECT id, properties FROM nodes WHERE type = ? AND (id ILIKE ? OR properties ILIKE ?)"
-                params = [doc_node_type, f"%{doc_id}%", f"%{doc_id}%"]
-                rows = graph.conn.execute(sql, params).fetchall()
+                    source_node_id = rows[0][0]
+                    source_props = json.loads(rows[0][1]) if rows[0][1] else {}
 
-                if not rows:
-                    graph.close()
-                    return f"Ingen {doc_node_type}-nod hittades för '{doc_id}'."
+                    # Hämta Source→entitet-kanter
+                    out_edges = graph.get_edges_from(source_node_id)
+                    mentions = [e for e in out_edges if e.get('type') in source_edge_types]
 
-                source_node_id = rows[0][0]
-                source_props = json.loads(rows[0][1]) if rows[0][1] else {}
-
-                # Hämta Source→entitet-kanter
-                out_edges = graph.get_edges_from(source_node_id)
-                mentions = [e for e in out_edges if e.get('type') in source_edge_types]
-
-                # Hämta target-noder
-                targets = []
-                for e in mentions:
-                    target_node = graph.get_node(e['target'])
-                    if target_node:
-                        t_props = target_node.get('properties', {})
-                        edge_conf = e.get('properties', {}).get('confidence', '')
-                        targets.append({
-                            'id': e['target'],
-                            'type': target_node['type'],
-                            'name': t_props.get('name', e['target']),
-                            'confidence': edge_conf
-                        })
-
-                graph.close()
+                    # Hämta target-noder
+                    targets = []
+                    for e in mentions:
+                        target_node = graph.get_node(e['target'])
+                        if target_node:
+                            t_props = target_node.get('properties', {})
+                            edge_conf = e.get('properties', {}).get('confidence', '')
+                            targets.append({
+                                'id': e['target'],
+                                'type': target_node['type'],
+                                'name': t_props.get('name', e['target']),
+                                'confidence': edge_conf
+                            })
 
                 title = source_props.get('title', source_node_id)
                 output = [f"=== ENTITETER I: {title} ({len(targets)} träffar) ==="]
@@ -1661,10 +1745,11 @@ def ingest_content(
         final_content = _build_content_with_header(content, source, metadata)
 
         # Säkerställ att målmappen finns
-        os.makedirs(AI_GENERATED_PATH, exist_ok=True)
+        ai_gen_path = _get_asset_ai_generated_path()
+        os.makedirs(ai_gen_path, exist_ok=True)
 
         # Skriv filen
-        target_path = os.path.join(AI_GENERATED_PATH, new_filename)
+        target_path = os.path.join(ai_gen_path, new_filename)
         with open(target_path, 'w', encoding='utf-8') as f:
             f.write(final_content)
 

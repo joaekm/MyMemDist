@@ -1,7 +1,7 @@
 {
-  "version": "0.12.9",
-  "date": "2026-03-05",
-  "description": "# Release Notes **Buggfix:** - Index-byte via pekfil läste fel config-nycklar för Lake och VectorDB — `lake_dir`/`vector_db` istället för `lake_store`/`chroma_db`. Resulterade i att graf byttes korrekt men Lake och Vektor fortsatte läsa från Standard-indexet. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.9/MyMemory-Installer.dmg",
+  "version": "0.12.10",
+  "date": "2026-03-06",
+  "description": "# Release Notes Robustare backend och snabbare grafsökning. Nytt MCP-verktyg för att söka i relationshistorik. **Buggfixar:** - DuckDB retry fångar nu även \"different configuration\"-kontentionsfel (#122) - Enrichment skriver inte längre till grafen under read-only-fasen (#123) - GraphService i MCP stängs alltid korrekt, även vid exceptions (#124) - Sökning och ingest_content respekterar nu aktivt index vid indexbyte (#131) - Grafsökning begränsad till identitetsfält — snabbare responstid (#129) **Nytt:** - `search_relation_context` — sök i relationshistorik kring en entitet (\"När blev X kund?\") ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.10/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

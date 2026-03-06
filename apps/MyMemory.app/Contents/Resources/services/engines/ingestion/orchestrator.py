@@ -99,26 +99,39 @@ def reset_enrichment_counter():
 _DUCKDB_LOCK_PATTERN = re.compile(
     r'Could not set lock on file.*?held in (.+?) \(PID (\d+)\)'
 )
+_DUCKDB_CONFIG_PATTERN = re.compile(
+    r"Can't open a connection to same database file with a different configuration"
+)
 
 _LOCK_RETRY_ATTEMPTS = 3
 _LOCK_RETRY_BACKOFF = [5, 10, 20]  # seconds
 
 
+def _is_duckdb_contention(e: Exception):
+    """Check if exception is a DuckDB contention error (#121, #122)."""
+    msg = str(e)
+    lock_match = _DUCKDB_LOCK_PATTERN.search(msg)
+    if lock_match:
+        blocker_path, blocker_pid = lock_match.group(1), lock_match.group(2)
+        return True, f"{os.path.basename(blocker_path)} (PID {blocker_pid})"
+    if _DUCKDB_CONFIG_PATTERN.search(msg):
+        return True, "conflicting read_only connection"
+    return False, None
+
+
 def _write_with_retry(write_fn, prepared, filename, vector_scope):
-    """Write phase with retry on DuckDB lock contention (#121)."""
+    """Write phase with retry on DuckDB lock contention (#121, #122)."""
     for attempt in range(_LOCK_RETRY_ATTEMPTS):
         try:
             with resource_lock("graph", exclusive=True):
                 with vector_scope(exclusive=True) as vs:
                     return write_fn(prepared, vector_service=vs)
         except Exception as e:
-            match = _DUCKDB_LOCK_PATTERN.search(str(e))
-            if match and attempt < _LOCK_RETRY_ATTEMPTS - 1:
-                blocker_path, blocker_pid = match.group(1), match.group(2)
-                blocker_name = os.path.basename(blocker_path)
+            is_contention, blocker_info = _is_duckdb_contention(e)
+            if is_contention and attempt < _LOCK_RETRY_ATTEMPTS - 1:
                 wait = _LOCK_RETRY_BACKOFF[attempt]
                 LOGGER.warning(
-                    f"GraphDB locked by {blocker_name} (PID {blocker_pid}), "
+                    f"GraphDB contention ({blocker_info}), "
                     f"retrying {filename} in {wait}s ({attempt + 1}/{_LOCK_RETRY_ATTEMPTS})"
                 )
                 time.sleep(wait)

@@ -71,6 +71,7 @@ class Enrichment:
         self.prompts = self._load_prompts(config_path)
         self.schema_validator = _get_schema_validator()
         self.enrichment_config = ENRICHMENT_CONFIG
+        self._triage_skipped_nodes: List[str] = []
 
     def _load_prompts(self, path: str) -> dict:
         try:
@@ -131,9 +132,8 @@ class Enrichment:
                             f"({new_context_count} new context entries since {last_refined})"
                         )
                 else:
-                    # Triage said NEJ — update last_refined_at to skip next cycle
-                    props["last_refined_at"] = datetime.now().isoformat()
-                    self.graph_service.update_node_properties(node_id, props)
+                    # Triage said NEJ — defer last_refined_at update to write phase (#123)
+                    self._triage_skipped_nodes.append(node_id)
                     LOGGER.debug(
                         f"Triage skip: {props.get('name', node_id[:12])} "
                         f"({new_context_count} entries, no significant change)"
@@ -451,6 +451,7 @@ class Enrichment:
         Reads graph (can use read-only connection) and vector (via _get_chunks_for_entities).
         """
         LOGGER.info("Enrichment cycle: gathering candidates...")
+        self._triage_skipped_nodes = []
         all_nodes = self._get_candidate_nodes()
 
         if not all_nodes:
@@ -515,6 +516,19 @@ class Enrichment:
         LOGGER.info("Writing enrichments...")
         terminal_status("enrichment", "Writing enrichments", "processing")
         enrich_stats = execute_enrich_writes(self, enrich_result)
+
+        # Write deferred triage-skip timestamps (#123)
+        if self._triage_skipped_nodes:
+            now_iso = datetime.now().isoformat()
+            for node_id in self._triage_skipped_nodes:
+                node = self.graph_service.get_node(node_id)
+                if node:
+                    props = json.loads(node[3]) if node[3] else {}
+                    props["last_refined_at"] = now_iso
+                    self.graph_service.update_node_properties(node_id, props)
+            LOGGER.info(f"Triage-skip: updated last_refined_at for {len(self._triage_skipped_nodes)} nodes")
+            enrich_stats["triage_skipped"] = len(self._triage_skipped_nodes)
+            self._triage_skipped_nodes = []
 
         flags_written = write_quality_flags(self, enrich_result)
         enrich_stats["quality_flags"] = flags_written
