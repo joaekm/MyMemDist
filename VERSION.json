@@ -1,7 +1,7 @@
 {
-  "version": "0.12.10",
-  "date": "2026-03-06",
-  "description": "# Release Notes Robustare backend och snabbare grafsökning. Nytt MCP-verktyg för att söka i relationshistorik. **Buggfixar:** - DuckDB retry fångar nu även \"different configuration\"-kontentionsfel (#122) - Enrichment skriver inte längre till grafen under read-only-fasen (#123) - GraphService i MCP stängs alltid korrekt, även vid exceptions (#124) - Sökning och ingest_content respekterar nu aktivt index vid indexbyte (#131) - Grafsökning begränsad till identitetsfält — snabbare responstid (#129) **Nytt:** - `search_relation_context` — sök i relationshistorik kring en entitet (\"När blev X kund?\") ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.10/MyMemory-Installer.dmg",
+  "version": "0.12.11",
+  "date": "2026-03-07",
+  "description": "# Release Notes - Koordinerad DuckDB-åtkomst via graph_scope context manager (#133) - Saknad GraphService-import i document_manager fixad (#134) - Dreamer filtrerar redan merge-pending noder före LLM-anrop (#109) - Behovsbaserad Dreamer-triggning via Enrichment-signal istället för tidsintervall (#127) - Konsoliderat MCP-verktyg för grafhälsa och statistik med sömnbehovsberäkning (#135) - Saknad config-nyckel dreamer.daemon.run_interval_hours tillagd i template ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.11/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

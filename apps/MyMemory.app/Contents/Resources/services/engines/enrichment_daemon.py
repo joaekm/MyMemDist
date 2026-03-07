@@ -24,9 +24,8 @@ import yaml
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from services.utils.graph_service import GraphService
+from services.utils.graph_service import graph_scope
 from services.utils.vector_service import vector_scope
-from services.utils.shared_lock import resource_lock
 from services.engines.enrichment import Enrichment
 
 # Load config for logging
@@ -57,6 +56,92 @@ LOGGER = logging.getLogger('EnrichmentDaemon')
 
 # Terminal status (visual feedback)
 from services.utils.terminal_status import status as terminal_status, service_status
+
+
+def _get_dreamer_state_file(config: dict) -> str:
+    """Resolve Dreamer state file path from config."""
+    return os.path.expanduser(
+        config.get('dreamer', {}).get('daemon', {}).get(
+            'state_file', '~/Library/Application Support/MyMemory/dreamer_state.json'
+        )
+    )
+
+
+def _increment_dreamer_counter(config: dict, enriched: int, flagged: int):
+    """Signal to Dreamer that Enrichment produced work (#127).
+
+    Increments Dreamer's nodes_since_last_run counter so Dreamer
+    triggers based on actual need, not time intervals.
+    """
+    signal_count = enriched + flagged
+    if signal_count <= 0:
+        return
+
+    dreamer_state_file = _get_dreamer_state_file(config)
+    try:
+        state = {'nodes_since_last_run': 0, 'last_run_timestamp': None, 'last_run_result': None}
+        if os.path.exists(dreamer_state_file):
+            with open(dreamer_state_file, 'r') as f:
+                state = json.load(f)
+
+        state['nodes_since_last_run'] = state.get('nodes_since_last_run', 0) + signal_count
+
+        os.makedirs(os.path.dirname(dreamer_state_file), exist_ok=True)
+        with open(dreamer_state_file, 'w') as f:
+            json.dump(state, f, indent=2, default=str)
+
+        LOGGER.info(f"Dreamer counter: +{signal_count} -> {state['nodes_since_last_run']} total")
+
+    except (OSError, json.JSONDecodeError) as e:
+        LOGGER.error(f"HARDFAIL: Could not update Dreamer state: {e}")
+        raise RuntimeError(f"Failed to update Dreamer counter: {e}") from e
+
+
+def _write_graph_health(config: dict):
+    """Beräkna och skriv grafhälsa till state-fil (#135).
+
+    Kallas efter sweep. Menubar-appen läser filen för statuslampan.
+    """
+    try:
+        from services.utils.graph_service import graph_scope, calculate_graph_health
+
+        graph_path = os.path.expanduser(
+            config.get('paths', {}).get('graph_db', '~/MyMemory/Index/my_mem_graph.duckdb')
+        )
+
+        with graph_scope(exclusive=False, db_path=graph_path) as graph:
+            maint = graph.get_maintenance_stats()
+
+        # Läs dreamer-counter
+        dreamer_counter = 0
+        last_sweep_had_decisions = False
+        dreamer_state_file = _get_dreamer_state_file(config)
+        if os.path.exists(dreamer_state_file):
+            with open(dreamer_state_file, 'r') as f:
+                ds = json.load(f)
+            dreamer_counter = ds.get('nodes_since_last_run', 0)
+            lr = ds.get('last_run_result') or {}
+            last_sweep_had_decisions = any(
+                v.get('merged', 0) > 0 or v.get('renamed', 0) > 0
+                for v in [lr.get('merge', {}), lr.get('rename', {})]
+            )
+
+        health = calculate_graph_health(maint, dreamer_counter, last_sweep_had_decisions)
+
+        health_file = os.path.expanduser(
+            config.get('graph_health', {}).get(
+                'state_file', '~/Library/Application Support/MyMemory/graph_health.json'
+            )
+        )
+        os.makedirs(os.path.dirname(health_file), exist_ok=True)
+        health['timestamp'] = datetime.now().isoformat()
+        with open(health_file, 'w') as f:
+            json.dump(health, f, indent=2, default=str)
+
+        LOGGER.info(f"Graph health: {health['score']:.2f} ({health['level']})")
+
+    except Exception as e:
+        LOGGER.warning(f"Could not write graph health: {e}")
 
 
 def _load_config() -> dict:
@@ -165,13 +250,11 @@ def _run_enrichment(config: dict) -> dict:
     )
 
     try:
-        # --- Phase 1: Prepare (read-only graph, no exclusive locks) ---
-        LOGGER.info("Phase 1: Preparing enrichment (read-only)...")
-        graph_ro = GraphService(graph_path, read_only=True)
-        enrichment = Enrichment(graph_ro, vector_service=None)
-
-        prepare_result = enrichment.prepare_cycle()
-        graph_ro.close()
+        # --- Phase 1: Prepare (read-only graph, shared lock) ---
+        LOGGER.info("Phase 1: Preparing enrichment (shared lock)...")
+        with graph_scope(exclusive=False, db_path=graph_path) as graph_ro:
+            enrichment = Enrichment(graph_ro, vector_service=None)
+            prepare_result = enrichment.prepare_cycle()
 
         if prepare_result.get("status") != "ready":
             LOGGER.info(f"Enrichment prepare: {prepare_result.get('status')}")
@@ -193,15 +276,11 @@ def _run_enrichment(config: dict) -> dict:
 
         # --- Phase 3: Write (exclusive locks, ~1-3s) ---
         LOGGER.info("Phase 3: Writing enrichments (exclusive locks)...")
-        with resource_lock("graph", exclusive=True):
+        with graph_scope(exclusive=True, db_path=graph_path) as graph_rw:
             with vector_scope(exclusive=True) as vector_service:
-                graph_rw = GraphService(graph_path)
                 enrichment.graph_service = graph_rw
                 enrichment.vector_service = vector_service
-
                 enrich_stats = enrichment.write_cycle_results(enrich_result)
-
-                graph_rw.close()
 
         result = {
             "status": "completed",
@@ -253,8 +332,18 @@ def run_daemon():
                 state['last_run_result'] = result
                 _save_state(daemon_config['state_file'], state)
 
-                # Terminal: visa resultat
+                # Signal to Dreamer that work was produced (#127)
                 enrich = result.get('enrich', {})
+                _increment_dreamer_counter(
+                    config,
+                    enriched=enrich.get('nodes_updated', 0),
+                    flagged=enrich.get('quality_flags', 0)
+                )
+
+                # Uppdatera grafhälsa (#135)
+                _write_graph_health(config)
+
+                # Terminal: visa resultat
                 summary = (f"{enrich.get('nodes_updated', 0)} enriched, "
                            f"{enrich.get('quality_flags', 0)} flagged")
                 terminal_status("enrichment", "Enrichment cycle", "done", detail=summary)

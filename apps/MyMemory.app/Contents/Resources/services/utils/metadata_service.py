@@ -19,7 +19,7 @@ from typing import Dict, Any, List, Optional
 
 from services.utils.llm_service import LLMService
 from services.utils.json_parser import parse_llm_json
-from services.utils.graph_service import GraphService
+from services.utils.graph_service import graph_scope
 from services.utils.schema_validator import SchemaValidator
 
 LOGGER = logging.getLogger("MetadataService")
@@ -203,10 +203,14 @@ def _enrich_entities_from_graph(
 
     schema = _get_schema_validator().schema
     enriched = {}
-    owns_graph = graph_service is None
+    _scope_ctx = None
 
     try:
-        graph = graph_service if graph_service else GraphService(graph_path, read_only=True)
+        if graph_service:
+            graph = graph_service
+        else:
+            _scope_ctx = graph_scope(exclusive=False, db_path=graph_path)
+            graph = _scope_ctx.__enter__()
 
         for entity in resolved_entities:
             action = entity.get("action")
@@ -282,11 +286,12 @@ def _enrich_entities_from_graph(
 
             enriched[uuid] = entity_data
 
-        if owns_graph:
-            graph.close()
     except (OSError, IOError) as e:
         # Graf-fil kan saknas eller vara låst - returnera tom dict
         LOGGER.warning(f"Could not enrich entities (graph unavailable): {e}")
+    finally:
+        if _scope_ctx is not None:
+            _scope_ctx.__exit__(None, None, None)
 
     return enriched
 

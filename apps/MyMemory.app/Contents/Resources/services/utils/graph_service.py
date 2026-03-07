@@ -3,6 +3,10 @@ GraphService - DuckDB-based graph database.
 
 Relational graph model with nodes/edges tables.
 Replaces KuzuDB (SOLVED-54).
+
+All access BORDE gå via graph_scope() context manager för att
+garantera koordinerad DuckDB-åtkomst via resource_lock.
+Se #133 för bakgrund.
 """
 
 import os
@@ -10,6 +14,7 @@ import json
 import logging
 import threading
 import duckdb
+from contextlib import contextmanager
 from datetime import datetime
 
 # --- LOGGING ---
@@ -792,133 +797,40 @@ class GraphService:
             "edges": edges_dict
         }
 
-    def get_quality_stats(self) -> dict:
-        """Returnerar kvalitetsstatistik om grafen.
+    def get_maintenance_stats(self) -> dict:
+        """Returnerar rådata för sömnbehovsberäkning (#135).
 
         Returns:
             dict med nycklar:
-            - context_summary_coverage: {type: {total: int, with_summary: int, pct: float}}
-            - confidence_distribution: {type: {low: int, medium: int, high: int, avg: float}}
-              low=<0.5, medium=0.5-0.8, high=>0.8
-            - orphan_count: int (noder utan kanter, exkl. Source-noder)
-            - last_dreamer_run: str (ISO timestamp eller "never")
+            - total_nodes: int (exkl Source)
+            - nodes_never_refined: int
+            - quality_flags_count: int (noder med possible_split eller possible_recategorize)
         """
         with self._lock:
-            # Context summary coverage per type (excl Source)
-            coverage_rows = self.conn.execute("""
-                SELECT type,
-                    COUNT(*) as total,
-                    COUNT(CASE WHEN json_extract_string(properties, '$.context_summary') IS NOT NULL
-                               AND json_extract_string(properties, '$.context_summary') != ''
-                          THEN 1 END) as with_summary
-                FROM nodes
-                WHERE type != 'Source'
-                GROUP BY type
-            """).fetchall()
+            total_row = self.conn.execute(
+                "SELECT COUNT(*) FROM nodes WHERE type != 'Source'"
+            ).fetchone()
 
-            # Confidence distribution per type (excl Source)
-            conf_rows = self.conn.execute("""
-                SELECT type,
-                    COUNT(CASE WHEN CAST(json_extract_string(properties, '$.confidence') AS DOUBLE) < 0.5 THEN 1 END) as low,
-                    COUNT(CASE WHEN CAST(json_extract_string(properties, '$.confidence') AS DOUBLE) >= 0.5
-                               AND CAST(json_extract_string(properties, '$.confidence') AS DOUBLE) <= 0.8 THEN 1 END) as medium,
-                    COUNT(CASE WHEN CAST(json_extract_string(properties, '$.confidence') AS DOUBLE) > 0.8 THEN 1 END) as high,
-                    AVG(CAST(json_extract_string(properties, '$.confidence') AS DOUBLE)) as avg
-                FROM nodes
+            never_refined_row = self.conn.execute("""
+                SELECT COUNT(*) FROM nodes
                 WHERE type != 'Source'
-                GROUP BY type
-            """).fetchall()
-
-            # Orphan count (nodes without edges, excl Source)
-            orphan_row = self.conn.execute("""
-                SELECT COUNT(*) FROM nodes n
-                WHERE n.type != 'Source'
-                  AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source = n.id OR e.target = n.id)
+                AND json_extract_string(properties, '$.last_refined_at') = 'never'
             """).fetchone()
 
-            # Last dreamer run
-            dreamer_row = self.conn.execute("""
-                SELECT MAX(json_extract_string(properties, '$.last_refined_at'))
-                FROM nodes
-                WHERE json_extract_string(properties, '$.last_refined_at') IS NOT NULL
-                  AND json_extract_string(properties, '$.last_refined_at') != 'never'
+            flags_row = self.conn.execute("""
+                SELECT COUNT(*) FROM nodes
+                WHERE type != 'Source'
+                AND (
+                    json_extract_string(properties, '$.quality_flags') LIKE '%possible_split%'
+                    OR json_extract_string(properties, '$.quality_flags') LIKE '%possible_recategorize%'
+                )
             """).fetchone()
-
-        context_summary_coverage = {}
-        for row in coverage_rows:
-            total = row[1]
-            with_summary = row[2]
-            pct = round((with_summary / total) * 100, 1) if total > 0 else 0.0
-            context_summary_coverage[row[0]] = {
-                "total": total,
-                "with_summary": with_summary,
-                "pct": pct
-            }
-
-        confidence_distribution = {}
-        for row in conf_rows:
-            confidence_distribution[row[0]] = {
-                "low": row[1],
-                "medium": row[2],
-                "high": row[3],
-                "avg": round(row[4], 2) if row[4] is not None else 0.0
-            }
-
-        orphan_count = orphan_row[0] if orphan_row else 0
-        last_dreamer = dreamer_row[0] if dreamer_row and dreamer_row[0] else "never"
 
         return {
-            "context_summary_coverage": context_summary_coverage,
-            "confidence_distribution": confidence_distribution,
-            "orphan_count": orphan_count,
-            "last_dreamer_run": last_dreamer
+            "total_nodes": total_row[0] if total_row else 0,
+            "nodes_never_refined": never_refined_row[0] if never_refined_row else 0,
+            "quality_flags_count": flags_row[0] if flags_row else 0,
         }
-
-    def get_system_health(self) -> dict:
-        """Returnerar systemhälsa-indikatorer.
-
-        Returns:
-            dict med nycklar:
-            - graph_accessible: bool
-            - total_nodes: int
-            - total_edges: int
-            - last_dreamer_run: str (ISO timestamp eller "never")
-            - nodes_never_refined: int
-        """
-        try:
-            with self._lock:
-                node_count = self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()
-                edge_count = self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()
-
-                never_refined_row = self.conn.execute("""
-                    SELECT COUNT(*) FROM nodes
-                    WHERE type != 'Source'
-                    AND json_extract_string(properties, '$.last_refined_at') = 'never'
-                """).fetchone()
-
-                dreamer_row = self.conn.execute("""
-                    SELECT MAX(json_extract_string(properties, '$.last_refined_at'))
-                    FROM nodes
-                    WHERE json_extract_string(properties, '$.last_refined_at') IS NOT NULL
-                      AND json_extract_string(properties, '$.last_refined_at') != 'never'
-                """).fetchone()
-
-            return {
-                "graph_accessible": True,
-                "total_nodes": node_count[0] if node_count else 0,
-                "total_edges": edge_count[0] if edge_count else 0,
-                "last_dreamer_run": dreamer_row[0] if dreamer_row and dreamer_row[0] else "never",
-                "nodes_never_refined": never_refined_row[0] if never_refined_row else 0
-            }
-        except duckdb.Error as e:
-            LOGGER.warning(f"get_system_health: graph inaccessible — {e}")
-            return {
-                "graph_accessible": False,
-                "total_nodes": 0,
-                "total_edges": 0,
-                "last_dreamer_run": "never",
-                "nodes_never_refined": 0
-            }
 
     # --- SEARCH HELPERS ---
 
@@ -1472,3 +1384,105 @@ class GraphService:
             "type": result[2],
             "properties": json.loads(result[3]) if result[3] else {}
         }
+
+
+# --- MODULE-LEVEL CONTEXT MANAGER ---
+
+@contextmanager
+def graph_scope(exclusive=False, timeout=None, db_path=None):
+    """
+    Koordinerad DuckDB-åtkomst: resource_lock + open + yield + close.
+
+    Garanterar att DuckDB-connection bara existerar inom resource_lock-scope.
+    Samma mönster som vector_scope() för ChromaDB.
+
+    Args:
+        exclusive: True för skrivoperationer (exclusive lock + read_only=False),
+                   False för läsning (shared lock + read_only=True)
+        timeout: Lock timeout i sekunder (None = vänta oändligt)
+        db_path: Explicit sökväg till GraphDB. None = hämta från config.
+
+    Usage:
+        with graph_scope(exclusive=False, timeout=10.0) as graph:
+            results = graph.get_node(node_id)
+
+        with graph_scope(exclusive=True) as graph:
+            graph.upsert_node(...)
+    """
+    from services.utils.shared_lock import resource_lock
+    from services.utils.config_loader import get_config
+
+    if db_path is None:
+        config = get_config()
+        graph_db = config.get('paths', {}).get('graph_db')
+        if not graph_db:
+            raise ValueError("graph_scope: 'paths.graph_db' saknas i config")
+        db_path = os.path.expanduser(graph_db)
+
+    read_only = not exclusive
+
+    with resource_lock("graph", exclusive=exclusive, timeout=timeout):
+        gs = GraphService(db_path, read_only=read_only)
+        try:
+            yield gs
+        finally:
+            gs.close()
+
+
+# --- GRAPH HEALTH (#135) ---
+
+def calculate_graph_health(
+    maintenance_stats: dict,
+    dreamer_counter: int = 0,
+    last_sweep_had_decisions: bool = False,
+) -> dict:
+    """Beräkna grafens sömnbehov (0.0–1.0).
+
+    Ren funktion — tar rådata, returnerar beräknat resultat.
+    Kan anropas från MCP-verktyg, daemoner, menubar.
+
+    Args:
+        maintenance_stats: dict från GraphService.get_maintenance_stats()
+        dreamer_counter: nodes_since_last_run från dreamer state
+        last_sweep_had_decisions: om senaste dreamer-sweep hade merge/rename
+
+    Returns:
+        dict med score, level, color, och signaluppdelning
+    """
+    total = maintenance_stats.get("total_nodes", 0)
+    unenriched = maintenance_stats.get("nodes_never_refined", 0)
+    flags_count = maintenance_stats.get("quality_flags_count", 0)
+
+    if total == 0:
+        score = 0.0
+    else:
+        score = (
+            0.35 * (unenriched / total)
+            + 0.25 * min(flags_count / 10, 1.0)
+            + 0.20 * min(dreamer_counter / 50, 1.0)
+            + 0.15 * 0.0  # re-enrich-kandidater (ej implementerat ännu)
+            + 0.05 * (1.0 if last_sweep_had_decisions else 0.0)
+        )
+        score = max(0.0, min(1.0, score))
+
+    if score >= 0.80:
+        level, color = "Kritiskt", "red"
+    elif score >= 0.50:
+        level, color = "Trött", "orange"
+    elif score >= 0.20:
+        level, color = "Sömnig", "yellow"
+    else:
+        level, color = "Utvilad", "green"
+
+    return {
+        "score": round(score, 3),
+        "level": level,
+        "color": color,
+        "signals": {
+            "unenriched": unenriched,
+            "total_nodes": total,
+            "quality_flags": flags_count,
+            "dreamer_counter": dreamer_counter,
+            "last_sweep_had_decisions": last_sweep_had_decisions,
+        },
+    }

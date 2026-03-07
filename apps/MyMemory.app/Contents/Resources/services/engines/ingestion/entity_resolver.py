@@ -11,7 +11,7 @@ import uuid
 from collections import Counter
 from typing import Dict, Any, List
 
-from services.utils.graph_service import GraphService
+from services.utils.graph_service import graph_scope
 from services.engines.ingestion import _shared
 from services.engines.ingestion._shared import _get_schema_validator, LOGGER
 
@@ -39,11 +39,13 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
     # Check if database exists before opening in read-only mode
     # After hard reset, graph is empty - all entities will be CREATE
     graph_path = _shared.GRAPH_DB_PATH
+    _graph_scope_ctx = None
     if not os.path.exists(graph_path):
         LOGGER.info(f"Graph DB not found at {graph_path}, all entities will be CREATE")
         graph = None
     else:
-        graph = GraphService(graph_path, read_only=True)
+        _graph_scope_ctx = graph_scope(exclusive=False, db_path=graph_path)
+        graph = _graph_scope_ctx.__enter__()
     seen_candidates = set()
 
     for node in nodes:
@@ -126,8 +128,8 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
 
         mentions.append(mention)
 
-    if graph is not None:
-        graph.close()
+    if _graph_scope_ctx is not None:
+        _graph_scope_ctx.__exit__(None, None, None)
 
     # Log resolution summary per type (used for iterative tuning)
     link_counts = Counter(m['type'] for m in mentions if m.get('action') == 'LINK')

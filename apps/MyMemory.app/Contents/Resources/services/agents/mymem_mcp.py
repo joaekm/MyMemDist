@@ -41,9 +41,8 @@ _fh.setFormatter(logging.Formatter('%(asctime)s - MCP_SEARCH - %(levelname)s - %
 _root.addHandler(_fh)
 
 from mcp.server.fastmcp import FastMCP
-from services.utils.graph_service import GraphService
+from services.utils.graph_service import graph_scope
 from services.utils.vector_service import vector_scope
-from services.utils.shared_lock import resource_lock
 
 # Tysta tredjepartsloggers EFTER import
 for _name in ['httpx', 'httpcore', 'mcp', 'anyio']:
@@ -439,26 +438,25 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
             if node_type not in valid_types:
                 return f"Ogiltig node_type: '{node_type}'. Giltiga: {', '.join(sorted(valid_types))}"
 
-        with resource_lock("graph", exclusive=False, timeout=10.0):
-            with GraphService(_get_graph_path(), read_only=True) as graph:
-                limit = GRAPH_SEARCH_LIMIT
-                like_q = f"%{query}%"
-                type_clause = " AND type = ?" if node_type else ""
+        with graph_scope(exclusive=False, timeout=10.0, db_path=_get_graph_path()) as graph:
+            limit = GRAPH_SEARCH_LIMIT
+            like_q = f"%{query}%"
+            type_clause = " AND type = ?" if node_type else ""
 
-                # Identity-field search only: id, aliases, name, email (#129)
-                sql = (
-                    "SELECT id, type, aliases, properties FROM nodes "
-                    "WHERE (id ILIKE ? OR aliases ILIKE ? "
-                    "OR json_extract_string(properties, 'name') ILIKE ? "
-                    "OR json_extract_string(properties, 'email') ILIKE ?)"
-                    + type_clause + " LIMIT ?"
-                )
-                params = [like_q, like_q, like_q, like_q]
-                if node_type:
-                    params.append(node_type)
-                params.append(limit)
+            # Identity-field search only: id, aliases, name, email (#129)
+            sql = (
+                "SELECT id, type, aliases, properties FROM nodes "
+                "WHERE (id ILIKE ? OR aliases ILIKE ? "
+                "OR json_extract_string(properties, 'name') ILIKE ? "
+                "OR json_extract_string(properties, 'email') ILIKE ?)"
+                + type_clause + " LIMIT ?"
+            )
+            params = [like_q, like_q, like_q, like_q]
+            if node_type:
+                params.append(node_type)
+            params.append(limit)
 
-                rows = graph.conn.execute(sql, params).fetchall()
+            rows = graph.conn.execute(sql, params).fetchall()
 
         if not rows:
             return f"GRAF: Inga träffar för '{query}'" + (f" (Typ: {node_type})" if node_type else "")
@@ -852,29 +850,28 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
     """
     _t0 = time.monotonic()
     try:
-        with resource_lock("graph", exclusive=False, timeout=10.0):
-            with GraphService(_get_graph_path(), read_only=True) as graph:
-                center_node = graph.get_node(node_id)
-                if not center_node:
-                    return f"Noden '{node_id}' hittades inte."
+        with graph_scope(exclusive=False, timeout=10.0, db_path=_get_graph_path()) as graph:
+            center_node = graph.get_node(node_id)
+            if not center_node:
+                return f"Noden '{node_id}' hittades inte."
 
-                out_edges = graph.get_edges_from(node_id)
-                in_edges = graph.get_edges_to(node_id)
+            out_edges = graph.get_edges_from(node_id)
+            in_edges = graph.get_edges_to(node_id)
 
-                neighbor_ids = set()
-                for e in out_edges:
-                    neighbor_ids.add(e['target'])
-                for e in in_edges:
-                    neighbor_ids.add(e['source'])
+            neighbor_ids = set()
+            for e in out_edges:
+                neighbor_ids.add(e['target'])
+            for e in in_edges:
+                neighbor_ids.add(e['source'])
 
-                neighbor_map = {}
-                for nid in neighbor_ids:
-                    n = graph.get_node(nid)
-                    if n:
-                        props = n.get('properties', {})
-                        neighbor_map[nid] = props.get('name', nid)
-                    else:
-                        neighbor_map[nid] = nid
+            neighbor_map = {}
+            for nid in neighbor_ids:
+                n = graph.get_node(nid)
+                if n:
+                    props = n.get('properties', {})
+                    neighbor_map[nid] = props.get('name', nid)
+                else:
+                    neighbor_map[nid] = nid
 
         c_props = center_node.get('properties', {})
         c_name = c_props.get('name', node_id)
@@ -945,22 +942,21 @@ def search_relation_context(node_id: str, query: str) -> str:
     """
     _t0 = time.monotonic()
     try:
-        with resource_lock("graph", exclusive=False, timeout=10.0):
-            with GraphService(_get_graph_path(), read_only=True) as graph:
-                center_node = graph.get_node(node_id)
-                if not center_node:
-                    return f"Noden '{node_id}' hittades inte."
+        with graph_scope(exclusive=False, timeout=10.0, db_path=_get_graph_path()) as graph:
+            center_node = graph.get_node(node_id)
+            if not center_node:
+                return f"Noden '{node_id}' hittades inte."
 
-                out_edges = graph.get_edges_from(node_id)
-                in_edges = graph.get_edges_to(node_id)
+            out_edges = graph.get_edges_from(node_id)
+            in_edges = graph.get_edges_to(node_id)
 
-                # Build neighbor name map
-                neighbor_map = {}
-                for e in out_edges + in_edges:
-                    nid = e['target'] if e['source'] == node_id else e['source']
-                    if nid not in neighbor_map:
-                        n = graph.get_node(nid)
-                        neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
+            # Build neighbor name map
+            neighbor_map = {}
+            for e in out_edges + in_edges:
+                nid = e['target'] if e['source'] == node_id else e['source']
+                if nid not in neighbor_map:
+                    n = graph.get_node(nid)
+                    neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
 
         c_props = center_node.get('properties', {})
         c_name = c_props.get('name', node_id)
@@ -1035,32 +1031,31 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
     """
     _t0 = time.monotonic()
     try:
-        with resource_lock("graph", exclusive=False, timeout=10.0):
-            with GraphService(_get_graph_path(), read_only=True) as graph:
-                node = graph.get_node(node_id)
+        with graph_scope(exclusive=False, timeout=10.0, db_path=_get_graph_path()) as graph:
+            node = graph.get_node(node_id)
 
-                if not node:
-                    return f"Noden '{node_id}' hittades inte."
+            if not node:
+                return f"Noden '{node_id}' hittades inte."
 
-                props = node.get('properties', {})
-                name = props.get('name', node_id)
-                aliases = node.get('aliases', [])
-                # Fetch edges for relation_context display
-                out_edges = graph.get_edges_from(node_id)
-                in_edges = graph.get_edges_to(node_id)
+            props = node.get('properties', {})
+            name = props.get('name', node_id)
+            aliases = node.get('aliases', [])
+            # Fetch edges for relation_context display
+            out_edges = graph.get_edges_from(node_id)
+            in_edges = graph.get_edges_to(node_id)
 
-                # Build neighbor name map
-                neighbor_map = {}
-                for e in out_edges:
-                    nid = e['target']
-                    if nid not in neighbor_map:
-                        n = graph.get_node(nid)
-                        neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
-                for e in in_edges:
-                    nid = e['source']
-                    if nid not in neighbor_map:
-                        n = graph.get_node(nid)
-                        neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
+            # Build neighbor name map
+            neighbor_map = {}
+            for e in out_edges:
+                nid = e['target']
+                if nid not in neighbor_map:
+                    n = graph.get_node(nid)
+                    neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
+            for e in in_edges:
+                nid = e['source']
+                if nid not in neighbor_map:
+                    n = graph.get_node(nid)
+                    neighbor_map[nid] = n.get('properties', {}).get('name', nid) if n else nid
 
         output = [f"=== SUMMERING: {name} ==="]
         output.append(f"Typ: {node['type']}")
@@ -1110,120 +1105,127 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
         _log_tool_time("get_entity_summary", _t0)
 
 
-# --- TOOL 7: GRAPH STATISTICS ---
+# --- TOOL 7: GRAPH HEALTH (#135) ---
 
 @mcp.tool()
-def get_graph_statistics() -> str:
+def get_graph_health() -> str:
     """
-    Hämtar övergripande statistik och datakvalitet för kunskapsgrafen.
+    Visa grafens hälsa — sömnbehov, tillgänglighet och statistik.
+
+    ETT verktyg för all hälso- och statusinfo. Billig beräkning (graf-queries + state-filer, inget LLM-anrop).
 
     RETURNERAR:
-    - Antal noder och kanter per typ
-    - Datakvalitet: context_summary-täckning per nodtyp
-    - Confidence-fördelning per nodtyp (låg/medel/hög + genomsnitt)
-    - Antal orphan-noder (utan kopplingar)
-    - Senaste Dreamer-körning
+    - Sömnbehov (0.0–1.0) med nivå (utvilad/sömnig/trött/kritiskt)
+    - Uppdelning per signal: oenrichade noder, quality flags, dreamer-kö
+    - Tillgänglighet: graf, vektor, Lake
+    - Grundläggande statistik: antal noder, kanter, dokument, vektorer
     """
     _t0 = time.monotonic()
     try:
-        with resource_lock("graph", exclusive=False, timeout=10.0):
-            with GraphService(_get_graph_path(), read_only=True) as graph:
+        from services.utils.graph_service import calculate_graph_health
+
+        # 1. Graf-queries + statistik
+        graph_ok = True
+        stats = {}
+        maint = {}
+        try:
+            with graph_scope(exclusive=False, timeout=10.0, db_path=_get_graph_path()) as graph:
+                maint = graph.get_maintenance_stats()
                 stats = graph.get_stats()
-                quality = graph.get_quality_stats()
+        except TimeoutError:
+            graph_ok = False
+        except Exception:
+            graph_ok = False
 
-        output = ["=== GRAF STATISTIK ==="]
-        output.append(f"Totalt antal noder: {stats['total_nodes']}")
-        output.append(f"Totalt antal kanter: {stats['total_edges']}")
+        # 2. Lake
+        lake_count = None
+        try:
+            all_docs = _lake_cache.get_all()
+            lake_count = len(all_docs)
+        except Exception:
+            pass
 
-        output.append("\n--- Noder per Typ ---")
-        for k, v in stats.get('nodes', {}).items():
-            output.append(f"  {k}: {v}")
+        # 3. Vektor
+        vector_count = None
+        try:
+            with vector_scope(exclusive=False, timeout=10.0, db_path=_get_vector_path()) as vs:
+                vector_count = vs.count()
+        except Exception:
+            pass
 
-        output.append("\n--- Kanter per Typ ---")
-        for k, v in stats.get('edges', {}).items():
-            output.append(f"  {k}: {v}")
+        # 4. Dreamer state
+        dreamer_counter = 0
+        last_sweep_had_decisions = False
+        try:
+            config = get_config()
+            dreamer_state_file = os.path.expanduser(
+                config.get('dreamer', {}).get('daemon', {}).get(
+                    'state_file', '~/Library/Application Support/MyMemory/dreamer_state.json'
+                )
+            )
+            if os.path.exists(dreamer_state_file):
+                with open(dreamer_state_file, 'r') as f:
+                    dreamer_state = json.load(f)
+                dreamer_counter = dreamer_state.get('nodes_since_last_run', 0)
+                last_result = dreamer_state.get('last_run_result') or {}
+                last_sweep_had_decisions = any(
+                    v.get('merged', 0) > 0 or v.get('renamed', 0) > 0
+                    for v in [last_result.get('merge', {}), last_result.get('rename', {})]
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
 
-        # Datakvalitet
-        output.append("\n--- Datakvalitet ---")
-        output.append("Context Summary:")
-        for ntype, cov in quality.get('context_summary_coverage', {}).items():
-            output.append(f"  {ntype}: {cov['with_summary']}/{cov['total']} ({cov['pct']:.0f}%)")
+        # 5. Beräkna sömnbehov
+        if graph_ok and maint:
+            health = calculate_graph_health(maint, dreamer_counter, last_sweep_had_decisions)
+        else:
+            health = {"score": -1, "level": "Okänd", "color": "gray",
+                      "signals": {"unenriched": 0, "total_nodes": 0, "quality_flags": 0,
+                                  "dreamer_counter": 0, "last_sweep_had_decisions": False}}
 
-        output.append("\nConfidence:")
-        for ntype, dist in quality.get('confidence_distribution', {}).items():
-            output.append(f"  {ntype}: avg {dist['avg']:.2f} ({dist['low']} låg, {dist['medium']} medel, {dist['high']} hög)")
+        s = health["signals"]
 
-        output.append(f"\nOrphaner: {quality.get('orphan_count', 'N/A')} noder utan kopplingar")
-        output.append(f"Senaste Dreamer-körning: {quality.get('last_dreamer_run', 'N/A')}")
+        # 6. Formatera output
+        output = [f"=== GRAFHÄLSA: {health['level']} ({health['color']}) ==="]
+        if health["score"] >= 0:
+            output.append(f"Sömnbehov: {health['score']:.2f} / 1.00")
+        else:
+            output.append("Sömnbehov: kunde inte beräknas (graf otillgänglig)")
+
+        output.append("")
+        output.append("--- Tillgänglighet ---")
+        output.append(f"  Graf: {'Tillgänglig' if graph_ok else 'Otillgänglig'}")
+        output.append(f"  Lake: {f'{lake_count} dokument' if lake_count is not None else 'Otillgänglig'}")
+        output.append(f"  Vektor: {f'{vector_count} vektorer' if vector_count is not None else 'Otillgänglig'}")
+
+        if graph_ok and stats:
+            output.append("")
+            output.append("--- Statistik ---")
+            output.append(f"  Noder: {stats.get('total_nodes', '?')}")
+            output.append(f"  Kanter: {stats.get('total_edges', '?')}")
+
+        if health["score"] >= 0:
+            output.append("")
+            output.append("--- Sömnbehov ---")
+            if s["total_nodes"] > 0:
+                pct = s["unenriched"] / s["total_nodes"] * 100
+                output.append(f"  Oenrichade noder: {s['unenriched']}/{s['total_nodes']} ({pct:.0f}%) [vikt 0.35]")
+            else:
+                output.append(f"  Oenrichade noder: 0/0 [vikt 0.35]")
+            output.append(f"  Quality flags: {s['quality_flags']} noder flaggade [vikt 0.25]")
+            output.append(f"  Dreamer-kö: {s['dreamer_counter']} signaler väntar [vikt 0.20]")
+            output.append(f"  Re-enrich: ej implementerat [vikt 0.15]")
+            output.append(f"  Senaste sweep hade beslut: {'ja' if s['last_sweep_had_decisions'] else 'nej'} [vikt 0.05]")
 
         return "\n".join(output)
 
-    except TimeoutError:
-        return "Kunde inte hämta statistik: Databasen är upptagen (ingestion/dreamer pågår). Försök igen om 30 sekunder."
     except Exception as e:
-        return f"Kunde inte hämta statistik: {e}"
+        return f"Kunde inte beräkna grafhälsa: {e}"
     finally:
-        _log_tool_time("get_graph_statistics", _t0)
+        _log_tool_time("get_graph_health", _t0)
 
 
-# --- TOOL 7b: SYSTEM HEALTH ---
-
-@mcp.tool()
-def get_system_health() -> str:
-    """
-    Visa systemets hälsa och status.
-
-    RETURNERAR:
-    - Datatillgänglighet (graf, vektor, Lake)
-    - Antal noder, kanter, dokument, vektorer
-    - Senaste Dreamer-körning
-    - Andel noder som aldrig förädlats
-
-    Användbart för felsökning och överblick.
-    """
-    _t0 = time.monotonic()
-    output = ["=== SYSTEMHÄLSA ==="]
-
-    # Graf
-    try:
-        with resource_lock("graph", exclusive=False, timeout=10.0):
-            with GraphService(_get_graph_path(), read_only=True) as graph:
-                health = graph.get_system_health()
-        output.append(f"\nGraf: Tillgänglig")
-        output.append(f"  Noder: {health.get('total_nodes', '?')}")
-        output.append(f"  Kanter: {health.get('total_edges', '?')}")
-        output.append(f"  Senaste Dreamer: {health.get('last_dreamer_run', 'N/A')}")
-        output.append(f"  Aldrig förädlade: {health.get('nodes_never_refined', '?')} noder")
-    except TimeoutError:
-        output.append(f"\nGraf: Upptagen (ingestion/dreamer pågår)")
-    except Exception as e:
-        output.append(f"\nGraf: FEL ({e})")
-
-    # Lake
-    try:
-        all_docs = _lake_cache.get_all()
-        output.append(f"\nLake: Tillgänglig")
-        output.append(f"  Dokument: {len(all_docs)}")
-    except Exception as e:
-        output.append(f"\nLake: FEL ({e})")
-
-    # Vektor
-    try:
-        with vector_scope(exclusive=False, timeout=10.0, db_path=_get_vector_path()) as vs:
-            count = vs.count()
-        output.append(f"\nVektor: Tillgänglig")
-        output.append(f"  Vektorer: {count}")
-    except TimeoutError:
-        output.append(f"\nVektor: Upptagen")
-    except Exception as e:
-        output.append(f"\nVektor: FEL ({e})")
-
-    output.append(f"\nAktivt index: {_current_paths['label']}")
-
-    return "\n".join(output)
-
-
-# --- TOOL 7c: DATA MODEL ---
+# --- TOOL 7d: DATA MODEL ---
 
 @mcp.tool()
 def get_data_model() -> str:
@@ -1569,75 +1571,74 @@ def get_source_connections(entity_id: str = None, doc_id: str = None) -> str:
         source_edge_types = sv.get_source_edge_types()
         doc_node_type = sv.get_document_node_type()
 
-        with resource_lock("graph", exclusive=False, timeout=10.0):
-            with GraphService(_get_graph_path(), read_only=True) as graph:
-                if entity_id:
-                    # Riktning: entitet → vilka dokument nämner den?
-                    entity_node = graph.get_node(entity_id)
-                    if not entity_node:
-                        return f"Noden '{entity_id}' hittades inte."
+        with graph_scope(exclusive=False, timeout=10.0, db_path=_get_graph_path()) as graph:
+            if entity_id:
+                # Riktning: entitet → vilka dokument nämner den?
+                entity_node = graph.get_node(entity_id)
+                if not entity_node:
+                    return f"Noden '{entity_id}' hittades inte."
 
-                    in_edges = graph.get_edges_to(entity_id)
-                    mentions = [e for e in in_edges if e.get('type') in source_edge_types]
+                in_edges = graph.get_edges_to(entity_id)
+                mentions = [e for e in in_edges if e.get('type') in source_edge_types]
 
-                    # Hämta Source-noders properties
-                    sources = []
-                    for e in mentions:
-                        source_node = graph.get_node(e['source'])
-                        if source_node:
-                            s_props = source_node.get('properties', {})
-                            edge_conf = e.get('properties', {}).get('confidence', '')
-                            sources.append({
-                                'id': e['source'],
-                                'title': s_props.get('title', e['source']),
-                                'source_type': s_props.get('source_type', ''),
-                                'confidence': edge_conf
-                            })
+                # Hämta Source-noders properties
+                sources = []
+                for e in mentions:
+                    source_node = graph.get_node(e['source'])
+                    if source_node:
+                        s_props = source_node.get('properties', {})
+                        edge_conf = e.get('properties', {}).get('confidence', '')
+                        sources.append({
+                            'id': e['source'],
+                            'title': s_props.get('title', e['source']),
+                            'source_type': s_props.get('source_type', ''),
+                            'confidence': edge_conf
+                        })
 
-                    e_name = entity_node.get('properties', {}).get('name', entity_id)
-                    output = [f"=== DOKUMENT SOM NÄMNER: {e_name} ({len(sources)} träffar) ==="]
+                e_name = entity_node.get('properties', {}).get('name', entity_id)
+                output = [f"=== DOKUMENT SOM NÄMNER: {e_name} ({len(sources)} träffar) ==="]
 
-                    if not sources:
-                        output.append("Inga dokument hittade via Source-kanter.")
-                        return "\n".join(output)
-
-                    for s in sources:
-                        conf_str = f" (conf: {s['confidence']})" if s['confidence'] else ""
-                        output.append(f"  [{s['source_type']}] {s['title']}{conf_str}")
-                        output.append(f"    ID: {s['id']}")
-
+                if not sources:
+                    output.append("Inga dokument hittade via Source-kanter.")
                     return "\n".join(output)
 
-                else:
-                    # Riktning: dokument → vilka entiteter nämns?
-                    # Hitta Source-noden via uuid-property
-                    sql = "SELECT id, properties FROM nodes WHERE type = ? AND (id ILIKE ? OR properties ILIKE ?)"
-                    params = [doc_node_type, f"%{doc_id}%", f"%{doc_id}%"]
-                    rows = graph.conn.execute(sql, params).fetchall()
+                for s in sources:
+                    conf_str = f" (conf: {s['confidence']})" if s['confidence'] else ""
+                    output.append(f"  [{s['source_type']}] {s['title']}{conf_str}")
+                    output.append(f"    ID: {s['id']}")
 
-                    if not rows:
-                        return f"Ingen {doc_node_type}-nod hittades för '{doc_id}'."
+                return "\n".join(output)
 
-                    source_node_id = rows[0][0]
-                    source_props = json.loads(rows[0][1]) if rows[0][1] else {}
+            else:
+                # Riktning: dokument → vilka entiteter nämns?
+                # Hitta Source-noden via uuid-property
+                sql = "SELECT id, properties FROM nodes WHERE type = ? AND (id ILIKE ? OR properties ILIKE ?)"
+                params = [doc_node_type, f"%{doc_id}%", f"%{doc_id}%"]
+                rows = graph.conn.execute(sql, params).fetchall()
 
-                    # Hämta Source→entitet-kanter
-                    out_edges = graph.get_edges_from(source_node_id)
-                    mentions = [e for e in out_edges if e.get('type') in source_edge_types]
+                if not rows:
+                    return f"Ingen {doc_node_type}-nod hittades för '{doc_id}'."
 
-                    # Hämta target-noder
-                    targets = []
-                    for e in mentions:
-                        target_node = graph.get_node(e['target'])
-                        if target_node:
-                            t_props = target_node.get('properties', {})
-                            edge_conf = e.get('properties', {}).get('confidence', '')
-                            targets.append({
-                                'id': e['target'],
-                                'type': target_node['type'],
-                                'name': t_props.get('name', e['target']),
-                                'confidence': edge_conf
-                            })
+                source_node_id = rows[0][0]
+                source_props = json.loads(rows[0][1]) if rows[0][1] else {}
+
+                # Hämta Source→entitet-kanter
+                out_edges = graph.get_edges_from(source_node_id)
+                mentions = [e for e in out_edges if e.get('type') in source_edge_types]
+
+                # Hämta target-noder
+                targets = []
+                for e in mentions:
+                    target_node = graph.get_node(e['target'])
+                    if target_node:
+                        t_props = target_node.get('properties', {})
+                        edge_conf = e.get('properties', {}).get('confidence', '')
+                        targets.append({
+                            'id': e['target'],
+                            'type': target_node['type'],
+                            'name': t_props.get('name', e['target']),
+                            'confidence': edge_conf
+                        })
 
                 title = source_props.get('title', source_node_id)
                 output = [f"=== ENTITETER I: {title} ({len(targets)} träffar) ==="]

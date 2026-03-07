@@ -27,7 +27,7 @@ def discover_and_evaluate(engine, dry_run: bool, limit: int) -> Tuple[dict, list
     No writes happen here.
     """
     config = engine.dreamer_config
-    stats = {"candidates": 0, "merged": 0, "skipped": 0, "cached": 0, "decisions": []}
+    stats = {"candidates": 0, "merged": 0, "skipped": 0, "cached": 0, "skipped_pending": 0, "decisions": []}
     decisions = []
 
     merge_config = config.get('merge', {})
@@ -43,8 +43,15 @@ def discover_and_evaluate(engine, dry_run: bool, limit: int) -> Tuple[dict, list
         return stats, decisions
 
     cache = skip_cache.load(config)
+    threshold = config.get('thresholds', {}).get('merge', 0.90)
+    pending_merge_ids = set()
 
     for node_a, node_b, strategy in candidates:
+        # Skip if either node is already pending merge this cycle
+        if node_a["id"] in pending_merge_ids or node_b["id"] in pending_merge_ids:
+            stats["skipped_pending"] += 1
+            continue
+
         pair_key = skip_cache.compute_pair_key(node_a["id"], node_b["id"])
         hash_a = skip_cache.compute_node_hash(node_a, _get_edge_count(engine, node_a["id"]))
         hash_b = skip_cache.compute_node_hash(node_b, _get_edge_count(engine, node_b["id"]))
@@ -60,6 +67,11 @@ def discover_and_evaluate(engine, dry_run: bool, limit: int) -> Tuple[dict, list
         if not result:
             continue
 
+        # Track nodes pending merge to avoid redundant LLM calls
+        if result.get("decision") == "MERGE" and result.get("confidence", 0) >= threshold:
+            pending_merge_ids.add(node_a["id"])
+            pending_merge_ids.add(node_b["id"])
+
         decisions.append((node_a, node_b, strategy, result, pair_key, hash_a, hash_b))
 
     return stats, decisions
@@ -74,9 +86,15 @@ def execute_decisions(engine, stats: dict, decisions: list) -> dict:
     config = engine.dreamer_config
     threshold = config.get('thresholds', {}).get('merge', 0.90)
     cache = skip_cache.load(config)
+    merged_ids = set()
 
     for node_a, node_b, strategy, result, pair_key, hash_a, hash_b in decisions:
-        # Exists-guard: verify nodes still exist
+        # Skip if either node was already merged this cycle
+        if node_a["id"] in merged_ids or node_b["id"] in merged_ids:
+            LOGGER.info(f"MERGE SKIP (already merged): {node_name(node_a)} <-> {node_name(node_b)}")
+            continue
+
+        # Exists-guard: verify nodes still exist (safety net)
         if not engine.graph_service.get_node(node_a["id"]) or not engine.graph_service.get_node(node_b["id"]):
             LOGGER.info(f"MERGE SKIP (stale): {node_name(node_a)} <-> {node_name(node_b)}")
             continue
@@ -110,6 +128,7 @@ def execute_decisions(engine, stats: dict, decisions: list) -> dict:
                     "strategy": strategy,
                 })
             _execute(engine, primary, secondary)
+            merged_ids.add(secondary)
             decision_record["primary"] = node_name(primary_node)
             stats["merged"] += 1
             cache.pop(pair_key, None)
@@ -144,13 +163,13 @@ def run(engine, dry_run: bool, limit: int) -> dict:
     config = engine.dreamer_config
     merge_config = config.get('merge', {})
     if not merge_config.get('enabled', True):
-        return {"candidates": 0, "merged": 0, "skipped": 0, "cached": 0, "decisions": []}
+        return {"candidates": 0, "merged": 0, "skipped": 0, "cached": 0, "skipped_pending": 0, "decisions": []}
 
     if dry_run:
         # Dry run: just discover candidates, no evaluation
         LOGGER.info("Pass 2: MERGE")
         candidates = _discover_candidates(engine, max_candidates=limit if limit else 0)
-        stats = {"candidates": len(candidates), "merged": 0, "skipped": 0, "cached": 0, "decisions": []}
+        stats = {"candidates": len(candidates), "merged": 0, "skipped": 0, "cached": 0, "skipped_pending": 0, "decisions": []}
         if candidates:
             details = []
             for node_a, node_b, strategy in candidates:

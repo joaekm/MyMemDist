@@ -142,9 +142,9 @@ dreamer:
 
   daemon:
     enabled: true
-    node_threshold: 15
-    run_interval_hours: 12              # Tidsfallback — kör minst var 12:e timme
-    poll_interval_seconds: 300
+    node_threshold: 15                   # Kör efter N signaler från Enrichment
+    run_interval_hours: 12               # Tidsfallback — kör minst var 12:e timme
+    poll_interval_seconds: 300           # Hur ofta daemon pollar state-filen
     state_file: "~/MyMemory/Index/.dreamer_state.json"
 
 # Enrichment — batchberikning av graf-noder

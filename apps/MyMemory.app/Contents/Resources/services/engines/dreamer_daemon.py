@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Dreamer Daemon (OBJEKT-107)
+Dreamer Daemon (OBJEKT-107, #127)
 
-Time-based trigger for dreamer (structural analysis) cycles.
-Runs every run_interval_hours (default: 24h).
+Need-based trigger for dreamer (structural analysis) cycles.
+Triggers when Enrichment has signalled work via the dreamer state counter.
+No time-based fallback — runs only when there is actual need.
+
+Signal chain: Ingestion -> Enrichment -> Dreamer (via state file counter).
 
 Reads config from 'dreamer.daemon'.
 """
@@ -20,9 +23,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from services.utils.graph_service import GraphService
+from services.utils.graph_service import graph_scope
 from services.utils.vector_service import vector_scope
-from services.utils.shared_lock import resource_lock
 from services.engines.dreamer import Dreamer
 
 # Load config for logging
@@ -55,6 +57,58 @@ LOGGER = logging.getLogger('DreamerDaemon')
 from services.utils.terminal_status import status as terminal_status, service_status
 
 
+def _write_graph_health(config: dict):
+    """Beräkna och skriv grafhälsa till state-fil (#135).
+
+    Kallas efter sweep. Menubar-appen läser filen för statuslampan.
+    """
+    try:
+        from services.utils.graph_service import calculate_graph_health
+
+        graph_path = os.path.expanduser(
+            config.get('paths', {}).get('graph_db', '~/MyMemory/Index/my_mem_graph.duckdb')
+        )
+
+        with graph_scope(exclusive=False, db_path=graph_path) as graph:
+            maint = graph.get_maintenance_stats()
+
+        # Dreamer har just kört — counter är redan nollställd
+        # Läs state för last_run_result
+        dreamer_state_file = os.path.expanduser(
+            config.get('dreamer', {}).get('daemon', {}).get(
+                'state_file', '~/Library/Application Support/MyMemory/dreamer_state.json'
+            )
+        )
+        dreamer_counter = 0
+        last_sweep_had_decisions = False
+        if os.path.exists(dreamer_state_file):
+            with open(dreamer_state_file, 'r') as f:
+                ds = json.load(f)
+            dreamer_counter = ds.get('nodes_since_last_run', 0)
+            lr = ds.get('last_run_result') or {}
+            last_sweep_had_decisions = any(
+                v.get('merged', 0) > 0 or v.get('renamed', 0) > 0
+                for v in [lr.get('merge', {}), lr.get('rename', {})]
+            )
+
+        health = calculate_graph_health(maint, dreamer_counter, last_sweep_had_decisions)
+
+        health_file = os.path.expanduser(
+            config.get('graph_health', {}).get(
+                'state_file', '~/Library/Application Support/MyMemory/graph_health.json'
+            )
+        )
+        os.makedirs(os.path.dirname(health_file), exist_ok=True)
+        health['timestamp'] = datetime.now().isoformat()
+        with open(health_file, 'w') as f:
+            json.dump(health, f, indent=2, default=str)
+
+        LOGGER.info(f"Graph health: {health['score']:.2f} ({health['level']})")
+
+    except Exception as e:
+        LOGGER.warning(f"Could not write graph health: {e}")
+
+
 def _load_config() -> dict:
     """Load daemon config from my_mem_config.yaml."""
     try:
@@ -69,8 +123,8 @@ def _get_daemon_config(config: dict) -> dict:
     daemon_config = config.get('dreamer', {}).get('daemon', {})
     return {
         'enabled': daemon_config.get('enabled', True),
-        'run_interval_hours': daemon_config.get('run_interval_hours', 24),
-        'poll_interval_seconds': daemon_config.get('poll_interval_seconds', 600),
+        'node_threshold': daemon_config.get('node_threshold', 15),
+        'poll_interval_seconds': daemon_config.get('poll_interval_seconds', 300),
         'state_file': os.path.expanduser(
             daemon_config.get('state_file', '~/Library/Application Support/MyMemory/dreamer_state.json')
         )
@@ -79,21 +133,24 @@ def _get_daemon_config(config: dict) -> dict:
 
 def _load_state(state_file: str) -> dict:
     """Load state from JSON file."""
+    default = {
+        'nodes_since_last_run': 0,
+        'last_run_timestamp': None,
+        'last_run_result': None
+    }
     if not os.path.exists(state_file):
-        return {
-            'last_run_timestamp': None,
-            'last_run_result': None
-        }
+        return default
 
     try:
         with open(state_file, 'r') as f:
-            return json.load(f)
+            state = json.load(f)
+        # Backfill nodes_since_last_run for pre-#127 state files
+        if 'nodes_since_last_run' not in state:
+            state['nodes_since_last_run'] = 0
+        return state
     except Exception as e:
         LOGGER.warning(f"Could not load state file: {e}. Starting fresh.")
-        return {
-            'last_run_timestamp': None,
-            'last_run_result': None
-        }
+        return default
 
 
 def _save_state(state_file: str, state: dict):
@@ -129,29 +186,27 @@ def _enrichment_has_run_since(dreamer_last_run: str, config: dict) -> bool:
 
 
 def _should_run(state: dict, daemon_config: dict, config: dict = None) -> tuple[bool, str]:
-    """Check if dreamer should run.
+    """Check if dreamer should run (#127: need-based, no time fallback).
 
-    Requires that Enrichment has run since the last Dreamer run
-    (Enrichment sets quality_flags consumed by Dreamer's split/recat passes).
+    Triggers when Enrichment has signalled work via the state counter.
+    Enrichment must have run since the last Dreamer run (ordering guard).
     """
+    nodes_count = state.get('nodes_since_last_run', 0)
     last_run = state.get('last_run_timestamp')
-    interval_hours = daemon_config['run_interval_hours']
+    threshold = daemon_config['node_threshold']
 
-    if last_run:
-        try:
-            last_run_dt = datetime.fromisoformat(last_run)
-            hours_since = (datetime.now() - last_run_dt).total_seconds() / 3600
-            if hours_since >= interval_hours:
-                # Check enrichment ordering
-                if config and not _enrichment_has_run_since(last_run, config):
-                    return False, f"Interval reached ({hours_since:.1f}h) but Enrichment has not run since last Dreamer — waiting"
-                return True, f"Interval reached: {hours_since:.1f}h >= {interval_hours}h"
-            return False, f"Waiting: {hours_since:.1f}h / {interval_hours}h"
-        except ValueError as e:
-            LOGGER.warning(f"Could not parse last_run_timestamp: {e}")
-            return True, "Invalid timestamp, running"
-    else:
-        return True, "First run"
+    # Need-based: Enrichment signalled enough work
+    if nodes_count >= threshold:
+        # Verify enrichment ordering
+        if last_run and config and not _enrichment_has_run_since(last_run, config):
+            return False, f"Threshold reached ({nodes_count} >= {threshold}) but Enrichment has not run since last Dreamer — waiting"
+        return True, f"Node threshold reached: {nodes_count} >= {threshold}"
+
+    # First run with pending work
+    if not last_run and nodes_count > 0:
+        return True, f"First run with {nodes_count} pending signals"
+
+    return False, f"No trigger: {nodes_count}/{threshold} signals, waiting"
 
 
 def _run_dreamer(config: dict) -> dict:
@@ -165,13 +220,11 @@ def _run_dreamer(config: dict) -> dict:
     )
 
     try:
-        # --- Phase 1: Discover + Evaluate (read-only graph) ---
-        LOGGER.info("Phase 1: Discover + Evaluate (read-only)...")
-        graph_ro = GraphService(graph_path, read_only=True)
-        dreamer = Dreamer(graph_ro, vector_service=None)
-
-        sweep_results = dreamer.discover_and_evaluate_all()
-        graph_ro.close()
+        # --- Phase 1: Discover + Evaluate (shared lock) ---
+        LOGGER.info("Phase 1: Discover + Evaluate (shared lock)...")
+        with graph_scope(exclusive=False, db_path=graph_path) as graph_ro:
+            dreamer = Dreamer(graph_ro, vector_service=None)
+            sweep_results = dreamer.discover_and_evaluate_all()
 
         # Check if there's anything to execute
         has_decisions = any(
@@ -190,15 +243,11 @@ def _run_dreamer(config: dict) -> dict:
 
         # --- Phase 2: Execute (exclusive locks, ~2-5s) ---
         LOGGER.info("Phase 2: Executing decisions (exclusive locks)...")
-        with resource_lock("graph", exclusive=True):
+        with graph_scope(exclusive=True, db_path=graph_path) as graph_rw:
             with vector_scope(exclusive=True) as vector_service:
-                graph_rw = GraphService(graph_path)
                 dreamer.graph_service = graph_rw
                 dreamer.vector_service = vector_service
-
                 result = dreamer.execute_all(sweep_results)
-
-                graph_rw.close()
 
         LOGGER.info(f"Dreamer completed: {result}")
         return result
@@ -219,7 +268,7 @@ def run_daemon():
 
     LOGGER.info("=" * 60)
     LOGGER.info("Dreamer Daemon starting")
-    LOGGER.info(f"  Run interval: {daemon_config['run_interval_hours']}h")
+    LOGGER.info(f"  Node threshold: {daemon_config['node_threshold']}")
     LOGGER.info(f"  Poll interval: {daemon_config['poll_interval_seconds']}s")
     LOGGER.info(f"  State file: {daemon_config['state_file']}")
     LOGGER.info("=" * 60)
@@ -236,6 +285,7 @@ def run_daemon():
                 terminal_status("dreamer", reason, "processing")
                 result = _run_dreamer(config)
 
+                state['nodes_since_last_run'] = 0
                 state['last_run_timestamp'] = datetime.now().isoformat()
                 state['last_run_result'] = result
                 _save_state(daemon_config['state_file'], state)
@@ -245,6 +295,9 @@ def run_daemon():
                 summary = (f"{merge_stats.get('merged', 0)} merged, "
                            f"{rename_stats.get('renamed', 0)} renamed")
                 terminal_status("dreamer", "Sweep complete", "done", detail=summary)
+
+                # Uppdatera grafhälsa (#135)
+                _write_graph_health(config)
 
                 LOGGER.info("State updated after dreamer run")
             else:
@@ -273,6 +326,7 @@ def run_once():
         print("\nRunning Dreamer...")
         result = _run_dreamer(config)
 
+        state['nodes_since_last_run'] = 0
         state['last_run_timestamp'] = datetime.now().isoformat()
         state['last_run_result'] = result
         _save_state(daemon_config['state_file'], state)
@@ -285,7 +339,7 @@ def run_once():
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Dreamer Daemon - time-based trigger")
+    parser = argparse.ArgumentParser(description="Dreamer Daemon - need-based trigger (#127)")
     parser.add_argument('--once', action='store_true', help="Run single check then exit")
     parser.add_argument('--status', action='store_true', help="Show current state and exit")
     args = parser.parse_args()

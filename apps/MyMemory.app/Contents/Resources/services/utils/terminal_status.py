@@ -42,6 +42,7 @@ PROCESS_CONFIG = {
     "rode":           {"emoji": "🎙️", "color": "cyan"},
     "rebuild":        {"emoji": "🔄", "color": "white"},
     "dreamer":        {"emoji": "💭", "color": "cyan"},
+    "graph_health":   {"emoji": "🩺", "color": "green"},
     "service":        {"emoji": "⚙️", "color": "white"},
 }
 

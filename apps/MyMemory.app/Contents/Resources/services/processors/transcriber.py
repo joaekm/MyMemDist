@@ -57,7 +57,7 @@ from services.utils.audio_service import (
 from services.utils.date_service import get_timestamp
 from services.utils.llm_service import LLMService, AdaptiveThrottler
 from services.utils.providers import GeminiProvider
-from services.utils.graph_service import GraphService
+from services.utils.graph_service import graph_scope
 from services.utils.schema_validator import SchemaValidator
 from services.utils.vector_service import vector_scope
 from services.utils.metadata_service import generate_semantic_metadata, get_owner_name
@@ -785,71 +785,64 @@ def step5_enrich_context(
 
     # Graf-uppslagning — schema-driven
     if os.path.exists(GRAPH_PATH):
-        graph = None
         try:
-            graph = GraphService(GRAPH_PATH, read_only=True)
-            validator = _get_schema_validator()
-            schema_nodes = validator.schema.get('nodes', {})
-            schema_edges = validator.schema.get('edges', {})
-            doc_type = validator.get_document_node_type()
+            with graph_scope(exclusive=False, db_path=GRAPH_PATH) as graph:
+                validator = _get_schema_validator()
+                schema_nodes = validator.schema.get('nodes', {})
+                schema_edges = validator.schema.get('edges', {})
+                doc_type = validator.get_document_node_type()
 
-            for node_type, node_def in schema_nodes.items():
-                if node_type == doc_type:
-                    continue
-
-                query_attr = QUERY_ATTR_MAP.get(node_type)
-                if not query_attr or not hasattr(queries, query_attr):
-                    continue
-
-                type_props = set(node_def.get('properties', {}).keys()) - {'name'}
-
-                for name in getattr(queries, query_attr)[:MAX_ENTITY_QUERIES]:
-                    node_id = graph.find_node_by_name(node_type, name)
-                    if not node_id:
-                        continue
-                    node = graph.get_node(node_id)
-                    if not node:
+                for node_type, node_def in schema_nodes.items():
+                    if node_type == doc_type:
                         continue
 
-                    props = node.get('properties', {})
-                    node_data = {
-                        'node_id': node_id,
-                        'context_summary': props.get('context_summary', ''),
-                    }
-                    for prop_name in type_props:
-                        node_data[prop_name] = props.get(prop_name, '')
+                    query_attr = QUERY_ATTR_MAP.get(node_type)
+                    if not query_attr or not hasattr(queries, query_attr):
+                        continue
 
-                    # Hämta edges — schema-driven
-                    edges = graph.get_edges_from(node_id)
-                    for edge in edges:
-                        edge_type = edge.get('type')
-                        edge_def = schema_edges.get(edge_type, {})
-                        target = graph.get_node(edge.get('target'))
-                        if not target:
+                    type_props = set(node_def.get('properties', {}).keys()) - {'name'}
+
+                    for name in getattr(queries, query_attr)[:MAX_ENTITY_QUERIES]:
+                        node_id = graph.find_node_by_name(node_type, name)
+                        if not node_id:
+                            continue
+                        node = graph.get_node(node_id)
+                        if not node:
                             continue
 
-                        target_name = target.get('properties', {}).get('name', '')
-                        edge_props = edge.get('properties', {})
+                        props = node.get('properties', {})
+                        node_data = {
+                            'node_id': node_id,
+                            'context_summary': props.get('context_summary', ''),
+                        }
+                        for prop_name in type_props:
+                            node_data[prop_name] = props.get(prop_name, '')
 
-                        edge_info = {'name': target_name, 'edge_type': edge_type}
-                        for ep_name in edge_def.get('properties', {}):
-                            if ep_name != 'confidence':
-                                val = edge_props.get(ep_name, '')
-                                if val:
-                                    edge_info[ep_name] = val
+                        # Hämta edges — schema-driven
+                        edges = graph.get_edges_from(node_id)
+                        for edge in edges:
+                            edge_type = edge.get('type')
+                            edge_def = schema_edges.get(edge_type, {})
+                            target = graph.get_node(edge.get('target'))
+                            if not target:
+                                continue
 
-                        node_data.setdefault('edges', []).append(edge_info)
+                            target_name = target.get('properties', {}).get('name', '')
+                            edge_props = edge.get('properties', {})
 
-                    graph_data.setdefault(node_type, {})[name] = node_data
+                            edge_info = {'name': target_name, 'edge_type': edge_type}
+                            for ep_name in edge_def.get('properties', {}):
+                                if ep_name != 'confidence':
+                                    val = edge_props.get(ep_name, '')
+                                    if val:
+                                        edge_info[ep_name] = val
+
+                            node_data.setdefault('edges', []).append(edge_info)
+
+                        graph_data.setdefault(node_type, {})[name] = node_data
 
         except Exception as e:  # noqa: FALLBACK_DOCUMENTED - graf-berikning är optional
             LOGGER.warning(f"Graf-berikning misslyckades: {e}")
-        finally:
-            if graph is not None:
-                try:
-                    graph.close()
-                except Exception:  # noqa: FALLBACK_DOCUMENTED - close failure accepteras
-                    pass
 
     # Vektor-sökning
     LOGGER.info("Steg 5: Startar vektor-sökning")

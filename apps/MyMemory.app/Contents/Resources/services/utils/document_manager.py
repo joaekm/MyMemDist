@@ -21,9 +21,8 @@ import logging
 import yaml
 
 from services.utils.config_loader import get_config
-from services.utils.graph_service import GraphService
+from services.utils.graph_service import graph_scope, GraphService
 from services.utils.vector_service import vector_scope
-from services.utils.shared_lock import resource_lock
 from services.utils.schema_validator import SchemaValidator
 
 LOGGER = logging.getLogger("DocumentManager")
@@ -223,11 +222,8 @@ def preview_deletion(doc_id: str) -> dict:
     original_filename = fm.get("original_filename", "")
     asset_file = find_asset_file(original_filename)
 
-    graph = GraphService(graph_db_path, read_only=True)
-    try:
+    with graph_scope(exclusive=False, db_path=graph_db_path) as graph:
         impact = collect_impact(unit_id, graph)
-    finally:
-        graph.close()
 
     return {
         "status": "PREVIEW",
@@ -293,62 +289,56 @@ def execute_deletion(doc_id: str) -> dict:
         "actions": [],
     }
 
-    with resource_lock("graph", exclusive=True):
+    with graph_scope(exclusive=True, db_path=graph_db_path) as graph:
         with vector_scope(exclusive=True) as vs:
-            graph = GraphService(graph_db_path)
+            # 1. Rensa orphan entities
+            edges = graph.get_edges_from(unit_id)
+            source_edges = _get_schema_validator().get_source_edge_types()
+            mentions = [e for e in edges if e.get("type") in source_edges]
 
-            try:
-                # 1. Rensa orphan entities
-                edges = graph.get_edges_from(unit_id)
-                source_edges = _get_schema_validator().get_source_edge_types()
-                mentions = [e for e in edges if e.get("type") in source_edges]
+            entities_cleaned = 0
+            entities_deleted = 0
+            rc_purged = 0
 
-                entities_cleaned = 0
-                entities_deleted = 0
-                rc_purged = 0
+            for edge in mentions:
+                entity_id = edge["target"]
+                entity = graph.get_node(entity_id)
+                if not entity:
+                    continue
 
-                for edge in mentions:
-                    entity_id = edge["target"]
-                    entity = graph.get_node(entity_id)
-                    if not entity:
-                        continue
+                # Check if entity is orphan (no edges from other sources)
+                other_incoming = [e for e in graph.get_edges_to(entity_id) if e["source"] != unit_id]
+                other_outgoing = graph.get_edges_from(entity_id)
 
-                    # Check if entity is orphan (no edges from other sources)
-                    other_incoming = [e for e in graph.get_edges_to(entity_id) if e["source"] != unit_id]
-                    other_outgoing = graph.get_edges_from(entity_id)
+                if not other_incoming and not other_outgoing:
+                    graph.delete_node(entity_id)
+                    vs.delete(entity_id)
+                    entities_deleted += 1
+                else:
+                    # Purge relation_context entries referencing deleted document
+                    rc_purged += _purge_relation_context(graph, entity_id, unit_id)
+                    entities_cleaned += 1
 
-                    if not other_incoming and not other_outgoing:
-                        graph.delete_node(entity_id)
-                        vs.delete(entity_id)
-                        entities_deleted += 1
-                    else:
-                        # Purge relation_context entries referencing deleted document
-                        rc_purged += _purge_relation_context(graph, entity_id, unit_id)
-                        entities_cleaned += 1
-
+            result["actions"].append(
+                f"Entities: {entities_cleaned} cleaned, {entities_deleted} deleted"
+            )
+            if rc_purged:
                 result["actions"].append(
-                    f"Entities: {entities_cleaned} cleaned, {entities_deleted} deleted"
-                )
-                if rc_purged:
-                    result["actions"].append(
-                        f"Relation context: {rc_purged} entries purged from edges"
-                    )
-
-                # 2. Ta bort Source-noden (+ kvarvarande MENTIONS-kanter)
-                doc_deleted = graph.delete_node(unit_id)
-                result["actions"].append(
-                    f"Document node: {'deleted' if doc_deleted else 'not found'}"
+                    f"Relation context: {rc_purged} entries purged from edges"
                 )
 
-                # 3. Ta bort vector-entries
-                vs.delete(unit_id)
-                chunks_deleted = vs.delete_by_parent(unit_id)
-                result["actions"].append(
-                    f"Vector: document + {chunks_deleted} chunks deleted"
-                )
+            # 2. Ta bort Source-noden (+ kvarvarande MENTIONS-kanter)
+            doc_deleted = graph.delete_node(unit_id)
+            result["actions"].append(
+                f"Document node: {'deleted' if doc_deleted else 'not found'}"
+            )
 
-            finally:
-                graph.close()
+            # 3. Ta bort vector-entries
+            vs.delete(unit_id)
+            chunks_deleted = vs.delete_by_parent(unit_id)
+            result["actions"].append(
+                f"Vector: document + {chunks_deleted} chunks deleted"
+            )
 
     # 4. Ta bort Lake-fil
     try:
