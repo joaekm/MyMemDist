@@ -101,8 +101,8 @@ ai_engine:
   # Modell-definitioner
   models:
     # Claude (Anthropic) - text-prompts
-    model_pro: "claude-sonnet-4-5-20250929"      # Konsolidering, komplex analys
-    model_fast: "claude-sonnet-4-5-20250929"    # Enrichment, strukturell analys
+    model_pro: "claude-sonnet-4-6"                # Konsolidering, komplex analys
+    model_fast: "claude-sonnet-4-6"              # Enrichment, strukturell analys
     model_lite: "claude-haiku-4-5-20251001"     # Validering, entity resolution
 
     # Gemini - transkribering
@@ -155,6 +155,7 @@ enrichment:
 
   daemon:
     re_enrich_threshold: 10
+    sleep_need_threshold: 0.10           # Trigga Enrichment när sömnbehov >= detta värde (#135)
 
   thresholds:
     enrich: 0.6
@@ -281,6 +282,16 @@ transcriber:
   part_preview_limit: 500
   max_file_workers: 2
   max_chunk_workers: 10
+
+# --- SIGNAL FEED (peer-to-peer via broker) ---
+# Avstängt som default. Aktiveras i menubar-inställningar.
+signal_feed:
+  enabled: false                      # Peer-server startar bara om true
+  port: 8100                          # HTTP-port för peer MCP-server
+  broker_url: ""                      # Broker-adress (t.ex. https://main-xxx.platformsh.site)
+  heartbeat_interval_seconds: 300     # Registrering/heartbeat-intervall (sekunder)
+  smoketrail_clusters: 12             # Antal k-means kluster för passive smoketrail
+  feed_cache_ttl_seconds: 3600        # Cache-tid för genererad feed (sekunder)
 
 # --- DESKTOP ---
 desktop:

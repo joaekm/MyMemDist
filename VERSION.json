@@ -1,7 +1,7 @@
 {
-  "version": "0.12.11",
-  "date": "2026-03-07",
-  "description": "# Release Notes - Koordinerad DuckDB-åtkomst via graph_scope context manager (#133) - Saknad GraphService-import i document_manager fixad (#134) - Dreamer filtrerar redan merge-pending noder före LLM-anrop (#109) - Behovsbaserad Dreamer-triggning via Enrichment-signal istället för tidsintervall (#127) - Konsoliderat MCP-verktyg för grafhälsa och statistik med sömnbehovsberäkning (#135) - Saknad config-nyckel dreamer.daemon.run_interval_hours tillagd i template ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.11/MyMemory-Installer.dmg",
+  "version": "0.12.12",
+  "date": "2026-03-11",
+  "description": "# Release Notes Signal Feed — peer-to-peer kunskapsdelning via broker. **Nytt:** - Signal Feed peer-server som exponerar alla MCP-verktyg via HTTP - Smoketrail-feed: anonyma tematiska fingerprints (k-means centroids) utan klartext - Automatisk registrering hos Signal Feed Broker med heartbeat - Menubar-toggle för att aktivera/avaktivera Signal Feed - Inställningar för broker URL, port, heartbeat-intervall - Feed sparas till disk med 7 dagars retention **Förbättringar:** - ChromaDB telemetri avstängd som default ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.12/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

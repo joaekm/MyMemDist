@@ -206,6 +206,11 @@ def start_all():
     if script_dir not in existing.split(os.pathsep):
         env['PYTHONPATH'] = script_dir + (os.pathsep + existing if existing else '')
 
+    # Conditionally add peer server (Signal Feed)
+    if CONFIG.get('signal_feed', {}).get('enabled', False):
+        SERVICES.append({"module": "services.agents.peer_server", "name": "Peer Server"})
+        LOGGER.info("Signal Feed enabled — adding Peer Server")
+
     for service in SERVICES:
         module_name = service["module"]
         try:

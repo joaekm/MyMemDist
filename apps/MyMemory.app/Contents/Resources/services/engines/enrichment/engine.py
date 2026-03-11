@@ -523,7 +523,7 @@ class Enrichment:
             for node_id in self._triage_skipped_nodes:
                 node = self.graph_service.get_node(node_id)
                 if node:
-                    props = json.loads(node[3]) if node[3] else {}
+                    props = node.get('properties', {})
                     props["last_refined_at"] = now_iso
                     self.graph_service.update_node_properties(node_id, props)
             LOGGER.info(f"Triage-skip: updated last_refined_at for {len(self._triage_skipped_nodes)} nodes")

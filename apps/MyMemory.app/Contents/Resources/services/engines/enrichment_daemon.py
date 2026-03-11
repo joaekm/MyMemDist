@@ -97,11 +97,8 @@ def _increment_dreamer_counter(config: dict, enriched: int, flagged: int):
         raise RuntimeError(f"Failed to update Dreamer counter: {e}") from e
 
 
-def _write_graph_health(config: dict):
-    """Beräkna och skriv grafhälsa till state-fil (#135).
-
-    Kallas efter sweep. Menubar-appen läser filen för statuslampan.
-    """
+def _calculate_graph_health(config: dict) -> dict | None:
+    """Beräkna grafhälsa (#135). Returnerar health-dict eller None vid fel."""
     try:
         from services.utils.graph_service import graph_scope, calculate_graph_health
 
@@ -112,7 +109,6 @@ def _write_graph_health(config: dict):
         with graph_scope(exclusive=False, db_path=graph_path) as graph:
             maint = graph.get_maintenance_stats()
 
-        # Läs dreamer-counter
         dreamer_counter = 0
         last_sweep_had_decisions = False
         dreamer_state_file = _get_dreamer_state_file(config)
@@ -126,8 +122,23 @@ def _write_graph_health(config: dict):
                 for v in [lr.get('merge', {}), lr.get('rename', {})]
             )
 
-        health = calculate_graph_health(maint, dreamer_counter, last_sweep_had_decisions)
+        return calculate_graph_health(maint, dreamer_counter, last_sweep_had_decisions)
 
+    except Exception as e:
+        LOGGER.warning(f"Could not calculate graph health: {e}")
+        return None
+
+
+def _write_graph_health(config: dict):
+    """Beräkna och skriv grafhälsa till state-fil (#135).
+
+    Kallas efter sweep. Menubar-appen läser filen för statuslampan.
+    """
+    health = _calculate_graph_health(config)
+    if not health:
+        return
+
+    try:
         health_file = os.path.expanduser(
             config.get('graph_health', {}).get(
                 'state_file', '~/Library/Application Support/MyMemory/graph_health.json'
@@ -200,9 +211,22 @@ def _save_state(state_file: str, state: dict):
         LOGGER.error(f"Failed to save state: {e}")
 
 
-def _should_run(state: dict, daemon_config: dict) -> tuple[bool, str]:
+def _get_sleep_need(config: dict) -> float:
+    """Hämta sömnbehov via _calculate_graph_health. Returnerar -1 vid fel."""
+    health = _calculate_graph_health(config)
+    if health:
+        return health.get('score', -1)
+    return -1
+
+
+def _should_run(state: dict, daemon_config: dict, config: dict = None) -> tuple[bool, str]:
     """
     Check if Enrichment should run.
+
+    Triggers:
+    1. Node threshold (nya dokument via ingestion)
+    2. Sömnbehov >= 0.20 (grafens backlog, #135)
+    3. Tidsfallback (max_hours_between_runs)
 
     Returns:
         (should_run: bool, reason: str)
@@ -213,11 +237,18 @@ def _should_run(state: dict, daemon_config: dict) -> tuple[bool, str]:
     threshold = daemon_config['node_threshold']
     max_hours = daemon_config['max_hours_between_runs']
 
-    # Check node threshold
+    # 1. Node threshold (nya dokument)
     if nodes_count >= threshold:
         return True, f"Node threshold reached: {nodes_count} >= {threshold}"
 
-    # Check time-based fallback
+    # 2. Sömnbehov — grafens backlog driver Enrichment (#135)
+    if config:
+        sleep_threshold = config['enrichment']['daemon']['sleep_need_threshold']
+        sleep_need = _get_sleep_need(config)
+        if sleep_need >= sleep_threshold:
+            return True, f"Sleep need: {sleep_need:.2f} >= {sleep_threshold}"
+
+    # 3. Tidsfallback
     if last_run:
         try:
             last_run_dt = datetime.fromisoformat(last_run)
@@ -319,7 +350,7 @@ def run_daemon():
     while True:
         try:
             state = _load_state(daemon_config['state_file'])
-            should_run, reason = _should_run(state, daemon_config)
+            should_run, reason = _should_run(state, daemon_config, config)
 
             if should_run:
                 LOGGER.info(f"Triggering Enrichment: {reason}")
@@ -366,7 +397,7 @@ def run_once():
     daemon_config = _get_daemon_config(config)
 
     state = _load_state(daemon_config['state_file'])
-    should_run, reason = _should_run(state, daemon_config)
+    should_run, reason = _should_run(state, daemon_config, config)
 
     print(f"State: {json.dumps(state, indent=2, default=str)}")
     print(f"Should run: {should_run}")

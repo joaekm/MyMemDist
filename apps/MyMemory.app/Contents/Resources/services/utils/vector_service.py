@@ -27,6 +27,8 @@ def _silent_tqdm_init(self, *args, **kwargs):
 tqdm.tqdm.__init__ = _silent_tqdm_init
 tqdm.auto.tqdm.__init__ = _silent_tqdm_init
 
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
 import chromadb
 from chromadb.utils import embedding_functions
 from typing import List, Dict, Any, Optional
