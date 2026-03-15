@@ -1,7 +1,7 @@
 {
-  "version": "0.12.13",
+  "version": "0.12.14",
   "date": "2026-03-15",
-  "description": "# Release Notes Bearer token-autentisering mellan Intent och peer-server. **Nytt:** - Peer-server validerar inkommande MCP-anslutningar via delad Bearer-token (FastMCP TokenVerifier) - Ny config-nyckel `signal_feed.intent_peer_secret` — peer-server vägrar starta utan konfigurerad secret - Config upgrade bevarar secret vid appuppgradering ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.13/MyMemory-Installer.dmg",
+  "description": "# Release Notes Peer-server autentisering och registrering mot Intent. **Nytt:** - Bearer token-auth på peer_server via FastMCP TokenVerifier — peer-server vägrar starta utan konfigurerad secret - Automatisk registrering mot Intent: hämtar ngrok-URL dynamiskt och POSTar till /api/register med Bearer-token - Ny config-nyckel `signal_feed.intent_peer_secret` (bevaras vid config-uppgradering) ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.14/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

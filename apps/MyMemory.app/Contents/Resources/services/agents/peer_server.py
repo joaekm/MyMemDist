@@ -32,7 +32,7 @@ if project_root not in sys.path:
 # signal handlers, and all tool functions. We piggyback on that setup.
 from services.agents import mymem_mcp
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from fastmcp.server.auth import TokenVerifier, AccessToken
 
 # Reconfigure logging prefix for peer server
@@ -109,6 +109,13 @@ def _clean_old_feeds():
 
 # --- Auth ---
 
+if not INTENT_PEER_SECRET:
+    LOGGER.error("intent_peer_secret not set — peer server will not start without auth")
+    print("ERROR: signal_feed.intent_peer_secret missing in config. "
+          "Peer server refuses to start without auth.", file=sys.stderr)
+    sys.exit(1)
+
+
 class IntentTokenVerifier(TokenVerifier):
     """Validate Bearer token against shared secret from config."""
 
@@ -123,20 +130,10 @@ class IntentTokenVerifier(TokenVerifier):
         )
 
 
-if not INTENT_PEER_SECRET:
-    LOGGER.error("intent_peer_secret not set — peer server will not start without auth")
-    print("ERROR: signal_feed.intent_peer_secret missing in config. "
-          "Peer server refuses to start without auth.", file=sys.stderr)
-    sys.exit(1)
-
-_auth = IntentTokenVerifier()
-
 # --- Peer MCP Server (StreamableHTTP) ---
 peer_mcp = FastMCP(
     f"MyMemory-Peer-{PEER_ID}",
-    host="0.0.0.0",
-    port=PEER_PORT,
-    auth=_auth,
+    auth=IntentTokenVerifier(),
 )
 
 # ========================================================================
@@ -276,45 +273,65 @@ def get_signals() -> str:
 
 
 # ========================================================================
-# Broker registration & heartbeat
+# Intent registration & heartbeat
 # ========================================================================
 
-def _register_with_broker():
-    """POST registration to broker. Broker reads our public IP from the request."""
+def _get_ngrok_url() -> str | None:
+    """Fetch public ngrok tunnel URL from local API."""
+    try:
+        req = urllib.request.Request("http://127.0.0.1:4040/api/tunnels")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        for tunnel in data.get("tunnels", []):
+            public_url = tunnel.get("public_url", "")
+            if public_url.startswith("https://"):
+                return public_url
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        LOGGER.warning(f"Could not fetch ngrok URL: {e}")
+    return None
+
+
+def _register_with_intent():
+    """POST registration to Intent so it knows our ngrok URL."""
     if not BROKER_URL:
         return
 
-    url = BROKER_URL.rstrip('/') + '/api/peers/register'
-    tool_names = [f.__name__ for f in _MYMEM_TOOLS] + ["get_feed", "receive_signal", "get_signals"]
+    ngrok_url = _get_ngrok_url()
+    if not ngrok_url:
+        LOGGER.warning("No ngrok tunnel found — skipping registration")
+        return
+
+    memory_url = ngrok_url.rstrip('/') + '/mcp'
+    url = BROKER_URL.rstrip('/') + '/api/register'
     payload = json.dumps({
-        "peer_id": PEER_ID,
-        "port": PEER_PORT,
-        "tools": tool_names,
-        "version": CONFIG.get('version', 'unknown'),
+        "user_id": PEER_ID,
+        "memory_url": memory_url,
     }).encode('utf-8')
 
     try:
         req = urllib.request.Request(
             url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {INTENT_PEER_SECRET}",
+            },
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            LOGGER.info(f"Registered with broker ({resp.status})")
+            LOGGER.info(f"Registered with Intent ({resp.status}): {memory_url}")
     except (urllib.error.URLError, OSError) as e:
-        LOGGER.warning(f"Broker registration failed: {e}")
+        LOGGER.warning(f"Intent registration failed: {e}")
 
 
 def _heartbeat_loop():
     """Background thread: register at startup, then heartbeat every N seconds."""
-    # Initial registration (small delay to let server start)
     time.sleep(2)
-    _register_with_broker()
+    _register_with_intent()
 
     while True:
         time.sleep(HEARTBEAT_INTERVAL)
-        _register_with_broker()
+        _register_with_intent()
 
 
 # ========================================================================
@@ -326,12 +343,13 @@ if __name__ == "__main__":
     LOGGER.info(f"  Tools: {len(_MYMEM_TOOLS)} from mymem_mcp + 3 signal feed")
 
     if BROKER_URL:
-        LOGGER.info(f"  Broker: {BROKER_URL} (heartbeat every {HEARTBEAT_INTERVAL}s)")
+        LOGGER.info(f"  Intent: {BROKER_URL} (heartbeat every {HEARTBEAT_INTERVAL}s)")
         t = threading.Thread(target=_heartbeat_loop, daemon=True)
         t.start()
     else:
-        LOGGER.info("  No broker_url configured — skipping registration")
+        LOGGER.info("  No broker_url configured — skipping Intent registration")
 
+    LOGGER.info("  Auth: Bearer token required")
     print(f"Peer server '{PEER_ID}' starting on http://0.0.0.0:{PEER_PORT}/mcp",
           file=sys.stderr)
-    peer_mcp.run(transport="streamable-http")
+    peer_mcp.run(transport="streamable-http", host="0.0.0.0", port=PEER_PORT)
