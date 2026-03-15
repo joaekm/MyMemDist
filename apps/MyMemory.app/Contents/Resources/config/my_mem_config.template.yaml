@@ -289,6 +289,7 @@ signal_feed:
   enabled: false                      # Peer-server startar bara om true
   port: 8100                          # HTTP-port för peer MCP-server
   broker_url: ""                      # Broker-adress (t.ex. https://main-xxx.platformsh.site)
+  intent_peer_secret: ""              # Delad Bearer-token för Intent → peer auth
   heartbeat_interval_seconds: 300     # Registrering/heartbeat-intervall (sekunder)
   smoketrail_clusters: 12             # Antal k-means kluster för passive smoketrail
   feed_cache_ttl_seconds: 3600        # Cache-tid för genererad feed (sekunder)

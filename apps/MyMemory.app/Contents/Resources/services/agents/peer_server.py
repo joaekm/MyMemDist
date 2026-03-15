@@ -33,6 +33,7 @@ if project_root not in sys.path:
 from services.agents import mymem_mcp
 
 from mcp.server.fastmcp import FastMCP
+from fastmcp.server.auth import TokenVerifier, AccessToken
 
 # Reconfigure logging prefix for peer server
 LOGGER = logging.getLogger("PeerServer")
@@ -44,6 +45,7 @@ SIGNAL_FEED_CONFIG = CONFIG.get('signal_feed', {})
 PEER_ID = CONFIG.get('owner', {}).get('id', 'unknown')
 PEER_PORT = SIGNAL_FEED_CONFIG.get('port', 8100)
 BROKER_URL = SIGNAL_FEED_CONFIG.get('broker_url', '')
+INTENT_PEER_SECRET = SIGNAL_FEED_CONFIG.get('intent_peer_secret', '')
 HEARTBEAT_INTERVAL = SIGNAL_FEED_CONFIG.get('heartbeat_interval_seconds', 300)
 
 from services.utils.config_loader import get_mymemory_home
@@ -105,11 +107,36 @@ def _clean_old_feeds():
             pass
 
 
+# --- Auth ---
+
+class IntentTokenVerifier(TokenVerifier):
+    """Validate Bearer token against shared secret from config."""
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if token != INTENT_PEER_SECRET:
+            LOGGER.warning("Invalid Bearer token received")
+            return None
+        return AccessToken(
+            token=token,
+            client_id="intent",
+            scopes=["full"],
+        )
+
+
+if not INTENT_PEER_SECRET:
+    LOGGER.error("intent_peer_secret not set — peer server will not start without auth")
+    print("ERROR: signal_feed.intent_peer_secret missing in config. "
+          "Peer server refuses to start without auth.", file=sys.stderr)
+    sys.exit(1)
+
+_auth = IntentTokenVerifier()
+
 # --- Peer MCP Server (StreamableHTTP) ---
 peer_mcp = FastMCP(
     f"MyMemory-Peer-{PEER_ID}",
     host="0.0.0.0",
     port=PEER_PORT,
+    auth=_auth,
 )
 
 # ========================================================================

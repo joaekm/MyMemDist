@@ -42,6 +42,11 @@ PLACEHOLDER_MAP = {
     "__GMAIL_LABEL__": ("google", "gmail", "target_label"),
 }
 
+# Non-placeholder protected values: key path in old config → (section_marker, key, indent)
+PROTECTED_LINE_VALUES = {
+    ("signal_feed", "intent_peer_secret"): ("signal_feed:", "intent_peer_secret", "  "),
+}
+
 
 def _get_nested(d: dict, path: tuple) -> Any:
     """Safely get a nested value from a dict."""
@@ -207,6 +212,13 @@ def _inject_protected_values(text: str, old_config: dict) -> tuple:
     if old_openai:
         text = _inject_line_value(text, "openai:", "api_key", old_openai, "    ")
         count += 1
+
+    # Generic protected line values (secrets, tokens)
+    for key_path, (section, key, indent) in PROTECTED_LINE_VALUES.items():
+        old_value = _get_nested(old_config, key_path)
+        if old_value:
+            text = _inject_line_value(text, section, key, old_value, indent)
+            count += 1
 
     return text, count
 
