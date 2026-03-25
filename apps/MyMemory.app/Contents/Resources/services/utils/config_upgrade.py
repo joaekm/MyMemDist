@@ -44,6 +44,7 @@ PLACEHOLDER_MAP = {
 
 # Non-placeholder protected values: key path in old config → (section_marker, key, indent)
 PROTECTED_LINE_VALUES = {
+    ("signal_feed", "broker_url"): ("signal_feed:", "broker_url", "  "),
     ("signal_feed", "intent_peer_secret"): ("signal_feed:", "intent_peer_secret", "  "),
 }
 

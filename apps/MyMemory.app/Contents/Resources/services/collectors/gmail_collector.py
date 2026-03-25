@@ -240,7 +240,10 @@ def fetch_message_details(service, message_id: str) -> dict | None:
         headers = payload.get('headers', [])
         
         # Extrahera headers
-        subject = get_header_value(headers, 'Subject') or '(Inget ämne)'
+        subject = get_header_value(headers, 'Subject')
+        if not subject:
+            LOGGER.warning(f"Ämne saknas för meddelande {message_id}")
+            subject = '(Inget ämne)'
         from_addr = get_header_value(headers, 'From')
         to_addr = get_header_value(headers, 'To')
         date_str = get_header_value(headers, 'Date')
@@ -251,7 +254,7 @@ def fetch_message_details(service, message_id: str) -> dict | None:
             if date_dt.tzinfo is None:
                 date_dt = date_dt.replace(tzinfo=SYSTEM_TZ)
         except Exception as e:
-            LOGGER.debug(f"Kunde inte parsa datum '{date_str}': {e}")
+            LOGGER.warning(f"Kunde inte parsa datum '{date_str}' för meddelande {message_id}: {e}")
             date_dt = datetime.datetime.now(SYSTEM_TZ)
         
         # Extrahera body
@@ -305,6 +308,22 @@ def get_existing_message_ids() -> set:
     return existing_ids
 
 
+# --- VALIDERING ---
+
+def validate_email_data(message: dict):
+    """Validerar e-postdata innan fil skrivs till Assets. Returnerar (ok, errors)."""
+    errors = []
+    if not message.get('subject'):
+        errors.append("Ämne saknas")
+    if not message.get('from'):
+        errors.append("Avsändare saknas")
+    if not message.get('body'):
+        errors.append("Body saknas")
+    if not message.get('date'):
+        errors.append("Datum saknas")
+    return (len(errors) == 0, errors)
+
+
 # --- FILE CREATION ---
 
 def create_email_file(message: dict) -> bool:
@@ -314,6 +333,12 @@ def create_email_file(message: dict) -> bool:
     Returns:
         True om fil skapades, False om den redan fanns
     """
+    # --- Valideringsgrind: avvisa fil om metadata brister ---
+    ok, errors = validate_email_data(message)
+    if not ok:
+        LOGGER.error(f"SPÄRR: Avvisar e-post {message.get('id', '?')}: {'; '.join(errors)}")
+        return False
+
     date_str = message['date'].strftime('%Y-%m-%d')
     subject_clean = sanitize_filename(message['subject'])
     unit_id = str(uuid.uuid4())

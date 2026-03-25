@@ -193,9 +193,14 @@ def extract_event_info(event: dict) -> dict:
         org_prefix = org_email.split('@')[0]
         organizer_name = ' '.join(part.capitalize() for part in org_prefix.split('.')) if org_prefix else ''
 
+    summary = event.get('summary', '')  # noqa: SD — Google Calendar API field
+    if not summary:
+        LOGGER.warning(f"Kalenderhändelse saknar titel (id={event.get('id', '?')})")
+        summary = 'Ingen titel'
+
     return {
         'id': event.get('id', ''),
-        'summary': event.get('summary', 'Ingen titel'),  # noqa: SD — Google Calendar API field
+        'summary': summary,  # noqa: SD — Google Calendar API field
         'start': start_dt,
         'end': end_dt,
         'location': event.get('location', ''),
@@ -246,6 +251,18 @@ def fetch_events_for_date(service, calendar_id: str, target_date: datetime.date)
     return events
 
 
+# --- VALIDERING ---
+
+def validate_digest_data(target_date, events):
+    """Validerar kalenderdata innan fil skrivs till Assets. Returnerar (ok, errors)."""
+    errors = []
+    if not events:
+        errors.append("Inga events")
+    if not target_date:
+        errors.append("Datum saknas")
+    return (len(errors) == 0, errors)
+
+
 # --- DAILY DIGEST ---
 
 def get_existing_digest_path(target_date: datetime.date) -> str | None:
@@ -287,6 +304,12 @@ def create_daily_digest(target_date: datetime.date, events: list) -> bool:
             LOGGER.info(f"Raderade tom digest för {date_str}")
         return False
     
+    # --- Valideringsgrind: avvisa fil om metadata brister ---
+    ok, errors = validate_digest_data(target_date, events)
+    if not ok:
+        LOGGER.error(f"SPÄRR: Avvisar kalenderdigest {date_str}: {'; '.join(errors)}")
+        return False
+
     # Använd befintligt UUID eller skapa nytt
     if existing_path:
         # Extrahera UUID från befintlig fil
@@ -313,7 +336,7 @@ def create_daily_digest(target_date: datetime.date, events: list) -> bool:
                 end_dt = datetime.datetime.fromisoformat(end.replace('Z', '+00:00'))
                 time_str = f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
             except Exception as e:
-                LOGGER.debug(f"Kunde inte parsa tid {start}-{end}: {e}")
+                LOGGER.warning(f"Kunde inte parsa tid {start}-{end}: {e}")
                 time_str = "Heldag"
         else:
             time_str = "Heldag"

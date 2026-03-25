@@ -63,9 +63,9 @@ def _get_asset_folders(paths):
 
 
 def _get_rejected_dir(paths):
-    rejected = paths.get('asset_rejected')
+    rejected = paths.get('asset_failed')
     if not rejected:
-        raise RuntimeError("HARDFAIL: 'asset_rejected' saknas i config paths")
+        raise RuntimeError("HARDFAIL: 'asset_failed' saknas i config paths")
     return os.path.expanduser(rejected)
 
 

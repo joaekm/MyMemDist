@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import yaml
 import logging
@@ -69,13 +70,34 @@ def get_user_name(user_id):
         name = user.get("real_name") or user.get("profile", {}).get("display_name") or user.get("name")
         USER_CACHE[user_id] = name
         return name
-    except: return user_id
+    except Exception as e:  # noqa: FALLBACK_DOCUMENTED - user_id är synlig fallback, kanalnamn är kritiskt men användarnamn acceptabelt
+        LOGGER.warning(f"Kunde inte resolva användarnamn för {user_id}: {e}")
+        return user_id
 
 def get_channel_name(channel_id):
     try:
         res = CLIENT.conversations_info(channel=channel_id)
         return res["channel"]["name"]
-    except: return channel_id
+    except Exception as e:
+        raise RuntimeError(f"Kunde inte resolva kanalnamn för {channel_id}: {e}") from e
+
+
+_SLACK_ID_PATTERN = re.compile(r'^C[A-Z0-9]{8,}$')
+
+def validate_archive_data(ch_name, target_date, participants, full_transcript):
+    """Validerar all data innan fil skrivs till Assets. Returnerar (ok, errors)."""
+    errors = []
+    if not ch_name:
+        errors.append("Kanalnamn saknas")
+    elif _SLACK_ID_PATTERN.match(ch_name):
+        errors.append(f"Kanalnamn är ett oresolvat Slack-ID: {ch_name}")
+    if not participants:
+        errors.append("Inga deltagare")
+    if not full_transcript:
+        errors.append("Tomt transkript")
+    if target_date > datetime.date.today():
+        errors.append(f"Datum ligger i framtiden: {target_date}")
+    return (len(errors) == 0, errors)
 
 def format_slack_time(ts):
     try:
@@ -116,8 +138,12 @@ def fetch_replies(channel_id, thread_ts):
 
 def archive_day(channel_id, target_date):
     date_str = target_date.strftime('%Y-%m-%d')
-    ch_name = get_channel_name(channel_id)
-    
+    try:
+        ch_name = get_channel_name(channel_id)
+    except RuntimeError:
+        LOGGER.error(f"SPÄRR: Kan inte resolva kanalnamn för {channel_id} — hoppar över")
+        return False
+
     existing_files = os.listdir(SLACK_FOLDER)
     base_pattern = f"Slack_{ch_name}_{date_str}_"
     for f in existing_files:
@@ -145,8 +171,14 @@ def archive_day(channel_id, target_date):
                 r_time = format_slack_time(r['ts'])
                 full_transcript.append(f"    ↳ [{r_time}] {r_user}: {r.get('text', '')}")
 
+    # --- Valideringsgrind: avvisa fil om metadata brister ---
+    ok, errors = validate_archive_data(ch_name, target_date, participants, full_transcript)
+    if not ok:
+        LOGGER.error(f"SPÄRR: Avvisar Slack-arkiv {channel_id}/{date_str}: {'; '.join(errors)}")
+        return False
+
     unit_id = str(uuid.uuid4())
-    filnamn = f"Slack_{ch_name}_{date_str}_{unit_id}.txt" 
+    filnamn = f"Slack_{ch_name}_{date_str}_{unit_id}.txt"
     ut_sokvag = os.path.join(SLACK_FOLDER, filnamn)
     participants_list = "\n- ".join(sorted(list(participants)))
     content = "\n".join(full_transcript)

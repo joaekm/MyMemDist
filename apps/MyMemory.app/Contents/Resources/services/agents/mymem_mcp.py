@@ -9,6 +9,8 @@ import logging
 import uuid
 import asyncio
 import subprocess
+import functools
+import concurrent.futures
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
@@ -181,6 +183,25 @@ GRAPH_SEARCH_LIMIT = SEARCH_CONFIG.get('graph_limit', 15)
 VECTOR_DISTANCE_STRONG = SEARCH_CONFIG.get('distance_strong', 0.8)
 VECTOR_DISTANCE_WEAK = SEARCH_CONFIG.get('distance_weak', 1.2)
 SLOW_QUERY_THRESHOLD = SEARCH_CONFIG.get('slow_query_threshold_ms', 2000)
+TOOL_TIMEOUT = SEARCH_CONFIG.get('tool_timeout_seconds', 8)
+
+
+def _with_tool_timeout(fn):
+    """Decorator: kör MCP-tool med timeout via ThreadPoolExecutor.
+
+    Om funktionen inte returnerar inom TOOL_TIMEOUT sekunder,
+    returneras ett felmeddelande istället för att hänga.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(fn, *args, **kwargs)
+            try:
+                return future.result(timeout=TOOL_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                logging.error(f"TIMEOUT {fn.__name__}: {TOOL_TIMEOUT}s överskriden")
+                return f"Verktyget {fn.__name__} överskred tidsgräns ({TOOL_TIMEOUT}s). Försök igen."
+    return wrapper
 
 
 def _log_tool_time(tool_name: str, t0: float):
@@ -407,13 +428,38 @@ _lake_cache = _LakeMetadataCache()
 
 # --- TOOL 1: GRAPH (Structure) ---
 
+def _vector_fallback_for_graph(query: str, node_type: str, reason: str) -> str:
+    """Vektor-fallback när grafsökning ger 0 träffar eller timeout."""
+    fallback_msg = f"{reason}\nFörsöker vektor-sökning som fallback..."
+    try:
+        where_filter = None
+        if node_type:
+            where_filter = {"$and": [{"type": node_type}, {"source": "graph_node"}]}
+        with vector_scope(exclusive=False, timeout=10.0, db_path=_get_vector_path()) as vs:
+            results = vs.search(query_text=query, limit=GRAPH_SEARCH_LIMIT, where=where_filter)
+        if results:
+            lines = [f"=== VEKTOR-FALLBACK ({len(results)} träffar) ==="]
+            for item in results:
+                meta = item['metadata']
+                dist = item.get('distance', 0)
+                content = item['document'].replace('\n', ' ')[:100]
+                lines.append(f"• {meta.get('name', meta.get('filename', item['id']))} (dist: {dist:.3f}): {content}...")
+            fallback_msg += "\n" + "\n".join(lines)
+        else:
+            fallback_msg += "\nInga vektor-träffar heller."
+    except Exception:
+        fallback_msg += "\nVektor-fallback misslyckades också."
+    return fallback_msg
+
+
 @mcp.tool()
+@_with_tool_timeout
 def search_graph_nodes(query: str, node_type: str = None) -> str:
     """
     Sök specifika entiteter i grafen via namn, alias, e-post eller ID.
 
     SÖKMETOD: ILIKE-matchning (%query%) i identitetsfält (id, aliases,
-    name, email). Hittar delmatchningar, t.ex. "Projekt" matchar "Projekt Alpha".
+    name, email, context_summary). Hittar delmatchningar, t.ex. "Projekt" matchar "Projekt Alpha".
 
     ANVÄND FÖR:
     - Hitta en specifik person: query="Person X"
@@ -443,15 +489,16 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
             like_q = f"%{query}%"
             type_clause = " AND type = ?" if node_type else ""
 
-            # Identity-field search only: id, aliases, name, email (#129)
+            # Identity-field search: id, aliases, name, email, context_summary
             sql = (
                 "SELECT id, type, aliases, properties FROM nodes "
                 "WHERE (id ILIKE ? OR aliases ILIKE ? "
                 "OR json_extract_string(properties, 'name') ILIKE ? "
-                "OR json_extract_string(properties, 'email') ILIKE ?)"
+                "OR json_extract_string(properties, 'email') ILIKE ? "
+                "OR json_extract_string(properties, 'context_summary') ILIKE ?)"
                 + type_clause + " LIMIT ?"
             )
-            params = [like_q, like_q, like_q, like_q]
+            params = [like_q, like_q, like_q, like_q, like_q]
             if node_type:
                 params.append(node_type)
             params.append(limit)
@@ -459,7 +506,10 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
             rows = graph.conn.execute(sql, params).fetchall()
 
         if not rows:
-            return f"GRAF: Inga träffar för '{query}'" + (f" (Typ: {node_type})" if node_type else "")
+            return _vector_fallback_for_graph(
+                query, node_type,
+                f"GRAF: Inga ILIKE-träffar för '{query}'" + (f" (Typ: {node_type})" if node_type else "")
+            )
 
         output = [f"=== GRAF RESULTAT ({len(rows)}) ==="]
         for r in rows:
@@ -481,24 +531,10 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
 
         return "\n".join(output)
     except TimeoutError:
-        # Vektor-fallback: grafens ILIKE kan approximeras via semantisk sökning
-        fallback_msg = "Grafen är upptagen (ingestion/dreamer pågår).\nFörsöker vektor-sökning som fallback..."
-        try:
-            with vector_scope(exclusive=False, timeout=10.0, db_path=_get_vector_path()) as vs:
-                results = vs.search(query_text=query, limit=GRAPH_SEARCH_LIMIT)
-            if results:
-                lines = [f"=== VEKTOR-FALLBACK ({len(results)} träffar, graf upptagen) ==="]
-                for item in results:
-                    meta = item['metadata']
-                    content = item['document'].replace('\n', ' ')[:100]
-                    lines.append(f"• {meta.get('filename', item['id'])}: {content}...")
-                fallback_msg += "\n" + "\n".join(lines)
-            else:
-                fallback_msg += "\nInga vektor-träffar heller."
-            fallback_msg += "\n\nGraf-verktyg: Försök igen om 30 sekunder."
-        except Exception:
-            fallback_msg += "\nVektor-fallback misslyckades också. Försök igen om 30 sekunder."
-        return fallback_msg
+        return _vector_fallback_for_graph(
+            query, node_type,
+            "Grafen är upptagen (ingestion/dreamer pågår)."
+        ) + "\n\nGraf-verktyg: Försök igen om 30 sekunder."
     except Exception as e:
         return f"Grafsökning misslyckades: {e}"
     finally:
@@ -507,6 +543,7 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
 # --- TOOL 2: VECTOR (Semantics) ---
 
 @mcp.tool()
+@_with_tool_timeout
 def query_vector_memory(query_text: str, n_results: int = 5, node_type: str = None) -> str:
     """
     Semantisk sökning – hittar dokument OCH graf-entiteter baserat på MENING.
@@ -587,10 +624,12 @@ def query_vector_memory(query_text: str, n_results: int = 5, node_type: str = No
 # --- TOOL 3: LAKE (Metadata) ---
 
 @mcp.tool()
+@_with_tool_timeout
 def search_by_date_range(
     start_date: str,
     end_date: str,
-    date_field: str = "content"
+    date_field: str = "content",
+    source_type: str = None
 ) -> str:
     """
     Tidssökning – hitta dokument och händelser från en specifik period.
@@ -617,6 +656,8 @@ def search_by_date_range(
         start_date: Startdatum (YYYY-MM-DD)
         end_date: Slutdatum (YYYY-MM-DD)
         date_field: "content" (default), "ingestion", eller "updated"
+        source_type: Filtrera på dokumenttyp (valfritt):
+            "Document", "Slack Log", "Email Thread", "Calendar Event", "Transcript"
     """
     _t0 = time.monotonic()
     from datetime import datetime
@@ -668,12 +709,14 @@ def search_by_date_range(
 
                 # Kolla om inom intervall
                 if start_dt <= file_dt <= end_dt:
-                    source_type = frontmatter.get('source_type', 'Unknown')
+                    file_source_type = frontmatter.get('source_type', 'Unknown')
+                    if source_type and file_source_type != source_type:
+                        continue
                     summary = frontmatter.get('context_summary', '')[:80]
                     matches.append({
                         'filename': filename,
                         'date': file_dt,
-                        'source_type': source_type,
+                        'source_type': file_source_type,
                         'summary': summary  # noqa: SD — local dict key, not schema property
                     })
 
@@ -693,6 +736,8 @@ def search_by_date_range(
         output = [f"=== DATUM RESULTAT ({len(matches)} träffar) ==="]
         output.append(f"Intervall: {start_date} → {end_date}")
         output.append(f"Fält: {timestamp_key}")
+        if source_type:
+            output.append(f"Typfilter: {source_type}")
         if skipped_unknown > 0:
             output.append(f"⚠️ {skipped_unknown} filer med UNKNOWN exkluderade")
         output.append("-" * 30)
@@ -713,6 +758,7 @@ def search_by_date_range(
 
 
 @mcp.tool()
+@_with_tool_timeout
 def search_lake_metadata(keyword: str, field: str = None) -> str:
     """
     Sök i dokumentens YAML-metadata – hitta filer baserat på taggning.
@@ -739,6 +785,7 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
     _t0 = time.monotonic()
     metadata_max_results = SEARCH_CONFIG.get('lake_metadata_max_results', 10)
     matches = []
+    total_matches = 0
 
     try:
         if not os.path.exists(_get_lake_path()):
@@ -770,14 +817,17 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
                         hit_details.append(f"{k}: {v[:50]}...")
 
             if found:
-                matches.append(f"📄 {filename} -> [{', '.join(hit_details)}]")
-                if len(matches) >= metadata_max_results:
-                    break
+                total_matches += 1
+                if len(matches) < metadata_max_results:
+                    matches.append(f"📄 {filename} -> [{', '.join(hit_details)}]")
 
         if not matches:
             return f"LAKE: Inga metadata-träffar för '{keyword}' (Skannade {len(all_metadata)} filer)."
 
-        output = [f"=== LAKE METADATA ({len(matches)} träffar) ==="]
+        if total_matches > len(matches):
+            output = [f"=== LAKE METADATA (visar {len(matches)} av {total_matches} träffar) ==="]
+        else:
+            output = [f"=== LAKE METADATA ({len(matches)} träffar) ==="]
         output.extend(matches)
         return "\n".join(output)
 
@@ -825,7 +875,8 @@ def _format_relation_context(rc_entries: list, start_date: str = None,
 # --- TOOL 5: RELATIONSHIP EXPLORER ---
 
 @mcp.tool()
-def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = None) -> str:
+@_with_tool_timeout
+def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = None, max_context_entries: int = None) -> str:
     """
     Kartlägg relationerna kring en entitet – vem/vad är den kopplad till?
 
@@ -842,6 +893,8 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
 
     TIDSFILTRERING (start_date/end_date):
     Filtrerar relation_context-händelser till angiven period.
+
+    max_context_entries: Max antal relation_context-händelser per kant (default: 3).
 
     ANVÄNDNINGSFLÖDE:
     1. search_graph_nodes("Person X") → node_id
@@ -888,7 +941,7 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
                 conf_str = f" (conf: {edge_conf})" if edge_conf else ""
                 output.append(f"   [{e['type']}] -> {target_name}{conf_str}")
                 rc = e.get("properties", {}).get("relation_context", [])
-                rc_lines = _format_relation_context(rc, start_date, end_date)
+                rc_lines = _format_relation_context(rc, start_date, end_date, max_entries=max_context_entries or 3)
                 output.extend(rc_lines)
 
         if in_edges:
@@ -899,7 +952,7 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
                 conf_str = f" (conf: {edge_conf})" if edge_conf else ""
                 output.append(f"   {source_name} -> [{e['type']}]{conf_str}")
                 rc = e.get("properties", {}).get("relation_context", [])
-                rc_lines = _format_relation_context(rc, start_date, end_date)
+                rc_lines = _format_relation_context(rc, start_date, end_date, max_entries=max_context_entries or 3)
                 output.extend(rc_lines)
 
         if not out_edges and not in_edges:
@@ -918,6 +971,7 @@ def get_neighbor_network(node_id: str, start_date: str = None, end_date: str = N
 # --- TOOL 5b: SEARCH RELATION CONTEXT ---
 
 @mcp.tool()
+@_with_tool_timeout
 def search_relation_context(node_id: str, query: str) -> str:
     """
     Sök i relation_context på alla kanter kring en entitet.
@@ -1008,7 +1062,8 @@ def search_relation_context(node_id: str, query: str) -> str:
 # --- TOOL 6: ENTITY SUMMARY ---
 
 @mcp.tool()
-def get_entity_summary(node_id: str, start_date: str = None, end_date: str = None) -> str:
+@_with_tool_timeout
+def get_entity_summary(node_id: str, start_date: str = None, end_date: str = None, max_context_entries: int = None) -> str:
     """
     Djupdyk i EN entitet – hämtar allt systemet vet om den.
 
@@ -1022,6 +1077,8 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
     TIDSFILTRERING (start_date/end_date):
     Filtrerar relation_context-händelser till angiven period.
     Format: YYYY-MM-DD
+
+    max_context_entries: Max antal relation_context-händelser per kant (default: 5).
 
     ANVÄNDNING:
     1. Hitta entitet med search_graph_nodes: "Person X" → node_id="abc123"
@@ -1085,7 +1142,7 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
         has_rc = False
         for e in non_mentions:
             rc = e.get("properties", {}).get("relation_context", [])
-            rc_lines = _format_relation_context(rc, start_date, end_date, max_entries=5)
+            rc_lines = _format_relation_context(rc, start_date, end_date, max_entries=max_context_entries or 5)
             if rc_lines:
                 if not has_rc:
                     output.append("\n--- HÄNDELSER (relation_context) ---")
@@ -1108,6 +1165,7 @@ def get_entity_summary(node_id: str, start_date: str = None, end_date: str = Non
 # --- TOOL 7: GRAPH HEALTH (#135) ---
 
 @mcp.tool()
+@_with_tool_timeout
 def get_graph_health() -> str:
     """
     Visa grafens hälsa — sömnbehov, tillgänglighet och statistik.
@@ -1228,6 +1286,7 @@ def get_graph_health() -> str:
 # --- TOOL 7d: DATA MODEL ---
 
 @mcp.tool()
+@_with_tool_timeout
 def get_data_model() -> str:
     """
     Visa systemets datamodell — nodtyper, relationer och källprofiler.
@@ -1288,6 +1347,7 @@ def get_data_model() -> str:
 # --- TOOL 8: RELATIVE DATE PARSER ---
 
 @mcp.tool()
+@_with_tool_timeout
 def parse_relative_date(expression: str) -> str:
     """
     Översätt mänskliga tidsuttryck till datum för search_by_date_range.
@@ -1438,6 +1498,7 @@ def _smart_truncate(content: str, max_length: int, tail_ratio: float = 0.2) -> t
 
 
 @mcp.tool()
+@_with_tool_timeout
 def read_document_content(doc_id: str, max_length: int = 8000, section: str = "smart") -> str:
     """
     Läs källdokument – hämta originaltext från Lake.
@@ -1535,6 +1596,7 @@ def read_document_content(doc_id: str, max_length: int = 8000, section: str = "s
 # --- TOOL 9b: SOURCE CONNECTIONS ---
 
 @mcp.tool()
+@_with_tool_timeout
 def get_source_connections(entity_id: str = None, doc_id: str = None) -> str:
     """
     Navigera mellan dokument och entiteter via MENTIONS-kanter.

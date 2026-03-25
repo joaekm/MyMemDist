@@ -1,7 +1,7 @@
 {
-  "version": "0.12.14",
-  "date": "2026-03-15",
-  "description": "# Release Notes Peer-server autentisering och registrering mot Intent. **Nytt:** - Bearer token-auth på peer_server via FastMCP TokenVerifier — peer-server vägrar starta utan konfigurerad secret - Automatisk registrering mot Intent: hämtar ngrok-URL dynamiskt och POSTar till /api/register med Bearer-token - Ny config-nyckel `signal_feed.intent_peer_secret` (bevaras vid config-uppgradering) ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.14/MyMemory-Installer.dmg",
+  "version": "0.12.15",
+  "date": "2026-03-25",
+  "description": "## MCP sökförbättringar, sökstrategi-skill och collector-validering ### Ny sökskill (#169) - Ny Claude Code skill (`mymem-search`) med beslutsträd, 7 sökstrategier (A–G) och Harvest/Forecast-korsreferens - FAR/FÅR INTE-principer, parallelliseringsguide, verktygsreferens och fallback-kedjor ### MCP-verktygsförbättringar (#169) - `search_graph_nodes` söker nu i context_summary (5:e sökfält) och har automatisk vektor-fallback vid 0 träffar - `search_by_date_range` stöder `source_type`-filter (\"Email Thread\", \"Slack Log\" etc.) - `search_lake_metadata` rapporterar totalt antal träffar (\"visar 10 av N\") - `get_neighbor_network` och `get_entity_summary` har konfigurerbar `max_context_entries` - Generell timeout-wrapper (8s) på alla read-only MCP-verktyg ### Valideringsgrind för collectors (#170) - Slack: avvisar oresolvade kanal-ID, tomma transkript, framtida datum - Gmail: avvisar mail utan ämne, avsändare, body eller datum - Calendar: avvisar digest utan events - Tester för alla valideringsfunktioner ### Bugfixar - fix: document deletion broken by config key mismatch (#134) - fix: preserve broker_url during config upgrade ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.15/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

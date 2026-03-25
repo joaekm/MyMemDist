@@ -171,6 +171,7 @@ search:
   max_entity_queries: 5
   max_semantic_queries: 3
   results_per_query: 2
+  tool_timeout_seconds: 8
 
 # Collectors - Inställningar för datainsamlare
 collectors:

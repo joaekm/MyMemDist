@@ -1,0 +1,438 @@
+{
+  "meta": {
+    "version": "1.0",
+    "description": "Schema för personligt MyMemory-index. Fångar relationer, platser, händelser och tankar i användarens privatliv.",
+    "strict_mode": true,
+    "schema_type": "personal",
+    "changelog": {
+      "1.0": "Initial personal schema. Nodtyper: Person, Group, Place, Event, Concept. Kanter: RELATIONSHIP, BELONGS_TO, ATTENDED, LOCATION, RELATES_TO. System-infrastruktur (Source, MENTIONS, base_properties, processing_policy) identisk med professionellt schema."
+    }
+  },
+  "processing_policy": {
+    "description": "Globala regler för hur osäker data hanteras.",
+    "min_confidence_threshold": 0.3,
+    "trusted_source_confidence_floor": 0.8,
+    "source_mappings": {
+      "slack": "Slack Log",
+      "mail": "Email Thread",
+      "calendar": "Calendar Event",
+      "transcripts": "Transcript"
+    },
+    "default_source_type": "Document"
+  },
+  "base_properties": {
+    "description": "Egenskaper som alla noder automatiskt får (system-nivå).",
+    "properties": {
+      "id": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": false,
+        "description": "Primary Key (UUID)"
+      },
+      "name": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": true,
+        "description": "Nodens primära namn/identifierare"
+      },
+      "type": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": true,
+        "description": "Nodtypen (Person, Place, etc.)"
+      },
+      "source": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": true,
+        "default": "graph_node",
+        "description": "Markör för vektorsök att detta är en graf-nod"
+      },
+      "created_at": {
+        "type": "timestamp",
+        "required": true,
+        "default": "$NOW",
+        "include_in_vector": false
+      },
+      "last_synced_at": {
+        "type": "timestamp",
+        "required": true,
+        "default": "$NOW",
+        "include_in_vector": false
+      },
+      "last_seen_at": {
+        "type": "timestamp",
+        "required": true,
+        "default": "$NOW",
+        "include_in_vector": false,
+        "description": "Tidpunkt då noden senast observerades/bearbetades av systemet."
+      },
+      "last_retrieved_at": {
+        "type": "timestamp",
+        "required": true,
+        "default": "$NOW",
+        "include_in_vector": false,
+        "description": "Tidpunkt då noden senast användes i ett svar (Relevans)."
+      },
+      "retrieved_times": {
+        "type": "integer",
+        "required": true,
+        "default": 0,
+        "include_in_vector": false,
+        "description": "Antal gånger noden använts i ett svar (Popularitet)."
+      },
+      "last_refined_at": {
+        "type": "string",
+        "required": true,
+        "default": "never",
+        "include_in_vector": false,
+        "description": "Tidpunkt då Dreamer senast städade noden (Underhåll)."
+      },
+      "source_system": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": false
+      },
+      "confidence": {
+        "type": "float",
+        "required": true,
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.5,
+        "include_in_vector": false,
+        "description": "Schema-Fit Score. 1.0 = Trusted/Verified, <0.3 = Brus."
+      },
+      "context_summary": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": true,
+        "description": "AI-genererad kompakt identitetsbeskrivning (vem/vad ÄR detta). Genereras av Dreamer."
+      },
+      "aliases": {
+        "type": "list",
+        "required": false,
+        "include_in_vector": false,
+        "description": "Alternativa namn/identifierare för noden. Används vid Entity Resolution för fuzzy matching."
+      }
+    }
+  },
+  "nodes": {
+    "Person": {
+      "description": "En individ i användarens liv — familj, vänner, bekanta, professionella kontakter.",
+      "primary_key_strategy": "NATURAL_KEY",
+      "lookup_key": "name",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": true,
+        "first_token_prefix": true,
+        "fuzzy_cutoff": 0.85,
+        "ambiguity_action": "CREATE",
+        "_rationale": "Samma som professionellt — förnamn-matching behövs även personligt."
+      },
+      "properties": {
+        "name": { "required": true, "type": "string" },
+        "phone": { "required": false, "type": "string" },
+        "email": {
+          "required": false,
+          "type": "string",
+          "regex": "^[\\w.]+@([\\w-]+\\.)+[\\w-]{2,4}$"
+        },
+        "birthday": { "required": false, "type": "string", "description": "Födelsedag (MM-DD eller YYYY-MM-DD)" }
+      }
+    },
+    "Group": {
+      "description": "En namngiven social gruppering — familj, vänskapskrets, förening, klass, grannskap.",
+      "primary_key_strategy": "COMPOSITE_KEY",
+      "lookup_key": "name",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": true,
+        "first_token_prefix": false,
+        "fuzzy_cutoff": 0.85,
+        "ambiguity_action": "CREATE",
+        "_rationale": "Sociala grupper har ofta beskrivande namn. token_subset matchar 'Klassföräldrarna' → 'Klassföräldrarna Åk 3'."
+      },
+      "properties": {
+        "name": { "required": true, "type": "string" },
+        "group_type": {
+          "required": false,
+          "type": "enum",
+          "values": ["Familj", "Vänskapskrets", "Förening", "Klass", "Grannskap", "Klubb"]
+        }
+      }
+    },
+    "Place": {
+      "description": "En fysisk plats — stad, land, restaurang, hem, klinik, skola, plats med betydelse.",
+      "primary_key_strategy": "NATURAL_KEY",
+      "lookup_key": "name",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": true,
+        "first_token_prefix": false,
+        "fuzzy_cutoff": 0.85,
+        "ambiguity_action": "CREATE",
+        "_rationale": "Platsnamn kan variera ('Rom' vs 'Rom, Italien'). token_subset hanterar detta. Ambiguity guard förhindrar att 'Paris' matchar 'Paris, Texas' vs 'Paris, Frankrike'."
+      },
+      "properties": {
+        "name": { "required": true, "type": "string" },
+        "place_type": {
+          "required": false,
+          "type": "enum",
+          "values": ["City", "Country", "Restaurant", "Venue", "Home", "Clinic", "School", "Region"]
+        },
+        "address": { "required": false, "type": "string" }
+      }
+    },
+    "Event": {
+      "description": "Något som hänt eller ska hända — resa, fest, läkarbesök, middag, ceremoni.",
+      "primary_key_strategy": "SOURCE_ID",
+      "lookup_key": "source_id",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "ALWAYS_CREATE",
+      "properties": {
+        "name": { "required": true, "type": "string", "default": "No Title" },
+        "source_id": { "required": false, "type": "string", "description": "Google Event ID" },
+        "event_type": {
+          "required": false,
+          "type": "enum",
+          "values": ["Trip", "Celebration", "Medical", "Social", "Personal"]
+        },
+        "start_time": { "required": false, "type": "timestamp" },
+        "end_time": { "required": false, "type": "timestamp" },
+        "location": { "required": false, "type": "string" }
+      }
+    },
+    "Concept": {
+      "description": "En idé, ett intresse, en reflektion, ett mål eller en fråga — lösa tankar och koncept.",
+      "primary_key_strategy": "NATURAL_KEY",
+      "lookup_key": "name",
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
+      "creation_policy": "STRICT_LOOKUP",
+      "matching": {
+        "token_subset": false,
+        "first_token_prefix": false,
+        "fuzzy_cutoff": 0.90,
+        "ambiguity_action": "CREATE",
+        "_rationale": "Koncept med delade ord kan vara helt olika ('Minimalism' ≠ 'Digital minimalism'). Strikt matching — hög fuzzy-tröskel, inga token-tricks."
+      },
+      "properties": {
+        "name": { "required": true, "type": "string" },
+        "concept_type": {
+          "required": false,
+          "type": "enum",
+          "values": ["Idea", "Goal", "Philosophy", "Reflection", "Interest", "Question"]
+        }
+      }
+    },
+    "Source": {
+      "description": "En informationskälla som bär data till systemet (dokument, mail, Slack, kalender, transkript).",
+      "primary_key_strategy": "UUID",
+      "lookup_key": "uuid",
+      "allowed_sources": ["FileRetriever", "DocConverter", "Transcriber"],
+      "creation_policy": "ALWAYS_CREATE",
+      "properties": {
+        "uuid": { "required": true, "type": "uuid", "description": "Filens UUID från Assets" },
+        "title": { "required": true, "type": "string" },
+        "doc_format": {
+          "required": false,
+          "type": "enum",
+          "values": [".pdf", ".docx", ".txt", ".md", ".json", ".xls", ".xlsx", ".csv"]
+        },
+        "created_at": { "required": false, "type": "timestamp" },
+        "timestamp": { "required": false, "type": "timestamp", "description": "Alias för created_at (legacy)" },
+        "source_type": {
+          "required": true,
+          "type": "enum",
+          "values": ["Document", "Slack Log", "Email Thread", "Calendar Event", "Transcript"],
+          "description": "Typ av källa"
+        },
+        "context_summary": { "required": false, "type": "string", "description": "AI-genererad kontextsammanfattning" },
+        "relations_summary": { "required": false, "type": "string", "description": "AI-genererad relationssammanfattning" },
+        "summary": { "required": false, "type": "string", "description": "DEPRECATED - använd context_summary" }
+      }
+    }
+  },
+  "edges": {
+    "MENTIONS": {
+      "source_type": ["Source"],
+      "target_type": ["Person", "Group", "Place", "Event", "Concept"],
+      "description": "Källan nämner en entitet.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0 },
+        "snippet": { "required": false, "type": "string" }
+      }
+    },
+    "RELATIONSHIP": {
+      "source_type": ["Person"],
+      "target_type": ["Person"],
+      "description": "Personlig relation mellan två individer.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "relation_type": {
+          "required": true,
+          "type": "enum",
+          "values": ["Family", "Friend", "Professional", "Neighbor"]
+        },
+        "relation_detail": {
+          "required": false,
+          "type": "string",
+          "description": "Specifik roll: Fru, Bror, Tandläkare, Tränare, Mormor etc."
+        },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
+      }
+    },
+    "BELONGS_TO": {
+      "source_type": ["Person"],
+      "target_type": ["Group"],
+      "description": "Personen tillhör en social gruppering.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "role": {
+          "required": false,
+          "type": "string",
+          "description": "Roll inom gruppen: Ordförande, Kassör, Medlem etc."
+        },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
+      }
+    },
+    "ATTENDED": {
+      "source_type": ["Person"],
+      "target_type": ["Event"],
+      "description": "Personen deltog i eller var med vid händelsen.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "role": {
+          "required": false,
+          "type": "string",
+          "description": "Roll vid händelsen: Värd, Gäst, Talare etc."
+        },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
+      }
+    },
+    "LOCATION": {
+      "source_type": ["Person", "Event"],
+      "target_type": ["Place"],
+      "description": "Koppling till en fysisk plats — bor, besökte, föddes, växte upp.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "location_type": {
+          "required": true,
+          "type": "enum",
+          "values": ["Lives", "Visited", "Born", "Grew_up", "Works"]
+        },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
+      }
+    },
+    "RELATES_TO": {
+      "source_type": ["Person", "Group", "Place", "Event", "Concept"],
+      "target_type": ["Concept"],
+      "description": "Koppling till ett koncept, en idé eller ett intresse. Bygger tankenätverket.",
+      "validation_rule": "TARGET_MUST_EXIST",
+      "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
+        "relation_nature": {
+          "required": false,
+          "type": "string",
+          "description": "Relationens natur: Inspirerad av, Skeptisk till, Utövar, Förespråkar etc."
+        },
+        "relation_context": {
+          "required": false,
+          "type": "list",
+          "extraction_type": "string",
+          "item_schema": {
+            "text": {"type": "string", "required": true, "description": "Vad som framkom om relationen"},
+            "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"},
+            "timestamp": {"type": "string", "required": true, "description": "ISO-8601 (YYYY-MM-DD eller YYYY-MM)"}
+          },
+          "description": "Kronologisk händelselogg om relationen. Append-only."
+        }
+      }
+    }
+  },
+  "source_type_profiles": {
+    "description": "Extraktionsprofil per source type. Styr vad pipelinen får göra i grafen för varje typ av källa.",
+    "Email Thread": {
+      "description": "Personliga mail — nämner personer, platser, händelser och idéer.",
+      "allow_create": ["Person", "Group", "Place", "Event", "Concept"],
+      "allow_edges": ["RELATIONSHIP", "BELONGS_TO", "ATTENDED", "LOCATION", "RELATES_TO"],
+      "skip_critic": false,
+      "prompt_key": "source_context_email"
+    },
+    "Document": {
+      "description": "Personliga dokument och anteckningar — rik källa för koncept och reflektioner.",
+      "allow_create": ["Person", "Group", "Place", "Event", "Concept"],
+      "allow_edges": ["RELATIONSHIP", "BELONGS_TO", "ATTENDED", "LOCATION", "RELATES_TO"],
+      "skip_critic": false,
+      "prompt_key": "source_context_document"
+    },
+    "Calendar Event": {
+      "description": "Personlig kalender — händelser med platser och deltagare.",
+      "allow_create": ["Event", "Place", "Group"],
+      "allow_edges": ["ATTENDED", "LOCATION", "BELONGS_TO"],
+      "skip_critic": false,
+      "prompt_key": "source_context_calendar"
+    },
+    "Slack Log": {
+      "description": "Personliga konversationer — nämner personer, platser, planer.",
+      "allow_create": ["Person", "Group", "Place", "Event", "Concept"],
+      "allow_edges": ["RELATIONSHIP", "BELONGS_TO", "ATTENDED", "LOCATION", "RELATES_TO"],
+      "skip_critic": false,
+      "prompt_key": "source_context_slack"
+    },
+    "Transcript": {
+      "description": "Röstmemon och personliga inspelningar — värdefull källa för tankar och reflektioner. Tillåter skapande av koncept men inte strukturella entiteter.",
+      "allow_create": ["Concept"],
+      "allow_edges": ["RELATES_TO"],
+      "skip_critic": true,
+      "prompt_key": "source_context_transcript"
+    }
+  }
+}
