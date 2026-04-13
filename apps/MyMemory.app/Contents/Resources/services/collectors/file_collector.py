@@ -16,7 +16,7 @@ from services.utils.config_loader import get_config
 CONFIG = get_config()
 DROP_FOLDER = os.path.expanduser(CONFIG['paths']['drop_folder'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
-LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
+LAKE_STORE = os.path.expanduser(CONFIG['paths'].get('lake_store', ''))
 LOG_FILE = os.path.expanduser(CONFIG['logging'].get('system_log', '~/MyMemory/Logs/system.log'))
 
 # Sub-folders för sortering

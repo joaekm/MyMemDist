@@ -18,10 +18,12 @@ LOGGER = logging.getLogger('SystemValidator')
 # --- CONFIG ---
 CONFIG = get_config()
 
-LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
-ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
-CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
-GRAPH_DB_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
+# Lake/Chroma/Graph är cloud-side i cloud-only mode. Pathar görs valfria
+# så validate_system kan köras på klient (där bara Assets finns lokalt).
+LAKE_STORE = os.path.expanduser(CONFIG['paths'].get('lake_store', ''))
+ASSET_STORE = os.path.expanduser(CONFIG['paths'].get('asset_store', ''))
+CHROMA_PATH = os.path.expanduser(CONFIG['paths'].get('chroma_db', ''))
+GRAPH_DB_PATH = os.path.expanduser(CONFIG['paths'].get('graph_db', ''))
 LOG_FILE = os.path.expanduser(CONFIG['logging'].get('system_log', '~/Library/Logs/MyMemory/system.log'))
 
 

@@ -78,15 +78,26 @@ from services.utils.terminal_status import header, ready_message, service_status
 from services.utils.validate_system import run_startup_checks
 
 # Tjänsterna som ska startas (som moduler)
+#
+# CLOUD-ONLY MODE (#180):
+# Ingestion Engine, Enrichment Daemon och Dreamer Daemon kör på Hetzner-
+# servern (#160, #161). Lokalt körs bara collectors + transcriber + uploader.
+# Uploadern pushar Assets till servern via REST (#165, #178).
 SERVICES = [
+    # Datainsamling — skriver till lokala Assets/
     {"module": "services.collectors.file_collector", "name": "File Retriever"},
     {"module": "services.collectors.slack_collector", "name": "Slack Collector"},
     {"module": "services.collectors.collector_daemon", "name": "Collector Daemon"},
-    {"module": "services.engines.ingestion", "name": "Ingestion Engine"},
     {"module": "services.processors.transcriber", "name": "Transcriber"},
     {"module": "services.collectors.rode_collector", "name": "Røde Collector"},
-    {"module": "services.engines.enrichment_daemon", "name": "Enrichment Daemon"},
-    {"module": "services.engines.dreamer_daemon", "name": "Dreamer Daemon"},
+
+    # Cloud-uploader — bevakar Assets/ och pushar till server
+    {"module": "services.uploader.daemon", "name": "Uploader Daemon"},
+
+    # Server-side (kör på Hetzner, inte här):
+    # {"module": "services.engines.ingestion", "name": "Ingestion Engine"},
+    # {"module": "services.engines.enrichment_daemon", "name": "Enrichment Daemon"},
+    # {"module": "services.engines.dreamer_daemon", "name": "Dreamer Daemon"},
 ]
 
 processes = []

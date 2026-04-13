@@ -1,0 +1,189 @@
+# MyMemory Server Configuration
+# Används av server-side tjänster: mcp_server, upload_server,
+# ingestion_worker, enrichment_daemon, dreamer_daemon.
+#
+# Deployas till /opt/mymemory/app/config/my_mem_config.yaml via
+# tools/cloud/deploy_*.sh-skripten.
+
+version: "__APP_VERSION__"
+
+# --- SYSTEMINSTÄLLNINGAR ---
+system:
+  product_name: "Digitalist Företagsminne"
+  timezone: "Europe/Stockholm"
+  locale: "sv_SE"
+
+# --- SÄKERHET ---
+security:
+  default_access_level: 5
+
+# --- ÄGARE / TENANT-IDENTITET ---
+# Per-tenant identitet. På multi-tenant-server kan flera config-instanser köra.
+owner:
+  id: "__OWNER_ID__"
+  profile:
+    full_name: "__OWNER_NAME__"
+    role: "__OWNER_ROLE__"
+    organization: "__OWNER_ORG__"
+    location: "__OWNER_LOCATION__"
+    skills: []
+
+# --- SERVER-PATHS ---
+paths:
+  # Lake (avkrypterad markdown-cache; primär källa är documents-tabellen i PG)
+  lake_store: "/opt/mymemory/Lake"
+
+  # Daemon state-filer (Enrichment + Dreamer)
+  state_dir: "/opt/mymemory/state"
+
+# --- POSTGRESQL ---
+database:
+  postgresql:
+    host: "__PG_HOST__"
+    port: 5432
+    dbname: "mymemory"
+    user: "mymemory_app"
+    password: "__PG_PASSWORD__"
+  tenant_id: "__TENANT_ID__"
+
+# --- LOGGNING ---
+logging:
+  system_log: "/var/log/mymemory/system.log"
+  log_level: "INFO"
+
+# --- AI ENGINE ---
+# LLM-anrop sker server-side (entity extraction, semantic metadata,
+# enrichment, dreamer). Klienten har endast Gemini-nyckel för transkribering.
+ai_engine:
+  default_provider: "anthropic"
+  transcription_provider: "gemini"
+
+  anthropic:
+    api_key: "__ANTHROPIC_API_KEY__"
+    throttling:
+      initial_rps: 10.0
+      max_rps: 30.0
+      min_rps: 0.5
+      increase_factor: 1.2
+      decrease_factor: 0.5
+      stabilize_after: 5
+
+  gemini:
+    api_key: "__GEMINI_API_KEY__"
+    throttling:
+      initial_rps: 10.0
+      max_rps: 30.0
+      min_rps: 0.5
+      increase_factor: 1.2
+      decrease_factor: 0.5
+      stabilize_after: 5
+
+  models:
+    model_pro: "claude-sonnet-4-6"
+    model_fast: "claude-sonnet-4-6"
+    model_lite: "claude-haiku-4-5-20251001"
+    embedding_model: "KBLab/sentence-bert-swedish-cased"
+
+  tasks:
+    enrichment: "model_fast"
+    consolidation: "model_pro"
+
+  max_workers: 5
+  max_retries: 3
+  retry_delay_seconds: 2
+
+# --- DREAMER (entity resolution batch-jobb) ---
+dreamer:
+  thresholds:
+    delete: 0.95
+    split: 0.90
+    rename_normal: 0.95
+    rename_weak: 0.70
+    recategorize: 0.90
+    merge: 0.90
+
+  candidate_limit: 50
+  vector_search_limit: 10
+
+  daemon:
+    enabled: true
+    node_threshold: 15
+    run_interval_hours: 12
+    poll_interval_seconds: 300
+    state_file: "/opt/mymemory/state/dreamer_state.json"
+
+# --- ENRICHMENT (property-berikning batch-jobb) ---
+enrichment:
+  token_budget: 22500
+  entity_ceiling_pct: 0.6
+  neighbor_budget_pct: 0.4
+
+  daemon:
+    enabled: true
+    re_enrich_threshold: 10
+    sleep_need_threshold: 0.10
+    state_file: "/opt/mymemory/state/enrichment_state.json"
+
+  thresholds:
+    enrich: 0.6
+
+  quality_flags:
+    enabled: true
+
+# --- GRAPH HEALTH ---
+graph_health:
+  state_file: "/opt/mymemory/state/graph_health.json"
+
+# --- SEARCH (MCP-sökning) ---
+search:
+  graph_limit: 15
+  distance_strong: 0.8
+  distance_weak: 1.2
+  max_entity_queries: 5
+  max_semantic_queries: 3
+  results_per_query: 2
+  tool_timeout_seconds: 8
+
+# --- VALIDATION ---
+validation:
+  min_year: 2015
+  system_date_override: null
+  entity_extraction_max_attempts: 7
+
+# --- INGESTION PROCESSING ---
+processing:
+  metadata_text_limit: 50000
+  summary_max_chars: 30000
+  header_scan_chars: 3000
+  llm_context_limit: 5000
+  enrichment_text_limit: 2000
+  max_keywords: 10
+
+  document_extensions:
+    - .pdf
+    - .docx
+    - .txt
+    - .md
+    - .json
+    - .xls
+    - .xlsx
+    - .csv
+
+  chunking:
+    chunk_size: 1200
+    chunk_overlap: 150
+    chunk_threshold: 2400
+    overview_content_chars: 500
+
+# --- PROCESS-REGLER (entity extraction) ---
+processing_policy:
+  description: "Styr logiken för skapande och underhåll av grafer."
+  confidence_create: 0.5
+  confidence_edge: 0.8
+  confidence_link: 1.0
+  dreamer_thresholds:
+    delete: 0.95
+    split: 0.90
+    rename_normal: 0.95
+    rename_weak: 0.70
+    merge: 0.90

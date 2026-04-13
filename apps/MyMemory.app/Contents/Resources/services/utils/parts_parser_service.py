@@ -40,6 +40,8 @@ class DocumentPart:
     time_start: Optional[str] = None  # HH:MM:SS (för transkript)
     time_end: Optional[str] = None    # HH:MM:SS (för transkript)
     summary: Optional[str] = None     # Ingress/sammanfattning
+    char_start: int = -1              # Teckenposition i original-body (-1 = syntetisk)
+    char_end: int = -1                # Teckenposition i original-body (-1 = syntetisk)
 
 
 # Strikt mönster som matchar exakt transcriber-output:
@@ -118,7 +120,9 @@ def extract_transcript_parts(text: str) -> List[DocumentPart]:
             content=content,
             time_start=time_start,
             time_end=time_end,
-            summary=summary
+            summary=summary,
+            char_start=start_pos,
+            char_end=end_pos,
         ))
 
     LOGGER.debug(f"Extraherade {len(parts)} delar från transkript")
@@ -145,10 +149,13 @@ def build_chunk_text(part: DocumentPart) -> str:
     if part.summary:
         lines.append(f"Sammanfattning: {part.summary}")
 
-    # Begränsa innehåll för embedding-kvalitet
+    # Begränsa innehåll till chunk_size (från config, default 1200)
+    from services.utils.config_loader import get_config
+    _cfg = get_config()
+    _max_chars = _cfg.get('processing', {}).get('chunking', {}).get('chunk_size', 1200)
     content = part.content
-    if len(content) > 2000:
-        content = content[:2000] + "..."
+    if len(content) > _max_chars:
+        content = content[:_max_chars] + "..."
 
     if content:
         lines.append(content)
@@ -190,22 +197,28 @@ def _merge_short_chunks(parts: List['DocumentPart']) -> List['DocumentPart']:
             # Försök slå ihop med nästa
             if i + 1 < len(parts):
                 nxt = parts[i + 1]
+                combined = p.content + '\n\n' + nxt.content
                 parts[i + 1] = DocumentPart(
                     part_number=nxt.part_number,
                     title=f"{p.time_start or p.title} - {nxt.time_end or nxt.title}" if p.time_start else nxt.title,
-                    content=p.content + '\n\n' + nxt.content,
+                    content=combined,
                     time_start=p.time_start or nxt.time_start,
                     time_end=nxt.time_end or p.time_end,
+                    char_start=min(p.char_start, nxt.char_start) if p.char_start >= 0 and nxt.char_start >= 0 else max(p.char_start, nxt.char_start),
+                    char_end=max(p.char_end, nxt.char_end),
                 )
             elif merged:
                 # Slå ihop med föregående
                 prev = merged[-1]
+                combined = prev.content + '\n\n' + p.content
                 merged[-1] = DocumentPart(
                     part_number=prev.part_number,
                     title=f"{prev.time_start or prev.title} - {p.time_end or p.title}" if prev.time_start else prev.title,
-                    content=prev.content + '\n\n' + p.content,
+                    content=combined,
                     time_start=prev.time_start or p.time_start,
                     time_end=p.time_end or prev.time_end,
+                    char_start=prev.char_start,
+                    char_end=max(prev.char_end, p.char_end),
                 )
             else:
                 merged.append(p)
@@ -238,10 +251,21 @@ def _strip_metadata_header(text: str) -> str:
     return text
 
 
-def _split_fixed_size(text: str, chunk_size: int, overlap: int) -> List[str]:
-    """Generisk fixed-size splitter med overlap. Bryter vid ordgränser."""
+def _split_fixed_size(text: str, chunk_size: int, overlap: int,
+                      base_offset: int = 0) -> List[tuple]:
+    """Generisk fixed-size splitter med overlap. Bryter vid ordgränser.
+
+    Args:
+        text: Text att splitta
+        chunk_size: Max tecken per chunk
+        overlap: Överlapp i tecken
+        base_offset: Offset i original-dokumentet (för att beräkna absoluta positioner)
+
+    Returns:
+        Lista med (chunk_text, char_start, char_end) tupler
+    """
     if len(text) <= chunk_size:
-        return [text]
+        return [(text, base_offset, base_offset + len(text))]
 
     chunks = []
     start = 0
@@ -256,7 +280,9 @@ def _split_fixed_size(text: str, chunk_size: int, overlap: int) -> List[str]:
 
         chunk = text[start:end].strip()
         if chunk:
-            chunks.append(chunk)
+            # Hitta faktisk start (efter strip)
+            actual_start = start + (len(text[start:end]) - len(text[start:end].lstrip()))
+            chunks.append((chunk, base_offset + actual_start, base_offset + actual_start + len(chunk)))
         start = end - overlap
 
     return chunks
@@ -272,6 +298,9 @@ def chunk_slack_log(text: str, chunk_size: int, overlap: int) -> List[DocumentPa
     body = _strip_metadata_header(text)
     if not body:
         return []
+
+    # Beräkna body offset i original-text (efter metadata-strip)
+    body_offset = len(text) - len(body) if len(text) > len(body) else 0
 
     # Hitta alla top-level meddelanden (ej trådsvar med ↳)
     msg_starts = []
@@ -297,37 +326,45 @@ def chunk_slack_log(text: str, chunk_size: int, overlap: int) -> List[DocumentPa
     current_size = 0
     first_time = None
     last_time = None
+    current_char_start = None
 
-    for timestamp, msg_text in messages:
+    for (start, _ts), (timestamp, msg_text) in zip(msg_starts, messages):
         if first_time is None:
             first_time = timestamp
+            current_char_start = body_offset + start
 
         # Om ett enstaka meddelande > chunk_size: splitta det
         if len(msg_text) > chunk_size and not current_texts:
-            sub_chunks = _split_fixed_size(msg_text, chunk_size, overlap)
-            for j, sub in enumerate(sub_chunks):
+            sub_chunks = _split_fixed_size(msg_text, chunk_size, overlap, base_offset=body_offset + start)
+            for j, (sub_text, cs, ce) in enumerate(sub_chunks):
                 parts.append(DocumentPart(
                     part_number=len(parts) + 1,
                     title=f"{timestamp}",
-                    content=sub,
+                    content=sub_text,
                     time_start=timestamp,
                     time_end=timestamp,
+                    char_start=cs,
+                    char_end=ce,
                 ))
             first_time = None
             continue
 
         # Om tillägg överskrider chunk_size: spara och börja ny
         if current_size + len(msg_text) > chunk_size and current_texts:
+            combined = '\n\n'.join(current_texts)
             parts.append(DocumentPart(
                 part_number=len(parts) + 1,
                 title=f"{first_time} - {last_time}",
-                content='\n\n'.join(current_texts),
+                content=combined,
                 time_start=first_time,
                 time_end=last_time,
+                char_start=current_char_start,
+                char_end=current_char_start + len(combined) if current_char_start is not None else -1,
             ))
             current_texts = []
             current_size = 0
             first_time = timestamp
+            current_char_start = body_offset + start
 
         current_texts.append(msg_text)
         current_size += len(msg_text)
@@ -339,12 +376,15 @@ def chunk_slack_log(text: str, chunk_size: int, overlap: int) -> List[DocumentPa
         # Om sista chunken är för kort och det finns en föregående: slå ihop
         if len(last_content) < _MIN_CHUNK_SIZE and parts:
             prev = parts[-1]
+            merged_content = prev.content + '\n\n' + last_content
             parts[-1] = DocumentPart(
                 part_number=prev.part_number,
                 title=f"{prev.time_start} - {last_time}",
-                content=prev.content + '\n\n' + last_content,
+                content=merged_content,
                 time_start=prev.time_start,
                 time_end=last_time,
+                char_start=prev.char_start,
+                char_end=prev.char_start + len(merged_content) if prev.char_start >= 0 else -1,
             )
         else:
             parts.append(DocumentPart(
@@ -353,6 +393,8 @@ def chunk_slack_log(text: str, chunk_size: int, overlap: int) -> List[DocumentPa
                 content=last_content,
                 time_start=first_time,
                 time_end=last_time,
+                char_start=current_char_start if current_char_start is not None else -1,
+                char_end=current_char_start + len(last_content) if current_char_start is not None else -1,
             ))
 
     # Post-process: slå ihop korta chunks med nästa eller föregående
@@ -373,6 +415,8 @@ def chunk_email_thread(text: str, chunk_size: int, overlap: int) -> List[Documen
     if not body:
         return []
 
+    body_offset = len(text) - len(body) if len(text) > len(body) else 0
+
     # Hitta alla email-gränser
     boundaries = []
     for pattern in _EMAIL_BOUNDARY_PATTERNS:
@@ -382,18 +426,19 @@ def chunk_email_thread(text: str, chunk_size: int, overlap: int) -> List[Documen
     boundaries = sorted(set(boundaries))
 
     if not boundaries:
-        raw_chunks = _split_fixed_size(body, chunk_size, overlap)
+        raw_chunks = _split_fixed_size(body, chunk_size, overlap, base_offset=body_offset)
         return [
-            DocumentPart(part_number=i + 1, title=f"Del {i + 1}", content=chunk)
-            for i, chunk in enumerate(raw_chunks)
-            if len(chunk) >= _MIN_CHUNK_SIZE
+            DocumentPart(part_number=i + 1, title=f"Del {i + 1}", content=chunk_text,
+                         char_start=cs, char_end=ce)
+            for i, (chunk_text, cs, ce) in enumerate(raw_chunks)
+            if len(chunk_text) >= _MIN_CHUNK_SIZE
         ]
 
     # Splitta på gränserna
     segments = []
     first_segment = body[:boundaries[0]].strip()
     if first_segment:
-        segments.append(("", first_segment))
+        segments.append(("", first_segment, 0))
 
     for i, boundary in enumerate(boundaries):
         end = boundaries[i + 1] if i + 1 < len(boundaries) else len(body)
@@ -408,32 +453,37 @@ def chunk_email_thread(text: str, chunk_size: int, overlap: int) -> List[Documen
                 wrote_match = re.search(r'On .+?(\w[\w\s.]+)<', segment)
                 if wrote_match:
                     sender = wrote_match.group(1).strip()
-            segments.append((sender, segment))
+            segments.append((sender, segment, boundary))
 
     # Bygg chunks, splitta stora segment
     parts = []
-    for sender, segment in segments:
+    for sender, segment, seg_offset in segments:
         title = sender if sender else f"Del {len(parts) + 1}"
 
         if len(segment) < _MIN_CHUNK_SIZE:
             continue
 
         if len(segment) > chunk_size:
-            sub_chunks = _split_fixed_size(segment, chunk_size, overlap)
-            for j, sub in enumerate(sub_chunks):
-                if len(sub) < _MIN_CHUNK_SIZE:
+            sub_chunks = _split_fixed_size(segment, chunk_size, overlap,
+                                           base_offset=body_offset + seg_offset)
+            for j, (sub_text, cs, ce) in enumerate(sub_chunks):
+                if len(sub_text) < _MIN_CHUNK_SIZE:
                     continue
                 suffix = f" ({j + 1}/{len(sub_chunks)})" if len(sub_chunks) > 1 else ""
                 parts.append(DocumentPart(
                     part_number=len(parts) + 1,
                     title=f"{title}{suffix}",
-                    content=sub,
+                    content=sub_text,
+                    char_start=cs,
+                    char_end=ce,
                 ))
         else:
             parts.append(DocumentPart(
                 part_number=len(parts) + 1,
                 title=title,
                 content=segment,
+                char_start=body_offset + seg_offset,
+                char_end=body_offset + seg_offset + len(segment),
             ))
 
     LOGGER.debug(f"Email chunkning: {len(parts)} delar")
@@ -442,7 +492,7 @@ def chunk_email_thread(text: str, chunk_size: int, overlap: int) -> List[Documen
 
 def chunk_generic_document(text: str, chunk_size: int, overlap: int) -> List[DocumentPart]:
     """
-    Chunka generiskt dokument: rubriker → paragrafer → fixed-size.
+    Chunka generiskt dokument: rubriker -> paragrafer -> fixed-size.
 
     Försöker splitta på markdown-rubriker först.
     Faller tillbaka på paragrafer (dubbla newlines).
@@ -451,6 +501,8 @@ def chunk_generic_document(text: str, chunk_size: int, overlap: int) -> List[Doc
     body = _strip_metadata_header(text)
     if not body:
         return []
+
+    body_offset = len(text) - len(body) if len(text) > len(body) else 0
 
     # Steg 1: Försök splitta på markdown-rubriker
     headings = list(_HEADING_PATTERN.finditer(body))
@@ -461,30 +513,36 @@ def chunk_generic_document(text: str, chunk_size: int, overlap: int) -> List[Doc
         if headings[0].start() > 0:
             prefix = body[:headings[0].start()].strip()
             if prefix and len(prefix) >= _MIN_CHUNK_SIZE:
-                segments.append(("Inledning", prefix))
+                segments.append(("Inledning", prefix, 0))
 
         for i, match in enumerate(headings):
             start = match.start()
             end = headings[i + 1].start() if i + 1 < len(headings) else len(body)
             title = match.group(2).strip()[:60]
             content = body[start:end].strip()
-            segments.append((title, content))
+            segments.append((title, content, start))
     else:
         # Steg 2: Splitta på paragrafer (dubbla newlines)
         raw_segments = re.split(r'\n\s*\n', body)
-        segments = [
-            (f"Del {i + 1}", seg.strip())
-            for i, seg in enumerate(raw_segments)
-            if seg.strip() and len(seg.strip()) >= _MIN_CHUNK_SIZE
-        ]
+        segments = []
+        pos = 0
+        for seg in raw_segments:
+            seg_stripped = seg.strip()
+            if seg_stripped and len(seg_stripped) >= _MIN_CHUNK_SIZE:
+                seg_start = body.find(seg_stripped, pos)
+                if seg_start < 0:
+                    seg_start = pos
+                segments.append((f"Del {len(segments) + 1}", seg_stripped, seg_start))
+                pos = seg_start + len(seg_stripped)
 
     if not segments:
         # Steg 3: Sista fallback — ren fixed-size
-        raw_chunks = _split_fixed_size(body, chunk_size, overlap)
+        raw_chunks = _split_fixed_size(body, chunk_size, overlap, base_offset=body_offset)
         return [
-            DocumentPart(part_number=i + 1, title=f"Del {i + 1}", content=chunk)
-            for i, chunk in enumerate(raw_chunks)
-            if len(chunk) >= _MIN_CHUNK_SIZE
+            DocumentPart(part_number=i + 1, title=f"Del {i + 1}", content=chunk_text,
+                         char_start=cs, char_end=ce)
+            for i, (chunk_text, cs, ce) in enumerate(raw_chunks)
+            if len(chunk_text) >= _MIN_CHUNK_SIZE
         ]
 
     # Sammanslå små + splitta stora
@@ -492,30 +550,38 @@ def chunk_generic_document(text: str, chunk_size: int, overlap: int) -> List[Doc
     current_title = None
     current_content = []
     current_size = 0
+    current_seg_start = None
 
-    for title, content in segments:
+    for title, content, seg_offset in segments:
         # Stora segment: splitta
         if len(content) > chunk_size:
             if current_content:
-                merged.append((current_title, '\n\n'.join(current_content)))
+                combined = '\n\n'.join(current_content)
+                merged.append((current_title, combined,
+                               body_offset + current_seg_start if current_seg_start is not None else -1))
                 current_content = []
                 current_size = 0
                 current_title = None
+                current_seg_start = None
 
-            sub_chunks = _split_fixed_size(content, chunk_size, overlap)
-            for j, sub in enumerate(sub_chunks):
-                if len(sub) < _MIN_CHUNK_SIZE:
+            sub_chunks = _split_fixed_size(content, chunk_size, overlap,
+                                           base_offset=body_offset + seg_offset)
+            for j, (sub_text, cs, ce) in enumerate(sub_chunks):
+                if len(sub_text) < _MIN_CHUNK_SIZE:
                     continue
                 suffix = f" ({j + 1})" if len(sub_chunks) > 1 else ""
-                merged.append((f"{title}{suffix}", sub))
+                merged.append((f"{title}{suffix}", sub_text, cs))
             continue
 
         # Om tillägg överskrider chunk_size: spara och börja ny
         if current_size + len(content) > chunk_size and current_content:
-            merged.append((current_title, '\n\n'.join(current_content)))
+            combined = '\n\n'.join(current_content)
+            merged.append((current_title, combined,
+                           body_offset + current_seg_start if current_seg_start is not None else -1))
             current_content = []
             current_size = 0
             current_title = None
+            current_seg_start = None
 
         # Filtrera bort minimala segment
         if len(content) < _MIN_CHUNK_SIZE:
@@ -523,16 +589,24 @@ def chunk_generic_document(text: str, chunk_size: int, overlap: int) -> List[Doc
 
         if current_title is None:
             current_title = title
+            current_seg_start = seg_offset
         current_content.append(content)
         current_size += len(content)
 
     if current_content:
-        merged.append((current_title, '\n\n'.join(current_content)))
+        combined = '\n\n'.join(current_content)
+        merged.append((current_title, combined,
+                       body_offset + current_seg_start if current_seg_start is not None else -1))
 
-    parts = [
-        DocumentPart(part_number=i + 1, title=title, content=content)
-        for i, (title, content) in enumerate(merged)
-    ]
+    parts = []
+    for i, (title, content, abs_start) in enumerate(merged):
+        parts.append(DocumentPart(
+            part_number=i + 1,
+            title=title,
+            content=content,
+            char_start=abs_start,
+            char_end=abs_start + len(content) if abs_start >= 0 else -1,
+        ))
 
     LOGGER.debug(f"Dokument chunkning: {len(parts)} delar")
     return parts

@@ -119,7 +119,7 @@ transcriber:
 
     För varje del (id 1-{num_parts}), returnera:
     - title: Kort beskrivande titel
-    - ingress: 1-2 meningar som sammanfattar
+    - ingress: Vilka beslut/fakta framkom? FÖRBJUDET: "I denna del diskuterar deltagarna...", "Här tar man upp...". Skriv VAD som sas/beslutades, inte ATT det diskuterades.
     - speakers: Vilka som pratar i denna del
     - topics: Nyckelord för ämnen
 
@@ -184,15 +184,18 @@ transcriber:
 # --- Doc Converter (Textfiler/Dokument) ---
 doc_converter:
   doc_summary_prompt: |
-      Analysera detta dokument och skapa två specifika sammanfattningar på svenska.
+      Analysera detta dokument. Skriv för MASKINELL SÖKNING, inte mänsklig läsning.
+      Inga inledningar, inga värderingar, inga fyllnadsord. Bara fakta.
 
-      1. context_summary: En kort text som beskriver vad som gör just detta dokument unikt.
-         - Om DOKUMENTÄGARE anges: Skriv ur ägarens perspektiv utan att nämna ägaren i varje mening.
-         - Fokusera på vad som hände och vem andra som var inblandade.
-      2. relations_summary: En kort text som beskriver dokumentets viktigaste kopplingar till personer, projekt eller andra händelser.
-         - Inkludera INTE dokumentägaren som en "relation" - fokusera på andra entiteter.
-         - Exempel: "Möte med Anders Berg om Projekt X, diskuterade resursallokering."
-      3. document_keywords: Generera en lista med nyckelord som kan tjäna som sökord för att maximera träffsäkerheten vid textsökning. Minst 5 max 10 stycken.
+      1. context_summary: Vad handlar dokumentet om? Fakta-statement.
+         - FÖRBJUDET: "En intensiv dag...", "Detta dokument beskriver...", "En omfattande..."
+         - BRA: "Tilldelningsbeslut ADDA upphandling AI-plattform. Crayon vann. 2026-03-16."
+         - BRA: "Kvartalsrapport Q1 Digitalist. Omsättning 12.3 MSEK, EBITDA -0.8 MSEK."
+         - Om DOKUMENTÄGARE anges: Skriv ur ägarens perspektiv utan att nämna ägaren.
+      2. relations_summary: Vilka entiteter kopplas ihop och hur? Kompakt.
+         - Inkludera INTE dokumentägaren.
+         - BRA: "Crayon Sweden vann upphandlingen. Digitalist och Chas deltog som anbudsgivare."
+      3. document_keywords: Sökord för textsökning. Minst 5, max 10.
 
       TEXT:
       {text}
@@ -422,25 +425,22 @@ enrichment:
     }}
 
   semantic_update: |
-    Din uppgift är att FÖRÄDLA metadata för dokumentet "{filename}".
-    Du ska kombinera dokumentets befintliga sammanfattning med ny, djupare insikt från kunskapsgrafen.
+    FÖRÄDLA metadata för "{filename}". Skriv för MASKINELL SÖKNING — kompakt, exakt, inga fyllnadsord.
 
-    === NUVARANDE METADATA (Baserat på dokumentets innehåll) ===
+    === NUVARANDE METADATA ===
     Context: {current_context}
     Relations: {current_relations}
     Keywords: {current_keywords}
 
-    === NY GRAF-INSIKT (Aggregerad kunskap om entiteter i dokumentet) ===
+    === NY GRAF-INSIKT ===
     {graph_context}
 
     === INSTRUKTION ===
-    1. Behåll kärnan i "NUVARANDE METADATA" (det speglar innehållet i dokumentet).
-    2. Injicera detaljer från "NY GRAF-INSIKT" där det förtydligar (t.ex. byt ut "ett projekt" mot "Adda PoC" om grafen bekräftar det).
-    3. Uppdatera keywords: Behåll relevanta gamla, lägg till nya precisa termer från grafen.
-    4. context_summary ska vara en syntes av innehåll + kontext.
-    5. Om DOKUMENTÄGARE anges i graf-insikten:
-       - Skriv ur ägarens perspektiv utan att upprepa ägarens namn.
-       - Fokusera på VAD som hände och VEM ANDRA som var inblandade.
+    1. Behåll kärnan i nuvarande metadata.
+    2. Ersätt vaga referenser med exakta namn från grafen ("ett projekt" -> "Adda PoC").
+    3. context_summary: Fakta-statement. FÖRBJUDET: "En intensiv...", "Detta dokument...", narrativa inledningar.
+    4. relations_summary: Vilka entiteter kopplas ihop och hur? Kompakt.
+    5. Om DOKUMENTÄGARE: Skriv ur ägarens perspektiv utan att nämna ägaren.
 
     JSON:
     {{
@@ -517,8 +517,10 @@ entity_resolver:
 
     1. **BERIKA NODER** — Fyll saknade properties från dokumentkontext + grannskap.
        Gäller ALLA entiteter du ser, inte bara de som listats under "BERÖRDA ENTITETER".
-       **context_summary**: Generera en kompakt identitetsbeskrivning (1-2 meningar) — vem/vad ÄR detta?
-       Returnera som updated_properties: {"context_summary": "Joakim Ekman är VD på Digitalist Group."}
+       **context_summary**: Fakta-statement om vem/vad detta ÄR. Format: [Namn] [roll/typ] [organisation].
+       FÖRBJUDET: "En erfaren...", "En välkänd...", narrativa beskrivningar.
+       BRA: "Joakim Ekman, VD Digitalist Group." / "Adda, inköpscentral för offentlig sektor."
+       Returnera som updated_properties: {"context_summary": "..."}
        Beskriv identitet, inte händelser. Om context_summary redan finns och är korrekt, hoppa över.
     2. **BERIKA EDGES** — Fyll saknade edge-properties (duration_minutes, job_title, etc).
        OBS: relation_context på kanter är READ-ONLY. Inkludera ALDRIG relation_context i edge_enrichments.

@@ -1,7 +1,7 @@
 {
-  "version": "0.12.15",
-  "date": "2026-03-25",
-  "description": "## MCP sökförbättringar, sökstrategi-skill och collector-validering ### Ny sökskill (#169) - Ny Claude Code skill (`mymem-search`) med beslutsträd, 7 sökstrategier (A–G) och Harvest/Forecast-korsreferens - FAR/FÅR INTE-principer, parallelliseringsguide, verktygsreferens och fallback-kedjor ### MCP-verktygsförbättringar (#169) - `search_graph_nodes` söker nu i context_summary (5:e sökfält) och har automatisk vektor-fallback vid 0 träffar - `search_by_date_range` stöder `source_type`-filter (\"Email Thread\", \"Slack Log\" etc.) - `search_lake_metadata` rapporterar totalt antal träffar (\"visar 10 av N\") - `get_neighbor_network` och `get_entity_summary` har konfigurerbar `max_context_entries` - Generell timeout-wrapper (8s) på alla read-only MCP-verktyg ### Valideringsgrind för collectors (#170) - Slack: avvisar oresolvade kanal-ID, tomma transkript, framtida datum - Gmail: avvisar mail utan ämne, avsändare, body eller datum - Calendar: avvisar digest utan events - Tester för alla valideringsfunktioner ### Bugfixar - fix: document deletion broken by config key mismatch (#134) - fix: preserve broker_url during config upgrade ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.15/MyMemory-Installer.dmg",
+  "version": "0.12.16",
+  "date": "2026-04-13",
+  "description": "# Release Notes Intern refaktor av release-processen — ingen funktionsförändring för användaren. **Under huven (#181):** - Slimmat `.app`-paket — server-only kod (Ingestion Engine, Enrichment, Dreamer, MCP-server, upload_server, OAuth) ingår inte längre. Mindre attack surface och snabbare första-start (färre dependencies att installera i `~/MyMemory/venv/`). - Separata `requirements-client.txt` och `requirements-server.txt` — klienten installerar inte längre `sentence-transformers` och andra tunga server-only deps. - Ny orkestrerad server-deploy (`tools/cloud/release_server.sh`) med automatisk pre-deploy backup, health-checks och idempotenta migrationer. - `release.sh` stöder nu `--target {client,server,both}` för att välja deploy-mål. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.12.16/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }

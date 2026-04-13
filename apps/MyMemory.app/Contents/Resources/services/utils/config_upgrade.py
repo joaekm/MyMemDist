@@ -40,6 +40,13 @@ PLACEHOLDER_MAP = {
     "__GEMINI_API_KEY__": ("ai_engine", "gemini", "api_key"),
     "__SLACK_BOT_TOKEN__": ("slack", "bot_token"),
     "__GMAIL_LABEL__": ("google", "gmail", "target_label"),
+    # Cloud-anslutning (#180) — bevaras vid upgrade så användaren slipper
+    # konfigurera om api_url efter varje release.
+    "__CLOUD_API_URL__": ("cloud", "api_url"),
+    # PostgreSQL credentials (cloud-mode på server)
+    "__PG_HOST__": ("database", "postgresql", "host"),
+    "__PG_PASSWORD__": ("database", "postgresql", "password"),
+    "__TENANT_ID__": ("database", "tenant_id"),
 }
 
 # Non-placeholder protected values: key path in old config → (section_marker, key, indent)

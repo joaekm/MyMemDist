@@ -1,0 +1,672 @@
+"""
+Uploader Daemon — bevakar lokala Assets och pushar pre-parsad text till
+upload_server (#165) på Hetzner. Kontrakt enligt #179.
+
+Status-flöde i SQLite (~/Library/Application Support/MyMemory/uploader_state.db):
+    pending     ← upptäckt i Assets (watchdog eller bootstrap-scan)
+    extracting  ← text-extraktion pågår
+    uploaded    ← POST 202 från servern
+    done        ← server-status='done' (bekräftad via GET)
+    failed      ← extraktion misslyckades, eller upload 4xx/5xx efter retries
+
+Retry-strategi:
+    Nätverksfel (connection refused/DNS): retry utan att räkna upp retry_count
+    Server 5xx: räkna upp retry_count, exp. backoff (5s, 30s, 5min, 30min, 2h)
+    Server 4xx (ej 409): permanent failed, ingen retry
+    Server 409 (UUID exists): markera done direkt — idempotency
+
+Environment variables:
+    MYMEMORY_CONFIG               Sökväg till my_mem_config.yaml
+    MYMEMORY_UPLOAD_URL           Override för cloud.api_url
+    MYMEMORY_PAT                  Override för PAT (annars läses från config)
+    UPLOADER_INTERVAL             Polling-intervall i sekunder (default 5)
+    UPLOADER_LOG_FILE             Default ~/Library/Logs/MyMemory/uploader.log
+"""
+
+import json
+import logging
+import os
+import re
+import signal
+import sqlite3
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+# Path setup
+project_root = str(Path(__file__).parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# --- LOGGING ---
+_log_file = os.environ.get(
+    'UPLOADER_LOG_FILE',
+    os.path.expanduser('~/Library/Logs/MyMemory/uploader.log')
+)
+os.makedirs(os.path.dirname(_log_file), exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - UPLOADER - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(_log_file),
+        logging.StreamHandler(sys.stderr),
+    ]
+)
+LOGGER = logging.getLogger('UPLOADER')
+
+for _name in ['urllib3', 'httpx', 'httpcore', 'watchdog']:
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
+
+import urllib.error
+import urllib.request
+
+# Watchdog är optional — bootstrap-scan + polling fungerar utan
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+    _WATCHDOG_AVAILABLE = True
+except ImportError as _e:
+    LOGGER.warning(f"watchdog ej tillgängligt ({_e}) — endast polling-läge")
+    FileSystemEventHandler = object
+    Observer = None
+    _WATCHDOG_AVAILABLE = False
+
+from services.processors.text_extractor import extract_text
+from services.utils.config_loader import get_config
+
+
+# --- CONFIG ---
+
+UUID_SUFFIX_PATTERN = re.compile(
+    r'_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.'
+    r'(txt|md|pdf|docx|csv|xlsx|eml|json)$',
+    re.IGNORECASE,
+)
+
+POLL_INTERVAL = int(os.environ.get('UPLOADER_INTERVAL', '5'))
+
+# Default state-DB i macOS Application Support
+_STATE_DB_DEFAULT = os.path.expanduser(
+    '~/Library/Application Support/MyMemory/uploader_state.db'
+)
+
+# Backoff-trappa (sekunder) per retry_count
+RETRY_BACKOFF = [5, 30, 300, 1800, 7200]
+
+# HTTP-timeouts
+UPLOAD_TIMEOUT = 60
+STATUS_TIMEOUT = 10
+
+
+def _get_uploader_config() -> dict:
+    """Läs uploader-relevant config + env-overrides."""
+    cfg = get_config()
+    cloud = cfg.get('cloud', {})
+
+    api_url = os.environ.get('MYMEMORY_UPLOAD_URL') or cloud.get('api_url', '')
+    if not api_url:
+        raise RuntimeError(
+            "HARDFAIL: cloud.api_url saknas i config (eller MYMEMORY_UPLOAD_URL env)"
+        )
+    api_url = api_url.rstrip('/')
+
+    # PAT-prioritet: env > Keychain > config (config fallback för dev/Linux).
+    # macOS: använd Keychain via `services.utils.keychain` (set via menubar).
+    pat = os.environ.get('MYMEMORY_PAT')
+    if not pat:
+        try:
+            from services.utils.keychain import get_pat
+            pat = get_pat()
+        except ImportError as e:
+            LOGGER.debug(f"keychain import failed: {e}")
+    if not pat:
+        pat = cloud.get('pat', '')
+    if not pat:
+        raise RuntimeError(
+            "HARDFAIL: PAT saknas. Sätt via menubar (Keychain), "
+            "MYMEMORY_PAT env, eller cloud.pat i config."
+        )
+
+    asset_store = os.path.expanduser(cfg['paths']['asset_store'])
+
+    state_db = os.path.expanduser(
+        cloud.get('uploader_state_db', _STATE_DB_DEFAULT)
+    )
+
+    return {
+        'api_url': api_url,
+        'pat': pat,
+        'asset_store': asset_store,
+        'state_db': state_db,
+        'verify_tls': cloud.get('verify_tls', True),
+        'owner': cfg.get('owner', {}).get('profile', {}).get(
+            'full_name', 'unknown'
+        ),
+    }
+
+
+# --- SQLite STATE ---
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS assets (
+    uuid TEXT PRIMARY KEY,
+    source_type TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    asset_path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    extracted_at TIMESTAMP,
+    uploaded_at TIMESTAMP,
+    confirmed_at TIMESTAMP,
+    last_error TEXT,
+    retry_count INTEGER DEFAULT 0,
+    next_retry_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
+CREATE INDEX IF NOT EXISTS idx_assets_next_retry ON assets(status, next_retry_at);
+"""
+
+
+class UploaderState:
+    """Wrapper kring SQLite state-DB. Trådsäker via threading.Lock."""
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self._lock = threading.Lock()
+        self._init_schema()
+
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_schema(self):
+        with self._lock, self._connect() as conn:
+            conn.executescript(_SCHEMA)
+            conn.commit()
+
+    def upsert_pending(self, uuid: str, source_type: str,
+                       original_filename: str, asset_path: str) -> bool:
+        """Lägg in en ny pending asset om den inte redan finns.
+        Returnerar True om raden är ny."""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute("SELECT status FROM assets WHERE uuid = ?", (uuid,))
+            existing = cur.fetchone()
+            if existing:
+                return False
+            conn.execute(
+                "INSERT INTO assets (uuid, source_type, original_filename, "
+                "asset_path, status) VALUES (?, ?, ?, ?, 'pending')",
+                (uuid, source_type, original_filename, asset_path),
+            )
+            conn.commit()
+            return True
+
+    def fetch_due_pending(self, limit: int = 5) -> list:
+        """Hämta pending/failed-rader vars next_retry_at är nådd."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "SELECT * FROM assets "
+                "WHERE status IN ('pending', 'failed') "
+                "  AND (next_retry_at IS NULL OR next_retry_at <= ?) "
+                "  AND retry_count < ? "
+                "ORDER BY discovered_at ASC LIMIT ?",
+                (now, len(RETRY_BACKOFF), limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def fetch_uploaded(self, limit: int = 20) -> list:
+        """Hämta uploaded-rader för status-konfirmation."""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "SELECT * FROM assets WHERE status = 'uploaded' "
+                "ORDER BY uploaded_at ASC LIMIT ?",
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def update_status(self, uuid: str, status: str, **fields):
+        """Uppdatera status + valfria timestamps/error på en rad."""
+        cols = ['status = ?']
+        values = [status]
+        for k, v in fields.items():
+            cols.append(f"{k} = ?")
+            values.append(v)
+        values.append(uuid)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                f"UPDATE assets SET {', '.join(cols)} WHERE uuid = ?",
+                values,
+            )
+            conn.commit()
+
+    def increment_retry(self, uuid: str, error: str):
+        """Räkna upp retry_count och beräkna next_retry_at via backoff."""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "SELECT retry_count FROM assets WHERE uuid = ?", (uuid,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return
+            new_count = (row['retry_count'] or 0) + 1
+            backoff_idx = min(new_count - 1, len(RETRY_BACKOFF) - 1)
+            next_retry = datetime.now(timezone.utc).timestamp() + RETRY_BACKOFF[backoff_idx]
+            next_retry_iso = datetime.fromtimestamp(
+                next_retry, timezone.utc
+            ).isoformat()
+            conn.execute(
+                "UPDATE assets SET retry_count = ?, last_error = ?, "
+                "next_retry_at = ?, status = 'failed' WHERE uuid = ?",
+                (new_count, error[:1024], next_retry_iso, uuid),
+            )
+            conn.commit()
+
+    def stats(self) -> dict:
+        """Returnera count per status (för menubar / status-API)."""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM assets GROUP BY status"
+            )
+            return {r['status']: r['n'] for r in cur.fetchall()}
+
+
+# --- SOURCE TYPE DETECTION ---
+
+# Speglar processing_policy.source_mappings i graph_schema_template.json.
+# Om asset-pathen innehåller nyckeln → motsvarande source_type.
+SOURCE_MAPPINGS = {
+    'slack': 'Slack Log',
+    'mail': 'Email Thread',
+    'calendar': 'Calendar Event',
+    'transcripts': 'Transcript',
+}
+DEFAULT_SOURCE_TYPE = 'Document'
+
+
+def detect_source_type(asset_path: str) -> str:
+    """Härled source_type från asset-pathen (Asset/Documents/, Mail/, etc.)."""
+    lower = asset_path.lower()
+    for keyword, source_type in SOURCE_MAPPINGS.items():
+        if keyword in lower:
+            return source_type
+    return DEFAULT_SOURCE_TYPE
+
+
+def extract_uuid(filename: str) -> Optional[str]:
+    """Hämta UUID-suffix från filnamn (mönster: name_<UUID>.<ext>)."""
+    match = UUID_SUFFIX_PATTERN.search(filename)
+    return match.group(1).lower() if match else None
+
+
+# --- TRANSPORT ---
+
+class UploadError(Exception):
+    """Generiskt upload-fel — wrappar nätverk/HTTP-fel."""
+
+    def __init__(self, message: str, *, network: bool = False,
+                 status_code: Optional[int] = None):
+        super().__init__(message)
+        self.network = network
+        self.status_code = status_code
+
+
+def post_payload(api_url: str, pat: str, payload: dict,
+                 verify_tls: bool = True) -> tuple:
+    """POST /api/v1/ingest. Returnerar (status_code, response_body_dict).
+
+    Raises UploadError vid nätverksfel (network=True) eller server 5xx.
+    4xx returneras som (status, body) — caller hanterar (409 = idempotency etc.).
+    """
+    url = f"{api_url}/api/v1/ingest"
+    body = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        url, data=body, method='POST',
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {pat}',
+        },
+    )
+
+    ctx = None
+    if not verify_tls:
+        import ssl
+        ctx = ssl._create_unverified_context()
+
+    try:
+        with urllib.request.urlopen(req, timeout=UPLOAD_TIMEOUT, context=ctx) as resp:
+            return resp.status, json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        # 4xx/5xx — kolla status
+        try:
+            err_body = json.loads(e.read().decode('utf-8'))
+        except (ValueError, UnicodeDecodeError):
+            err_body = {"error": "unparsable_response"}
+        if e.code >= 500:
+            raise UploadError(
+                f"Server {e.code}: {err_body}", status_code=e.code
+            ) from e
+        return e.code, err_body
+    except urllib.error.URLError as e:
+        raise UploadError(f"Network error: {e.reason}", network=True) from e
+    except (TimeoutError, ConnectionError) as e:
+        raise UploadError(f"Connection error: {e}", network=True) from e
+
+
+def get_status(api_url: str, pat: str, uuid: str,
+               verify_tls: bool = True) -> Optional[dict]:
+    """GET /api/v1/ingest/{uuid}. Returnerar status-dict eller None vid 404."""
+    url = f"{api_url}/api/v1/ingest/{uuid}"
+    req = urllib.request.Request(
+        url, method='GET',
+        headers={'Authorization': f'Bearer {pat}'},
+    )
+
+    ctx = None
+    if not verify_tls:
+        import ssl
+        ctx = ssl._create_unverified_context()
+
+    try:
+        with urllib.request.urlopen(req, timeout=STATUS_TIMEOUT, context=ctx) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise UploadError(
+            f"Status fetch failed: {e.code}", status_code=e.code
+        ) from e
+    except urllib.error.URLError as e:
+        raise UploadError(f"Network error: {e.reason}", network=True) from e
+
+
+# --- PROCESSING ---
+
+def build_payload(*, uuid: str, source_type: str, original_filename: str,
+                  extracted_text: str, owner: str,
+                  source_specific: Optional[dict] = None) -> dict:
+    """Bygg upload-payload enligt schema upload_api_v1.schema.json."""
+    payload = {
+        'schema_version': 1,
+        'uuid': uuid,
+        'source_type': source_type,
+        'original_filename': original_filename,
+        'extracted_text': extracted_text,
+        'metadata': {
+            'timestamp_content': 'UNKNOWN',  # härleds server-side om möjligt
+            'owner': owner,
+        },
+    }
+    if source_specific:
+        payload['metadata']['source_specific'] = source_specific
+    return payload
+
+
+def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
+    """Processa en pending asset: extrahera → upload. Returnerar ny status.
+
+    Uppdaterar SQLite-raden med varje steg. Vid fel: increment_retry()
+    och returnera 'failed'. Vid 409: markera done direkt (idempotency).
+    """
+    uuid_str = row['uuid']
+    asset_path = row['asset_path']
+    source_type = row['source_type']
+    filename = row['original_filename']
+
+    # 1. Extrahera text
+    if not os.path.exists(asset_path):
+        msg = f"Asset saknas: {asset_path}"
+        LOGGER.error(f"{filename}: {msg}")
+        state.increment_retry(uuid_str, msg)
+        return 'failed'
+
+    state.update_status(uuid_str, 'extracting')
+    try:
+        text = extract_text(asset_path)
+    except (RuntimeError, OSError) as e:
+        msg = f"extract_text failed: {e}"
+        LOGGER.error(f"{filename}: {msg}")
+        state.increment_retry(uuid_str, msg)
+        return 'failed'
+
+    if not text or len(text.strip()) < 10:
+        msg = f"Tom text-extraktion ({len(text)} chars)"
+        LOGGER.warning(f"{filename}: {msg}")
+        state.increment_retry(uuid_str, msg)
+        return 'failed'
+
+    state.update_status(
+        uuid_str,
+        'extracting',
+        extracted_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    # 2. Bygg payload + upload
+    payload = build_payload(
+        uuid=uuid_str,
+        source_type=source_type,
+        original_filename=filename,
+        extracted_text=text,
+        owner=cfg['owner'],
+    )
+
+    try:
+        status_code, body = post_payload(
+            cfg['api_url'], cfg['pat'], payload,
+            verify_tls=cfg['verify_tls'],
+        )
+    except UploadError as e:
+        if e.network:
+            # Nätverksfel — räkna inte upp retry_count, försök igen senare
+            LOGGER.warning(f"{filename}: nätverksfel, försöker igen senare: {e}")
+            state.update_status(
+                uuid_str, 'pending',
+                next_retry_at=datetime.fromtimestamp(
+                    datetime.now(timezone.utc).timestamp() + RETRY_BACKOFF[0],
+                    timezone.utc,
+                ).isoformat(),
+            )
+            return 'pending'
+        # Server 5xx — räkna upp retry
+        msg = f"server_error: {e}"
+        LOGGER.error(f"{filename}: {msg}")
+        state.increment_retry(uuid_str, msg)
+        return 'failed'
+
+    if status_code == 202:
+        LOGGER.info(f"{filename}: uploaded ({uuid_str})")
+        state.update_status(
+            uuid_str, 'uploaded',
+            uploaded_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return 'uploaded'
+
+    if status_code == 409:
+        # Idempotency — UUID fanns redan, markera done
+        LOGGER.info(f"{filename}: already on server (409), marking done")
+        state.update_status(
+            uuid_str, 'done',
+            confirmed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return 'done'
+
+    # 4xx (utom 409): permanent fel
+    msg = f"client_error_{status_code}: {body}"
+    LOGGER.error(f"{filename}: {msg}")
+    state.update_status(
+        uuid_str, 'failed',
+        last_error=msg[:1024],
+        retry_count=len(RETRY_BACKOFF),  # markera som permanent — ingen mer retry
+    )
+    return 'failed'
+
+
+def confirm_uploaded(state: UploaderState, cfg: dict, row: dict) -> str:
+    """Polla server-status för en uploaded-rad. Markera done om server är klar."""
+    uuid_str = row['uuid']
+    filename = row['original_filename']
+
+    try:
+        status = get_status(
+            cfg['api_url'], cfg['pat'], uuid_str,
+            verify_tls=cfg['verify_tls'],
+        )
+    except UploadError as e:
+        if not e.network:
+            LOGGER.warning(f"{filename}: status-poll fel: {e}")
+        return 'uploaded'
+
+    if status is None:
+        LOGGER.warning(f"{filename}: status 404 — server tappade kön?")
+        return 'uploaded'
+
+    server_status = status.get('status')
+    if server_status == 'done':
+        LOGGER.info(f"{filename}: bekräftat done")
+        state.update_status(
+            uuid_str, 'done',
+            confirmed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return 'done'
+    if server_status == 'failed':
+        err = status.get('error', 'server-side ingestion failed')
+        LOGGER.error(f"{filename}: server-side failed: {err}")
+        state.update_status(
+            uuid_str, 'failed',
+            last_error=err[:1024],
+            retry_count=len(RETRY_BACKOFF),  # permanent
+        )
+        return 'failed'
+    # processing/pending — vänta vidare
+    return 'uploaded'
+
+
+# --- BOOTSTRAP + WATCHDOG ---
+
+def discover_assets(state: UploaderState, asset_store: str) -> int:
+    """Walk Assets/ och INSERT pending för okända filer. Returnerar antal nya."""
+    if not os.path.isdir(asset_store):
+        LOGGER.warning(f"Asset store saknas: {asset_store}")
+        return 0
+
+    new_count = 0
+    for root, _dirs, files in os.walk(asset_store):
+        for fname in files:
+            uuid_str = extract_uuid(fname)
+            if not uuid_str:
+                continue
+            full_path = os.path.join(root, fname)
+            source_type = detect_source_type(full_path)
+            if state.upsert_pending(uuid_str, source_type, fname, full_path):
+                new_count += 1
+                LOGGER.info(f"Bootstrap discovered: {fname} ({source_type})")
+    return new_count
+
+
+class AssetEventHandler(FileSystemEventHandler):
+    """Watchdog-handler: lägg in nya filer som pending."""
+
+    def __init__(self, state: UploaderState):
+        self.state = state
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        self._enqueue(event.src_path)
+
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        self._enqueue(event.dest_path)
+
+    def _enqueue(self, path: str):
+        fname = os.path.basename(path)
+        uuid_str = extract_uuid(fname)
+        if not uuid_str:
+            return
+        source_type = detect_source_type(path)
+        if self.state.upsert_pending(uuid_str, source_type, fname, path):
+            LOGGER.info(f"Watchdog enqueued: {fname} ({source_type})")
+
+
+# --- MAIN LOOP ---
+
+_running = True
+
+
+def _signal_handler(signum, _frame):
+    global _running
+    LOGGER.info(f"Signal {signum} mottagen — avslutar")
+    _running = False
+
+
+def run_daemon():
+    """Huvudloop: bootstrap → watchdog + polling-loop."""
+    cfg = _get_uploader_config()
+    state = UploaderState(cfg['state_db'])
+
+    LOGGER.info(
+        f"Starting uploader: api={cfg['api_url']}, "
+        f"assets={cfg['asset_store']}, state={cfg['state_db']}"
+    )
+
+    # 1. Bootstrap-scan
+    new = discover_assets(state, cfg['asset_store'])
+    if new:
+        LOGGER.info(f"Bootstrap: {new} nya assets upptäckta")
+
+    # 2. Watchdog
+    observer = None
+    if _WATCHDOG_AVAILABLE:
+        observer = Observer()
+        observer.schedule(
+            AssetEventHandler(state), cfg['asset_store'], recursive=True
+        )
+        observer.start()
+        LOGGER.info(f"Watchdog aktiv på {cfg['asset_store']}")
+    else:
+        LOGGER.warning("Watchdog ej installerat — endast bootstrap-scan + polling")
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
+    # 3. Polling-loop
+    while _running:
+        try:
+            # Pending → upload
+            for row in state.fetch_due_pending(limit=5):
+                if not _running:
+                    break
+                process_asset(state, cfg, row)
+            # Uploaded → bekräfta done
+            for row in state.fetch_uploaded(limit=20):
+                if not _running:
+                    break
+                confirm_uploaded(state, cfg, row)
+        except sqlite3.OperationalError as e:
+            LOGGER.error(f"SQLite error: {e}")
+
+        # Sov — bryt tidigt om signal kommer
+        for _ in range(POLL_INTERVAL):
+            if not _running:
+                break
+            time.sleep(1)
+
+    if observer:
+        observer.stop()
+        observer.join(timeout=5)
+
+    stats = state.stats()
+    LOGGER.info(f"Uploader stoppad. Stats: {stats}")
+
+
+if __name__ == "__main__":
+    run_daemon()

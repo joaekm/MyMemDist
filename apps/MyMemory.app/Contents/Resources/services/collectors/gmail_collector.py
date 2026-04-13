@@ -18,6 +18,7 @@ import datetime
 import uuid
 import zoneinfo
 import base64
+import html as html_module
 from email.utils import parsedate_to_datetime
 
 # --- CONFIG ---
@@ -180,41 +181,69 @@ def sanitize_filename(text: str, max_length: int = 50) -> str:
     return clean or "Utan_amne"
 
 
+def _strip_html(raw_html: str) -> str:
+    """Konvertera HTML till plaintext genom att strippa taggar."""
+    # Ta bort style/script-block
+    text = re.sub(r'<(style|script)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
+    # Ersätt <br> och </p> med newlines
+    text = re.sub(r'<br\s*/?>|</p>', '\n', text, flags=re.IGNORECASE)
+    # Ta bort alla kvarvarande taggar
+    text = re.sub(r'<[^>]+>', '', text)
+    # Avkoda HTML-entiteter
+    text = html_module.unescape(text)
+    # Normalisera whitespace (behåll newlines)
+    text = re.sub(r'[^\S\n]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def _decode_part(part: dict) -> str:
+    """Avkoda base64-data från en Gmail payload-del."""
+    data = part.get('body', {}).get('data', '')
+    if not data:
+        return ''
+    try:
+        return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+    except Exception as e:
+        LOGGER.debug(f"Kunde inte avkoda part: {e}")
+        return ''
+
+
 def extract_body_text(payload: dict) -> str:
     """
     Extrahera textinnehåll från Gmail message payload.
     Hanterar multipart-meddelanden.
+    Prioriterar text/plain, faller tillbaka på text/html.
     """
-    body_text = ""
-    
-    # Enkel text
-    if payload.get('mimeType') == 'text/plain':
-        data = payload.get('body', {}).get('data', '')
-        if data:
-            try:
-                body_text = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
-            except Exception as e:
-                LOGGER.debug(f"Kunde inte avkoda body: {e}")
-    
-    # Multipart
-    elif 'parts' in payload:
-        for part in payload['parts']:
-            if part.get('mimeType') == 'text/plain':
-                data = part.get('body', {}).get('data', '')
-                if data:
-                    try:
-                        body_text = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
-                        break  # Ta första text/plain-delen
-                    except Exception as e:
-                        LOGGER.debug(f"Kunde inte avkoda part: {e}")
-            # Rekursivt för nested multipart
-            elif 'parts' in part:
-                nested_text = extract_body_text(part)
-                if nested_text:
-                    body_text = nested_text
-                    break
-    
-    return body_text.strip()
+    plain_text = ""
+    html_text = ""
+
+    def _collect(p: dict):
+        nonlocal plain_text, html_text
+        mime = p.get('mimeType', '')
+
+        if mime == 'text/plain' and not plain_text:
+            decoded = _decode_part(p)
+            if decoded:
+                plain_text = decoded
+        elif mime == 'text/html' and not html_text:
+            decoded = _decode_part(p)
+            if decoded:
+                html_text = decoded
+        elif 'parts' in p:
+            for sub in p['parts']:
+                _collect(sub)
+                if plain_text:
+                    return
+
+    _collect(payload)
+
+    if plain_text:
+        return plain_text.strip()
+    if html_text:
+        LOGGER.debug("Ingen text/plain — faller tillbaka på text/html")
+        return _strip_html(html_text)
+    return ''
 
 
 def get_header_value(headers: list, name: str) -> str:
