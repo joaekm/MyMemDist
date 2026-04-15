@@ -57,7 +57,6 @@ def call_llm_json(llm_service, prompt: str, model_id: str, step_name: str,
     """
     response = llm_service.generate(
         prompt=prompt,
-        provider='anthropic',
         model=model_id,
         max_tokens=max_output_tokens
     )

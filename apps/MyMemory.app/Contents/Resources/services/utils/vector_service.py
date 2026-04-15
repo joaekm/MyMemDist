@@ -32,11 +32,17 @@ def _ensure_hf_cache_writable():
     if os.environ.get("HF_HOME"):
         return  # Användaren har satt det
 
-    # Kandidater i prioritetsordning
-    candidates = [
-        "/opt/mymemory/.cache/huggingface",
-        os.path.expanduser("~/.cache/huggingface"),
-    ]
+    # Läs från config om tillgängligt, annars fallback
+    try:
+        from services.utils.config_loader import get_config
+        config_path = get_config().get('paths', {}).get('hf_cache_dir')
+    except (FileNotFoundError, KeyError, TypeError):
+        config_path = None
+
+    candidates = [p for p in [
+        config_path,
+        os.path.join(os.path.expanduser("~"), ".cache", "huggingface"),
+    ] if p]
     for path in candidates:
         try:
             os.makedirs(path, exist_ok=True)
@@ -187,8 +193,19 @@ class VectorService:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def upsert(self, id: str, text: str, metadata: Dict[str, Any] = None):
-        """Upsert ett dokument-chunk med embedding."""
+    def upsert(self, doc_id: str, chunk_index: int, text: str,
+               metadata: Dict[str, Any] = None):
+        """Upsert ett chunk för ett dokument.
+
+        Idempotent på (tenant_id, doc_id, chunk_index): befintlig rad raderas
+        och ersätts. vectors.id auto-genereras av PG.
+
+        doc_id är UUID till föräldern (documents.id eller nodes.id för
+        graf-chunks). chunk_index = sekvens (0 = overview/full-doc, 1..N =
+        innehålls-chunks). Tecken-positioner för smart chunking skickas i
+        metadata (chunk_start/chunk_end) — id:et bär ingen identitet utöver
+        radens PK.
+        """
         if not text:
             return
 
@@ -198,24 +215,20 @@ class VectorService:
         embedding_str = f"[{','.join(str(x) for x in embedding)}]"
 
         with self.conn.cursor() as cur:
+            # Idempotens via DELETE + INSERT (ingen unique constraint på
+            # (doc_id, chunk_index) i schemat, så ON CONFLICT är inte
+            # tillgängligt).
+            cur.execute(
+                "DELETE FROM vectors "
+                "WHERE tenant_id = %s AND doc_id = %s::uuid AND chunk_index = %s",
+                [self.tenant_id, doc_id, chunk_index]
+            )
             cur.execute("""
-                INSERT INTO vectors (id, tenant_id, doc_id, chunk_index, embedding, metadata)
-                VALUES (
-                    %s, %s,
-                    COALESCE(%s::uuid, uuid_generate_v4()),
-                    %s,
-                    %s::vector,
-                    %s::jsonb
-                )
-                ON CONFLICT (id) DO UPDATE SET
-                    embedding = EXCLUDED.embedding,
-                    metadata = EXCLUDED.metadata
+                INSERT INTO vectors (tenant_id, doc_id, chunk_index, embedding, metadata)
+                VALUES (%s, %s::uuid, %s, %s::vector, %s::jsonb)
             """, [
-                id, self.tenant_id,
-                meta.get('doc_id', id),
-                meta.get('chunk_index', 0),
-                embedding_str,
-                meta_json
+                self.tenant_id, doc_id, chunk_index,
+                embedding_str, meta_json
             ])
             self.conn.commit()
 
@@ -248,12 +261,18 @@ class VectorService:
                 parts.append(f"Relations: {', '.join(rel_parts)}")
 
         full_text = ". ".join(parts)
-        self.upsert(id=node_id, text=full_text, metadata={
-            "type": node.get('type'),
-            "name": name,
-            "source": "graph_node",
-            "doc_id": node_id,
-        })
+        # Graf-noder lagras som en chunk per nod (chunk_index=0) med
+        # doc_id = node_id. Detta låter delete_by_parent(node_id) städa.
+        self.upsert(
+            doc_id=node_id,
+            chunk_index=0,
+            text=full_text,
+            metadata={
+                "type": node.get('type'),
+                "name": name,
+                "source": "graph_node",
+            }
+        )
 
     def search(self, query_text: str, limit: int = 5, where: Dict = None,
                timeout: float = None) -> List[Dict]:
@@ -329,24 +348,16 @@ class VectorService:
             })
         return formatted
 
-    def delete(self, id: str):
-        """Ta bort en vektor-entry."""
-        with self.conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM vectors WHERE id = %s AND tenant_id = %s",
-                [id, self.tenant_id]
-            )
-            self.conn.commit()
-
     def delete_by_parent(self, parent_id: str) -> int:
-        """Radera alla chunks som tillhör ett dokument.
+        """Radera alla chunks som tillhör ett dokument eller graf-nod.
 
-        Söker på vectors.doc_id-kolumnen — motsvarar 'parent_id' i
-        ChromaDB-versionens metadata. Värdet är dokumentets unit_id.
+        Söker på vectors.doc_id-kolumnen. parent_id är antingen
+        dokumentets unit_id (för ingesterade dokument) eller graf-nodens
+        id (för nod-chunks skrivna av upsert_node).
         """
         with self.conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM vectors WHERE doc_id = %s AND tenant_id = %s RETURNING id",
+                "DELETE FROM vectors WHERE doc_id = %s::uuid AND tenant_id = %s RETURNING id",
                 [parent_id, self.tenant_id]
             )
             count = cur.rowcount
@@ -413,7 +424,7 @@ def vector_scope(collection_name: str = "knowledge_base",
 
     Usage:
         with vector_scope(exclusive=True) as vs:
-            vs.upsert(id="abc", text="hello")
+            vs.upsert(doc_id=doc_uuid, chunk_index=0, text="hello")
 
         with vector_scope(exclusive=False, timeout=10.0) as vs:
             results = vs.search("hello")

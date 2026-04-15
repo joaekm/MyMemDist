@@ -42,9 +42,14 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # --- LOGGING ---
+from services.utils.config_loader import get_config
+_config = get_config()
+_default_log_dir = os.path.dirname(os.path.expanduser(
+    _config.get('logging', {}).get('system_log', '~/Library/Logs/MyMemory/system.log')
+))
 _log_file = os.environ.get(
     'UPLOADER_LOG_FILE',
-    os.path.expanduser('~/Library/Logs/MyMemory/uploader.log')
+    os.path.join(_default_log_dir, 'uploader.log')
 )
 os.makedirs(os.path.dirname(_log_file), exist_ok=True)
 
@@ -112,6 +117,16 @@ def _get_uploader_config() -> dict:
     if not api_url:
         raise RuntimeError(
             "HARDFAIL: cloud.api_url saknas i config (eller MYMEMORY_UPLOAD_URL env)"
+        )
+    # Detektera orörd template-placeholder så användaren får tydlig
+    # vägledning istället för cryptic connection error (#188).
+    if api_url.startswith('__') and api_url.endswith('__'):
+        from services.utils.config_loader import get_config_path
+        config_path = get_config_path()
+        raise RuntimeError(
+            f"HARDFAIL: cloud.api_url i config är en orörd template-"
+            f"placeholder ({api_url}). Sätt riktig URL i "
+            f"{config_path} eller via MYMEMORY_UPLOAD_URL env-variabel."
         )
     api_url = api_url.rstrip('/')
 
@@ -281,24 +296,22 @@ class UploaderState:
 
 # --- SOURCE TYPE DETECTION ---
 
-# Speglar processing_policy.source_mappings i graph_schema_template.json.
-# Om asset-pathen innehåller nyckeln → motsvarande source_type.
-SOURCE_MAPPINGS = {
-    'slack': 'Slack Log',
-    'mail': 'Email Thread',
-    'calendar': 'Calendar Event',
-    'transcripts': 'Transcript',
-}
-DEFAULT_SOURCE_TYPE = 'Document'
+def _load_source_mappings():
+    """Läs source_mappings + default från schema (SSOT)."""
+    from services.utils.schema_validator import SchemaValidator
+    sv = SchemaValidator()
+    return sv.get_source_type_mappings(), sv.get_default_source_type()
+
+_SOURCE_MAPPINGS, _DEFAULT_SOURCE_TYPE = _load_source_mappings()
 
 
 def detect_source_type(asset_path: str) -> str:
     """Härled source_type från asset-pathen (Asset/Documents/, Mail/, etc.)."""
     lower = asset_path.lower()
-    for keyword, source_type in SOURCE_MAPPINGS.items():
+    for keyword, source_type in _SOURCE_MAPPINGS.items():
         if keyword in lower:
             return source_type
-    return DEFAULT_SOURCE_TYPE
+    return _DEFAULT_SOURCE_TYPE
 
 
 def extract_uuid(filename: str) -> Optional[str]:

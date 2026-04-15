@@ -8,8 +8,11 @@ import duckdb
 import json
 import subprocess
 
-from services.utils.vector_service import vector_scope
 from services.utils.config_loader import get_config
+
+# vector_scope importeras lazy inuti funktioner som använder det — se #188.
+# validate_system anropas från start_services på klient-sidan, där
+# psycopg2 (som vector_service drar in) inte är installerat.
 
 # Enkel loggning för CLI-verktyg
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')
@@ -77,10 +80,17 @@ def get_lake_ids():
 
 def validera_filer():
     print_header("1. FILSYSTEMS-AUDIT (Strict Mode)")
-    
+
+    # Cloud-only klient: Lake finns bara server-side. Hoppa över Lake-audit.
+    if not LAKE_STORE:
+        print("ℹ️  Cloud-only mode: Lake är server-side, hoppar över lokal Lake-audit.")
+        if not ASSET_STORE:
+            print("   (Inga lokala Assets heller — inget att validera.)")
+            return 0
+
     all_assets = []
     doc_files = []
-    
+
     # Rekursiv insamling
     for root, dirs, files in os.walk(ASSET_STORE):
         # Ignorera dolda mappar
@@ -98,8 +108,8 @@ def validera_filer():
             if os.path.splitext(f)[1].lower() in DOC_EXTS:
                 doc_files.append(f)
 
-    lake_files = [f for f in os.listdir(LAKE_STORE) if f.endswith('.md') and not f.startswith('.')]
-    
+    lake_files = [f for f in os.listdir(LAKE_STORE) if f.endswith('.md') and not f.startswith('.')] if LAKE_STORE else []
+
     # 1.1 KONTROLLERA UUID-NAMNSTANDARD I ASSETS
     invalid_names = []
     for f in all_assets:
@@ -150,6 +160,7 @@ def validera_filer():
 
 def validera_chroma(expected_lake_count, lake_ids):
     print_header("2. VEKTOR-AUDIT (CHROMA)")
+    from services.utils.vector_service import vector_scope
     try:
       with vector_scope(exclusive=False, timeout=15.0) as vector_service:
         coll = vector_service.collection
@@ -336,6 +347,7 @@ def run_startup_checks():
 
     if lake_c > 0:
         # Chroma (via vector_scope för ephemeral access)
+        from services.utils.vector_service import vector_scope
         try:
             with vector_scope(exclusive=False, timeout=15.0) as vs:
                 vector_count = vs.count()

@@ -36,6 +36,12 @@ paths:
   # Daemon state-filer (Enrichment + Dreamer)
   state_dir: "/opt/mymemory/state"
 
+  # HuggingFace model-cache (sentence-transformers)
+  hf_cache_dir: "/opt/mymemory/.cache/huggingface"
+
+  # Fillås (shared_lock) — katalog för process-koordinering
+  lock_dir: "/opt/mymemory/state/locks"
+
 # --- POSTGRESQL ---
 database:
   postgresql:
@@ -83,6 +89,7 @@ ai_engine:
     model_fast: "claude-sonnet-4-6"
     model_lite: "claude-haiku-4-5-20251001"
     embedding_model: "KBLab/sentence-bert-swedish-cased"
+    model_transcribe: "models/gemini-2.5-flash"
 
   tasks:
     enrichment: "model_fast"

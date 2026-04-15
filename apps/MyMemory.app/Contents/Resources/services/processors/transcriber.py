@@ -57,11 +57,14 @@ from services.utils.audio_service import (
 from services.utils.date_service import get_timestamp
 from services.utils.llm_service import LLMService, AdaptiveThrottler
 from services.utils.providers import GeminiProvider
-from services.utils.graph_service import graph_scope
 from services.utils.schema_validator import SchemaValidator
-from services.utils.vector_service import vector_scope
 from services.utils.metadata_service import generate_semantic_metadata, get_owner_name
 from services.utils.terminal_status import status as terminal_status, service_status
+
+# NOTE: graph_scope och vector_scope importeras lazy inuti funktioner som
+# faktiskt använder dem. Detta undviker att psycopg2 dras in i klient-
+# requirements bara för modul-imports (se #181, #188). I cloud-mode
+# är Lake/Graph server-side och transcribern rör dem inte.
 
 
 # =============================================================================
@@ -90,9 +93,10 @@ except Exception as e:
 # Sökvägar
 RECORDINGS_FOLDER = CONFIG['paths']['asset_recordings']
 TRANSCRIPTS_FOLDER = CONFIG['paths']['asset_transcripts']
-LAKE_FOLDER = CONFIG['paths']['lake_store']
+# Lake/Graph är server-side i cloud-mode — tomma strängar gör dead code nedan till no-op.
+LAKE_FOLDER = CONFIG['paths'].get('lake_store', '')
 FAILED_FOLDER = CONFIG['paths']['asset_failed']
-GRAPH_PATH = CONFIG['paths']['graph_db']
+GRAPH_PATH = CONFIG['paths'].get('graph_db', '')
 LOG_FILE = CONFIG.get('logging', {}).get('system_log', '~/MyMemory/Logs/system.log')
 LOG_FILE = os.path.expanduser(LOG_FILE)
 
@@ -743,8 +747,7 @@ KALENDERINFO:
         transcript_text=transcript_text[:LLM_CONTEXT_LIMIT]
     )
 
-    # Anthropic Sonnet för enrichment (OBJEKT-85)
-    response = llm.generate(prompt, provider='anthropic', model=llm.models['fast'])
+    response = llm.generate(prompt, model=llm.models['fast'])
 
     if not response.success:
         raise RuntimeError(f"HARDFAIL: LLM-anrop misslyckades i steg 4: {response.error}")
@@ -783,8 +786,10 @@ def step5_enrich_context(
         "Project": "project_queries",  # noqa: SD
     }
 
-    # Graf-uppslagning — schema-driven
+    # Graf-uppslagning — schema-driven. Lazy-importerad för att undvika
+    # psycopg2 i klient-imports (se #188).
     if os.path.exists(GRAPH_PATH):
+        from services.utils.graph_service import graph_scope
         try:
             with graph_scope(exclusive=False, db_path=GRAPH_PATH) as graph:
                 validator = _get_schema_validator()
@@ -844,24 +849,31 @@ def step5_enrich_context(
         except Exception as e:  # noqa: FALLBACK_DOCUMENTED - graf-berikning är optional
             LOGGER.warning(f"Graf-berikning misslyckades: {e}")
 
-    # Vektor-sökning
+    # Vektor-sökning. Lazy-import för att undvika psycopg2 i klient-
+    # imports när vektor inte används (se #188). I cloud-mode (tomt
+    # GRAPH_PATH) finns ingen klient-lokal vektordb — skippa istället
+    # för att krascha på DSN-lookup.
     LOGGER.info("Steg 5: Startar vektor-sökning")
     vector_results = []
-    try:
-        with vector_scope(exclusive=False, timeout=10.0) as vector:
-            for query in queries.semantic_queries[:MAX_SEMANTIC_QUERIES]:
-                results = vector.search(query, limit=RESULTS_PER_QUERY)
-                for doc in results:
-                    vector_results.append({
-                        'query': query,
-                        'distance': doc.get('distance'),
-                        'metadata': doc.get('metadata') or {}
-                    })
-        LOGGER.info(f"Steg 5: Vektor-sökning klar, {len(vector_results)} träffar")
-    except TimeoutError:
-        LOGGER.warning("Steg 5: Vektor-sökning skipped (lock timeout 10s)")
-    except (OSError, RuntimeError, ValueError) as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional
-        LOGGER.warning(f"Vektor-sökning misslyckades: {e}")
+    if not GRAPH_PATH:
+        LOGGER.info("Steg 5: Vektor-sökning skipped (cloud-mode, no local vector)")
+    else:
+        try:
+            from services.utils.vector_service import vector_scope
+            with vector_scope(exclusive=False, timeout=10.0) as vector:
+                for query in queries.semantic_queries[:MAX_SEMANTIC_QUERIES]:
+                    results = vector.search(query, limit=RESULTS_PER_QUERY)
+                    for doc in results:
+                        vector_results.append({
+                            'query': query,
+                            'distance': doc.get('distance'),
+                            'metadata': doc.get('metadata') or {}
+                        })
+            LOGGER.info(f"Steg 5: Vektor-sökning klar, {len(vector_results)} träffar")
+        except TimeoutError:
+            LOGGER.warning("Steg 5: Vektor-sökning skipped (lock timeout 10s)")
+        except (OSError, RuntimeError, ValueError) as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional
+            LOGGER.warning(f"Vektor-sökning misslyckades: {e}")
 
     # Bygg rik rådata — schema-driven sammanfattning per nodtyp
     graph_sections = []
@@ -903,9 +915,8 @@ TRANSKRIBERING (utdrag):
 
     distill_prompt = prompt_template.format(raw_data=raw_data)
 
-    # Anthropic Sonnet för enrichment (OBJEKT-85)
     LOGGER.info("Steg 5: Startar LLM context distill")
-    response = llm.generate(distill_prompt, provider='anthropic', model=llm.models['fast'])
+    response = llm.generate(distill_prompt, model=llm.models['fast'])
     LOGGER.info("Steg 5: LLM context distill klar")
 
     if not response.success:
@@ -954,7 +965,7 @@ def step6_map_speakers(
         )
 
         # Anthropic Sonnet för enrichment (OBJEKT-85)
-        response = llm.generate(prompt, provider='anthropic', model=llm.models['fast'])
+        response = llm.generate(prompt, model=llm.models['fast'])
 
         if not response.success:
             LOGGER.warning(f"Speaker-mapping misslyckades för chunk {i}")
@@ -1028,8 +1039,7 @@ def step7_structure_parts(
         parts_json=json.dumps(chunks_for_prompt, indent=2, ensure_ascii=False)
     )
 
-    # Anthropic Sonnet för enrichment (OBJEKT-85)
-    response = llm.generate(prompt, provider='anthropic', model=llm.models['fast'])
+    response = llm.generate(prompt, model=llm.models['fast'])
 
     if not response.success:
         raise RuntimeError(f"HARDFAIL: LLM-anrop misslyckades i steg 7: {response.error}")

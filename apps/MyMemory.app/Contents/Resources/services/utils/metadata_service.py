@@ -19,8 +19,11 @@ from typing import Dict, Any, List, Optional
 
 from services.utils.llm_service import LLMService
 from services.utils.json_parser import parse_llm_json
-from services.utils.graph_service import graph_scope
 from services.utils.schema_validator import SchemaValidator
+
+# graph_scope importeras lazy inuti funktioner som använder det — se #188.
+# metadata_service importeras av transcriber på klient-sidan, där
+# psycopg2 (som graph_service drar in) inte är installerat.
 
 LOGGER = logging.getLogger("MetadataService")
 
@@ -90,28 +93,18 @@ def _get_user_profile() -> Dict[str, Any]:
 
     config, _ = _load_config()
 
-    # user_profile.yaml ligger i Index-mappen (härleds från graph_db)
-    graph_db = config['paths'].get('graph_db', '')
-    if not graph_db:
-        raise RuntimeError("HARDFAIL: graph_db path saknas i config")
-    index_path = os.path.dirname(os.path.expanduser(graph_db))
+    # Cloud-mode: läs owner-profilen direkt från config (inte från en
+    # separat user_profile.yaml som härleddes från graph_db-pathen).
+    # Om klient-configen fortfarande har Index/user_profile.yaml på disk
+    # används den som fallback.
+    owner = config.get('owner', {})
+    profile_data = owner.get('profile', {})
 
-    profile_path = os.path.join(index_path, 'user_profile.yaml')
-
-    if not os.path.exists(profile_path):
-        LOGGER.warning(f"user_profile.yaml not found at {profile_path}")
-        _USER_PROFILE = {}
-        return _USER_PROFILE
-
-    with open(profile_path, 'r') as f:
-        profile = yaml.safe_load(f)
-
-    identity = profile.get('identity', {})
     _USER_PROFILE = {
-        "name": identity.get('name', ''),
-        "id": identity.get('id', ''),
-        "role": identity.get('role', ''),
-        "company": identity.get('company', '')
+        "name": profile_data.get('full_name', ''),
+        "id": owner.get('id', ''),
+        "role": profile_data.get('role', ''),
+        "company": profile_data.get('organization', '')
     }
     LOGGER.debug(f"Loaded user profile: {_USER_PROFILE.get('name')}")
 
@@ -168,7 +161,6 @@ def _get_relevant_edge_types_for_node(schema: dict, node_type: str) -> List[dict
 
 def _enrich_entities_from_graph(
     resolved_entities: List[Dict],
-    graph_path: str,
     graph_service=None
 ) -> Dict[str, Dict]:
     """
@@ -196,11 +188,7 @@ def _enrich_entities_from_graph(
     if not resolved_entities:
         return {}
 
-    # Kolla om graf finns
-    if not graph_service and not os.path.exists(graph_path):
-        LOGGER.debug(f"Graph not found at {graph_path}, skipping enrichment")
-        return {}
-
+    # PG-backend: ingen fil att checka. graph_scope öppnar alltid connection.
     schema = _get_schema_validator().schema
     enriched = {}
     _scope_ctx = None
@@ -209,7 +197,8 @@ def _enrich_entities_from_graph(
         if graph_service:
             graph = graph_service
         else:
-            _scope_ctx = graph_scope(exclusive=False, db_path=graph_path)
+            from services.utils.graph_service import graph_scope
+            _scope_ctx = graph_scope(exclusive=False)
             graph = _scope_ctx.__enter__()
 
         for entity in resolved_entities:
@@ -428,12 +417,11 @@ def generate_semantic_metadata(
         }
     """
     config, _ = _load_config()
-    graph_path = config['paths']['graph_db']
 
-    # Hämta graf-kontext (schema-driven)
+    # Hämta graf-kontext (schema-driven) via PG — ingen path-lookup.
     enriched = {}
     if resolved_entities:
-        enriched = _enrich_entities_from_graph(resolved_entities, graph_path, graph_service=graph_service)
+        enriched = _enrich_entities_from_graph(resolved_entities, graph_service=graph_service)
 
     # Bygg entity-kontext sträng
     entity_context = _build_entity_context_string(resolved_entities or [], enriched)
@@ -486,9 +474,8 @@ def generate_semantic_metadata(
         enriched_text = "\n\n".join(context_parts)
         prompt = prompt_template.format(text=enriched_text)
 
-    # Anropa LLM (Anthropic Sonnet för enrichment - OBJEKT-85)
     llm = _get_llm_service()
-    response = llm.generate(prompt, provider='anthropic', model=llm.models['fast'])
+    response = llm.generate(prompt, model=llm.models['fast'])
 
     if not response.success:
         LOGGER.warning(f"Semantic metadata generation failed: {response.error}")
