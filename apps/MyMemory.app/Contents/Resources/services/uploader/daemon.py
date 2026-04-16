@@ -251,15 +251,14 @@ class UploaderState:
             )
             return [dict(r) for r in cur.fetchall()]
 
-    def fetch_uploaded(self, limit: int = 20) -> list:
-        """Hämta uploaded-rader för status-konfirmation."""
+    def lookup(self, uuid: str) -> Optional[dict]:
+        """Hämta en rad efter UUID. Används av SSE-consumer vid events."""
         with self._lock, self._connect() as conn:
             cur = conn.execute(
-                "SELECT * FROM assets WHERE status = 'uploaded' "
-                "ORDER BY uploaded_at ASC LIMIT ?",
-                (limit,),
+                "SELECT * FROM assets WHERE uuid = ?", (uuid,)
             )
-            return [dict(r) for r in cur.fetchall()]
+            row = cur.fetchone()
+            return dict(row) if row else None
 
     def update_status(self, uuid: str, status: str, **fields):
         """Uppdatera status + valfria timestamps/error på en rad."""
@@ -411,35 +410,7 @@ def post_payload(api_url: str, pat: str, payload: dict,
         raise UploadError(f"Connection error: {e}", network=True) from e
 
 
-def get_status(api_url: str, pat: str, uuid: str,
-               verify_tls: bool = True) -> Optional[dict]:
-    """GET /api/v1/ingest/{uuid}. Returnerar status-dict eller None vid 404."""
-    url = f"{api_url}/api/v1/ingest/{uuid}"
-    req = urllib.request.Request(
-        url, method='GET',
-        headers={'Authorization': f'Bearer {pat}'},
-    )
-
-    ctx = None
-    if not verify_tls:
-        import ssl
-        ctx = ssl._create_unverified_context()
-
-    try:
-        with urllib.request.urlopen(req, timeout=STATUS_TIMEOUT, context=ctx) as resp:
-            return json.loads(resp.read().decode('utf-8'))
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        raise UploadError(
-            f"Status fetch failed: {e.code}", status_code=e.code
-        ) from e
-    except urllib.error.URLError as e:
-        raise UploadError(_explain_url_error(e, verify_tls), network=True) from e
-    except (TimeoutError, ConnectionError) as e:
-        # Fix A: TimeoutError ärver inte från URLError — måste fångas separat
-        # annars bubblar den upp genom confirm_uploaded → polling-loopen → dödar processen.
-        raise UploadError(f"Connection error: {e}", network=True) from e
+# get_status borttagen (#214) — ersatt av SSE-consumer (_run_sse_consumer).
 
 
 # --- PROCESSING ---
@@ -586,47 +557,118 @@ def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
     return 'failed'
 
 
-def confirm_uploaded(state: UploaderState, cfg: dict, row: dict) -> str:
-    """Polla server-status för en uploaded-rad. Markera done om server är klar."""
-    uuid_str = row['uuid']
-    filename = row['original_filename']
-    asset_path = row['asset_path']
+# confirm_uploaded borttagen (#214) — ersatt av SSE-consumer nedan.
 
-    try:
-        status = get_status(
-            cfg['api_url'], cfg['pat'], uuid_str,
-            verify_tls=cfg['verify_tls'],
-        )
-    except UploadError as e:
-        if not e.network:
-            LOGGER.warning(f"{filename}: status-poll fel: {e}")
-        return 'uploaded'
 
-    if status is None:
-        LOGGER.warning(f"{filename}: status 404 — server tappade kön?")
-        return 'uploaded'
+# --- SSE CONSUMER (#214) ---
 
-    server_status = status.get('status')
-    if server_status == 'done':
-        LOGGER.info(f"{filename}: bekräftat done")
+def _apply_server_event(state: 'UploaderState', cfg: dict, event: dict) -> None:
+    """Hantera ett ingestion_done/ingestion_failed-event från servern.
+
+    Översätter SSE-eventet till en update_status-operation i SQLite.
+    Ignorerar events för UUID:er vi inte känner till (kan hända om
+    klienten startat efter en ingestion på annan enhet — se #216).
+    """
+    uuid_str = event.get('uuid')
+    status = event.get('status')
+    if not uuid_str or status not in ('done', 'failed'):
+        return
+
+    row = state.lookup(uuid_str)
+    if row is None:
+        LOGGER.debug(f"SSE-event för okänd uuid {uuid_str} — ignorerar")
+        return
+
+    filename = row.get('original_filename') or event.get('filename') or uuid_str
+
+    if status == 'done':
+        LOGGER.info(f"{filename}: bekräftat done (SSE)")
         state.update_status(
             uuid_str, 'done',
             confirmed_at=datetime.now(timezone.utc).isoformat(),
         )
-        return 'done'
-    if server_status == 'failed':
-        err = status.get('error', 'server-side ingestion failed')
-        LOGGER.error(f"{filename}: server-side failed: {err}")
+    else:  # failed
+        err = event.get('error', 'server-side ingestion failed')
+        LOGGER.error(f"{filename}: server-side failed (SSE): {err}")
         state.update_status(
             uuid_str, 'failed',
             last_error=err[:1024],
-            retry_count=len(RETRY_BACKOFF),  # permanent
+            retry_count=len(RETRY_BACKOFF),
         )
-        _move_to_failed(asset_path, cfg['failed_dir'], filename)
-        return 'failed'
+        asset_path = row.get('asset_path', '')
+        if asset_path:
+            _move_to_failed(asset_path, cfg['failed_dir'], filename)
 
-    # processing/pending — vänta vidare
-    return 'uploaded'
+
+def _run_sse_consumer(state: 'UploaderState', cfg: dict) -> None:
+    """Bakgrundstråd: håll persistent SSE-anslutning mot
+    GET {api_url}/api/v1/events och applicera events på SQLite-state.
+
+    Reconnectar automatiskt vid fel med exponentiell backoff
+    (1s → 2s → 5s → 15s → 60s max). Körs tills _running sätts till False.
+    """
+    url = f"{cfg['api_url']}/api/v1/events"
+    backoff = 1
+    backoff_sequence = [1, 2, 5, 15, 60]
+
+    ctx = None
+    if not cfg['verify_tls']:
+        import ssl
+        ctx = ssl._create_unverified_context()
+
+    while _running:
+        try:
+            req = urllib.request.Request(
+                url, method='GET',
+                headers={
+                    'Authorization': f"Bearer {cfg['pat']}",
+                    'Accept': 'text/event-stream',
+                },
+            )
+            LOGGER.info(f"SSE: ansluter till {url}")
+            with urllib.request.urlopen(req, timeout=None, context=ctx) as resp:
+                backoff = 1  # reset efter lyckad anslutning
+                LOGGER.info("SSE: ansluten")
+
+                current_event = None
+                for raw in resp:
+                    if not _running:
+                        break
+                    line = raw.decode('utf-8', errors='replace').rstrip('\n')
+                    if line == '':
+                        # Tom rad = event-delimiter — men vi har redan
+                        # hanterat data-raden direkt, så inget att göra här
+                        current_event = None
+                        continue
+                    if line.startswith(':'):
+                        continue  # keepalive-kommentar
+                    if line.startswith('event: '):
+                        current_event = line[7:].strip()
+                        continue
+                    if line.startswith('data: '):
+                        try:
+                            payload = json.loads(line[6:])
+                        except json.JSONDecodeError as e:
+                            LOGGER.warning(f"SSE: ogiltig JSON: {e}")
+                            continue
+                        if current_event in ('ingestion_done', 'ingestion_failed'):
+                            _apply_server_event(state, cfg, payload)
+
+        except urllib.error.HTTPError as e:
+            LOGGER.error(f"SSE: HTTP {e.code} — väntar {backoff}s innan retry")
+        except urllib.error.URLError as e:
+            LOGGER.warning(f"SSE: nätverksfel ({e.reason}) — retry om {backoff}s")
+        except (TimeoutError, ConnectionError, OSError) as e:
+            LOGGER.warning(f"SSE: connection error ({e}) — retry om {backoff}s")
+
+        # Backoff innan retry
+        for _ in range(backoff):
+            if not _running:
+                break
+            time.sleep(1)
+        idx = min(backoff_sequence.index(backoff) + 1, len(backoff_sequence) - 1) \
+            if backoff in backoff_sequence else 0
+        backoff = backoff_sequence[idx]
 
 
 # --- BOOTSTRAP + WATCHDOG ---
@@ -749,19 +791,25 @@ def run_daemon():
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    # 3. Polling-loop
+    # 3. SSE-consumer: server pushar done/failed-events (#214) istället för
+    #    klient-polling av GET /api/v1/ingest/{uuid}. Körs i dedikerad tråd
+    #    så upload-loopen inte blockeras av SSE-reconnects.
+    sse_thread = threading.Thread(
+        target=_run_sse_consumer,
+        args=(state, cfg),
+        name='SSE-consumer',
+        daemon=True,
+    )
+    sse_thread.start()
+
+    # 4. Upload-loop: plockar pending, extraherar, uppladdar. Inget
+    #    confirm-steg längre — serverns NOTIFY hanterar done-övergången.
     while _running:
         try:
-            # Pending → upload
             for row in state.fetch_due_pending(limit=5):
                 if not _running:
                     break
                 process_asset(state, cfg, row)
-            # Uploaded → bekräfta done
-            for row in state.fetch_uploaded(limit=20):
-                if not _running:
-                    break
-                confirm_uploaded(state, cfg, row)
         except sqlite3.OperationalError as e:
             LOGGER.error(f"SQLite error: {e}")
 
