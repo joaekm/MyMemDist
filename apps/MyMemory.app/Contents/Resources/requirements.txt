@@ -11,6 +11,7 @@ pyyaml>=6.0,<7.0
 # Text-extrahering (görs klient-side innan upload för att minska payload)
 pymupdf==1.26.7
 python-docx==1.2.0
+openpyxl==3.1.5
 
 # Slack-collector
 slack_sdk==3.39.0

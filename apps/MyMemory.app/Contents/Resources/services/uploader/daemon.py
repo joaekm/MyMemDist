@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import sqlite3
 import sys
@@ -148,6 +149,9 @@ def _get_uploader_config() -> dict:
         )
 
     asset_store = os.path.expanduser(cfg['paths']['asset_store'])
+    failed_dir = os.path.expanduser(
+        cfg['paths'].get('asset_failed', os.path.join(asset_store, 'Failed'))
+    )
 
     state_db = os.path.expanduser(
         cloud.get('uploader_state_db', _STATE_DB_DEFAULT)
@@ -157,6 +161,7 @@ def _get_uploader_config() -> dict:
         'api_url': api_url,
         'pat': pat,
         'asset_store': asset_store,
+        'failed_dir': failed_dir,
         'state_db': state_db,
         'verify_tls': cloud.get('verify_tls', True),
         'owner': cfg.get('owner', {}).get('profile', {}).get(
@@ -263,15 +268,19 @@ class UploaderState:
             )
             conn.commit()
 
-    def increment_retry(self, uuid: str, error: str):
-        """Räkna upp retry_count och beräkna next_retry_at via backoff."""
+    def increment_retry(self, uuid: str, error: str) -> bool:
+        """Räkna upp retry_count och beräkna next_retry_at via backoff.
+
+        Returnerar True om detta var sista försöket (permanent failed — inga
+        fler retries kommer plockas upp av fetch_due_pending).
+        """
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 "SELECT retry_count FROM assets WHERE uuid = ?", (uuid,)
             )
             row = cur.fetchone()
             if not row:
-                return
+                return False
             new_count = (row['retry_count'] or 0) + 1
             backoff_idx = min(new_count - 1, len(RETRY_BACKOFF) - 1)
             next_retry = datetime.now(timezone.utc).timestamp() + RETRY_BACKOFF[backoff_idx]
@@ -284,6 +293,7 @@ class UploaderState:
                 (new_count, error[:1024], next_retry_iso, uuid),
             )
             conn.commit()
+            return new_count >= len(RETRY_BACKOFF)
 
     def stats(self) -> dict:
         """Returnera count per status (för menubar / status-API)."""
@@ -446,6 +456,24 @@ def build_payload(*, uuid: str, source_type: str, original_filename: str,
     return payload
 
 
+def _move_to_failed(asset_path: str, failed_dir: str, filename: str) -> None:
+    """Flytta permanent-failade filer till Failed-mappen.
+
+    Tyst no-op om filen redan saknas (kan hända om användaren städat manuellt
+    eller om 'Asset saknas'-retry-grenen når permanent). Felhanterar
+    move-fel som WARNING — failed-flytt får aldrig blockera SQLite-uppdatering.
+    """
+    if not os.path.exists(asset_path):
+        return
+    try:
+        os.makedirs(failed_dir, exist_ok=True)
+        dest = os.path.join(failed_dir, os.path.basename(asset_path))
+        shutil.move(asset_path, dest)
+        LOGGER.info(f"{filename}: flyttad till {failed_dir} (permanent failed)")
+    except OSError as e:
+        LOGGER.warning(f"{filename}: kunde inte flytta till Failed: {e}")
+
+
 def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
     """Processa en pending asset: extrahera → upload. Returnerar ny status.
 
@@ -462,6 +490,7 @@ def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
         msg = f"Asset saknas: {asset_path}"
         LOGGER.error(f"{filename}: {msg}")
         state.increment_retry(uuid_str, msg)
+        # Ingen fil att flytta — den finns ju inte
         return 'failed'
 
     state.update_status(uuid_str, 'extracting')
@@ -470,13 +499,15 @@ def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
     except (RuntimeError, OSError) as e:
         msg = f"extract_text failed: {e}"
         LOGGER.error(f"{filename}: {msg}")
-        state.increment_retry(uuid_str, msg)
+        if state.increment_retry(uuid_str, msg):
+            _move_to_failed(asset_path, cfg['failed_dir'], filename)
         return 'failed'
 
     if not text or len(text.strip()) < 10:
         msg = f"Tom text-extraktion ({len(text)} chars)"
         LOGGER.warning(f"{filename}: {msg}")
-        state.increment_retry(uuid_str, msg)
+        if state.increment_retry(uuid_str, msg):
+            _move_to_failed(asset_path, cfg['failed_dir'], filename)
         return 'failed'
 
     state.update_status(
@@ -514,7 +545,8 @@ def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
         # Server 5xx — räkna upp retry
         msg = f"server_error: {e}"
         LOGGER.error(f"{filename}: {msg}")
-        state.increment_retry(uuid_str, msg)
+        if state.increment_retry(uuid_str, msg):
+            _move_to_failed(asset_path, cfg['failed_dir'], filename)
         return 'failed'
 
     if status_code == 202:
@@ -542,6 +574,7 @@ def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
         last_error=msg[:1024],
         retry_count=len(RETRY_BACKOFF),  # markera som permanent — ingen mer retry
     )
+    _move_to_failed(asset_path, cfg['failed_dir'], filename)
     return 'failed'
 
 
@@ -549,6 +582,7 @@ def confirm_uploaded(state: UploaderState, cfg: dict, row: dict) -> str:
     """Polla server-status för en uploaded-rad. Markera done om server är klar."""
     uuid_str = row['uuid']
     filename = row['original_filename']
+    asset_path = row['asset_path']
 
     try:
         status = get_status(
@@ -580,7 +614,9 @@ def confirm_uploaded(state: UploaderState, cfg: dict, row: dict) -> str:
             last_error=err[:1024],
             retry_count=len(RETRY_BACKOFF),  # permanent
         )
+        _move_to_failed(asset_path, cfg['failed_dir'], filename)
         return 'failed'
+
     # processing/pending — vänta vidare
     return 'uploaded'
 

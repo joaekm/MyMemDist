@@ -15,8 +15,11 @@ import logging
 try:
     import fitz  # pymupdf
     import docx
+    import openpyxl
 except ImportError as e:
-    raise ImportError(f"Missing required libraries (pymupdf, python-docx): {e}")
+    raise ImportError(
+        f"Missing required libraries (pymupdf, python-docx, openpyxl): {e}"
+    )
 
 from services.utils.config_loader import get_config
 
@@ -58,17 +61,30 @@ def extract_text(filepath: str, extension: str = None) -> str:
 
     raw_text = ""
 
+    # Binära format kräver format-specifika extractors. Textbaserade format
+    # läses direkt. Okänd extension HARDFAILar — tyst binärläsning har
+    # tidigare gett junk-text som servern avvisat med 500.
+    _BINARY_EXTRACTORS = {
+        '.pdf': _extract_pdf,
+        '.docx': _extract_docx,
+        '.xlsx': _extract_xlsx,
+        '.xls': _extract_xlsx,
+    }
+
     try:
-        if extension == '.pdf':
-            raw_text = _extract_pdf(filepath)
-        elif extension == '.docx':
-            raw_text = _extract_docx(filepath)
+        if extension in _BINARY_EXTRACTORS:
+            raw_text = _BINARY_EXTRACTORS[extension](filepath)
         elif extension in _get_document_extensions():
             raw_text = _extract_plain_text(filepath)
         else:
-            LOGGER.warning(f"Unsupported file type: {extension}, attempting plain text")
-            raw_text = _extract_plain_text(filepath)
-
+            raise RuntimeError(
+                f"Unsupported file type: {extension} "
+                f"(not in document_extensions config, no binary extractor). "
+                f"Lägg till extension i my_mem_config.yaml processing.document_extensions "
+                f"eller implementera extractor i text_extractor.py."
+            )
+    except RuntimeError:
+        raise
     except Exception as e:
         LOGGER.error(f"HARDFAIL: Text extraction failed for {filepath}: {e}")
         raise RuntimeError(f"Text extraction failed for {filepath}: {e}") from e
@@ -95,6 +111,28 @@ def _extract_docx(filepath: str) -> str:
     """Extract text from DOCX files."""
     doc = docx.Document(filepath)
     return "\n".join([p.text for p in doc.paragraphs])
+
+
+def _extract_xlsx(filepath: str) -> str:
+    """Extract text from XLSX/XLS spreadsheets.
+
+    Konkatenerar alla worksheets. Varje rad blir tab-separerade celler,
+    tomma celler blir tomma strängar. Formler läses som beräknade värden
+    (data_only=True). Bevarar enkel struktur så LLM kan läsa tabeller.
+    """
+    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    sheets = []
+    try:
+        for sheet in wb.worksheets:
+            rows = []
+            for row in sheet.iter_rows(values_only=True):
+                cells = ["" if v is None else str(v) for v in row]
+                rows.append("\t".join(cells))
+            if rows:
+                sheets.append(f"# {sheet.title}\n" + "\n".join(rows))
+    finally:
+        wb.close()
+    return "\n\n".join(sheets)
 
 
 def get_supported_extensions() -> list:
