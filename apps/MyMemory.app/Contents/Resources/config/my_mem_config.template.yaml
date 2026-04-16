@@ -12,8 +12,9 @@ cloud:
   # Bas-URL till MyMemory-servern (utan trailing slash).
   api_url: "__CLOUD_API_URL__"
 
-  # Skip TLS-verifiering (true bara för self-signed cert under utveckling).
-  verify_tls: true
+  # TLS-verifiering. false så länge servern kör self-signed cert.
+  # Sätt till true när domän + Let's Encrypt är på plats.
+  verify_tls: false
 
   # PAT-källor (i prioritetsordning):
   #   1. MYMEMORY_PAT env var
@@ -122,6 +123,7 @@ collectors:
 
 # --- SLACK INTEGRATION (valfritt) ---
 slack:
+  enabled: true
   bot_token: "__SLACK_BOT_TOKEN__"
   channels: []
   history_days: 7
@@ -134,9 +136,11 @@ google:
     - "https://www.googleapis.com/auth/gmail.readonly"
     - "https://www.googleapis.com/auth/calendar.readonly"
   gmail:
+    enabled: true
     history_days: 7
     target_label: "__GMAIL_LABEL__"
   calendar:
+    enabled: true
     history_days: 30
 
 # --- MEETING TRANSCRIBER ---
@@ -147,6 +151,7 @@ meeting_transcriber:
 
 # --- RICH TRANSCRIBER ---
 transcriber:
+  enabled: true
   chunk_size_bytes: 10000000
   chunk_overlap_seconds: 5
   normalize_audio: false
@@ -154,6 +159,10 @@ transcriber:
   part_preview_limit: 500
   max_file_workers: 2
   max_chunk_workers: 10
+
+# --- FILE RETRIEVER (DropZone → Assets) ---
+file_retriever:
+  enabled: true
 
 # --- SIGNAL FEED (peer-to-peer, valfritt) ---
 signal_feed:

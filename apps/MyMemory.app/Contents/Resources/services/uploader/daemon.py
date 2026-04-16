@@ -332,6 +332,25 @@ class UploadError(Exception):
         self.status_code = status_code
 
 
+def _explain_url_error(err: urllib.error.URLError, verify_tls: bool) -> str:
+    """Formattera URLError med hjälpsam kontext för vanliga fel.
+
+    SSL-verifikationsfel är särskilt förvirrande för användare — om servern
+    kör self-signed cert och `cloud.verify_tls` är True i config får man
+    'CERTIFICATE_VERIFY_FAILED' utan vägledning. Ge tydlig hint om vad som
+    behöver ändras.
+    """
+    reason = str(err.reason)
+    if verify_tls and "CERTIFICATE_VERIFY_FAILED" in reason:
+        return (
+            f"TLS-verifiering misslyckades ({reason}). "
+            "Servern använder troligen self-signed cert. "
+            "Sätt `cloud.verify_tls: false` i my_mem_config.yaml, "
+            "eller installera serverns CA-cert."
+        )
+    return f"Network error: {reason}"
+
+
 def post_payload(api_url: str, pat: str, payload: dict,
                  verify_tls: bool = True) -> tuple:
     """POST /api/v1/ingest. Returnerar (status_code, response_body_dict).
@@ -369,7 +388,7 @@ def post_payload(api_url: str, pat: str, payload: dict,
             ) from e
         return e.code, err_body
     except urllib.error.URLError as e:
-        raise UploadError(f"Network error: {e.reason}", network=True) from e
+        raise UploadError(_explain_url_error(e, verify_tls), network=True) from e
     except (TimeoutError, ConnectionError) as e:
         raise UploadError(f"Connection error: {e}", network=True) from e
 
@@ -398,7 +417,11 @@ def get_status(api_url: str, pat: str, uuid: str,
             f"Status fetch failed: {e.code}", status_code=e.code
         ) from e
     except urllib.error.URLError as e:
-        raise UploadError(f"Network error: {e.reason}", network=True) from e
+        raise UploadError(_explain_url_error(e, verify_tls), network=True) from e
+    except (TimeoutError, ConnectionError) as e:
+        # Fix A: TimeoutError ärver inte från URLError — måste fångas separat
+        # annars bubblar den upp genom confirm_uploaded → polling-loopen → dödar processen.
+        raise UploadError(f"Connection error: {e}", network=True) from e
 
 
 # --- PROCESSING ---
