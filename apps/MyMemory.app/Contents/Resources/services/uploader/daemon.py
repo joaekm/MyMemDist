@@ -198,6 +198,19 @@ CREATE TABLE IF NOT EXISTS assets (
 
 CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
 CREATE INDEX IF NOT EXISTS idx_assets_next_retry ON assets(status, next_retry_at);
+
+-- Ingestion-events från servern för UUIDs som inte finns i lokal assets (#216).
+-- Fångar filer uppladdade från andra enheter eller via Claude Desktop /
+-- annat MCP-gränssnitt. Menubar läser denna tabell via FSEvent för att visa
+-- cross-channel-notiser. Rena pass-through — inga lokala statusövergångar.
+CREATE TABLE IF NOT EXISTS remote_events (
+    uuid TEXT NOT NULL,
+    status TEXT NOT NULL,
+    filename TEXT,
+    received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_remote_events_received ON remote_events(received_at);
 """
 
 
@@ -259,6 +272,21 @@ class UploaderState:
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+    def record_remote_event(self, uuid: str, status: str, filename: str) -> None:
+        """Spara ett SSE-event för en UUID vi inte känner till lokalt (#216).
+
+        Används för ingestions från andra enheter eller kanaler (Claude Desktop,
+        web-upload, etc.). Menubar-appen läser tabellen via FSEvent och triggar
+        notiser utan att behöva lokal asset-rad.
+        """
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO remote_events (uuid, status, filename) "
+                "VALUES (?, ?, ?)",
+                (uuid, status, filename[:512] if filename else ''),
+            )
+            conn.commit()
 
     def update_status(self, uuid: str, status: str, **fields):
         """Uppdatera status + valfria timestamps/error på en rad."""
@@ -565,9 +593,10 @@ def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
 def _apply_server_event(state: 'UploaderState', cfg: dict, event: dict) -> None:
     """Hantera ett ingestion_done/ingestion_failed-event från servern.
 
-    Översätter SSE-eventet till en update_status-operation i SQLite.
-    Ignorerar events för UUID:er vi inte känner till (kan hända om
-    klienten startat efter en ingestion på annan enhet — se #216).
+    Översätter SSE-eventet till en update_status-operation i SQLite om UUID
+    finns i vår lokala assets-tabell. Om UUID inte finns lokalt (ingestion
+    från annan enhet/kanal — #216) sparas eventet istället i remote_events
+    så menubar kan visa notis ändå.
     """
     uuid_str = event.get('uuid')
     status = event.get('status')
@@ -576,7 +605,11 @@ def _apply_server_event(state: 'UploaderState', cfg: dict, event: dict) -> None:
 
     row = state.lookup(uuid_str)
     if row is None:
-        LOGGER.debug(f"SSE-event för okänd uuid {uuid_str} — ignorerar")
+        # Cross-channel ingestion (#216): skriv till remote_events så menubar
+        # kan notifiera. Ingen asset-rad att uppdatera lokalt.
+        remote_filename = event.get('filename') or uuid_str
+        state.record_remote_event(uuid_str, status, remote_filename)
+        LOGGER.info(f"{remote_filename}: {status} (SSE, cross-channel)")
         return
 
     filename = row.get('original_filename') or event.get('filename') or uuid_str

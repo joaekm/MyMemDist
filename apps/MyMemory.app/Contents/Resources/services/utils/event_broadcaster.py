@@ -107,10 +107,13 @@ async def run_listen_loop(broadcaster: EventBroadcaster) -> None:
             backoff = 1.0  # reset efter lyckad koppling
 
             while True:
-                got_event = await asyncio.to_thread(_wait_for_notify, conn, 30.0)
+                # Kort timeout (2s) så shutdown-handler inte behöver vänta på
+                # långsam thread-return vid SIGTERM. Threads kan inte
+                # cancelleras utifrån — så vi väcker oss ofta och kollar om
+                # tasken är cancelled. PG LISTEN-anslutningen hålls levande
+                # via conn.poll() (ingen ny connection per iteration).
+                got_event = await asyncio.to_thread(_wait_for_notify, conn, 2.0)
                 if not got_event:
-                    # Keepalive: ping PG så att TCP-connection hålls levande
-                    # genom proxys/NAT med kort idle-timeout
                     conn.poll()
                     continue
                 conn.poll()
