@@ -93,10 +93,7 @@ except Exception as e:
 # Sökvägar
 RECORDINGS_FOLDER = CONFIG['paths']['asset_recordings']
 TRANSCRIPTS_FOLDER = CONFIG['paths']['asset_transcripts']
-# Lake/Graph är server-side i cloud-mode — tomma strängar gör dead code nedan till no-op.
-LAKE_FOLDER = CONFIG['paths'].get('lake_store', '')
 FAILED_FOLDER = CONFIG['paths']['asset_failed']
-GRAPH_PATH = CONFIG['paths'].get('graph_db', '')
 LOG_FILE = CONFIG.get('logging', {}).get('system_log', '~/MyMemory/Logs/system.log')
 LOG_FILE = os.path.expanduser(LOG_FILE)
 
@@ -195,10 +192,17 @@ _llm_service = None
 _gemini_provider = None
 
 
-def _get_llm_service() -> LLMService:
+def _get_llm_service():
+    """Returnera LLM-tjänst via M2M-proxy (Service API på Hetzner).
+
+    Returnerar RemoteLLM med .generate(prompt, model=...) och .models dict.
+    Servern håller Anthropic-nyckeln — klienten proxar.
+    """
     global _llm_service
     if _llm_service is None:
-        _llm_service = LLMService()
+        from services.utils.remote_services import get_remote_llm
+        _llm_service = get_remote_llm()
+        LOGGER.info("LLM: M2M-proxy via Service API")
     return _llm_service
 
 
@@ -586,7 +590,10 @@ def step2_transcribe(audio_metadata: AudioMetadata) -> List[TranscriptChunk]:
 # =============================================================================
 
 def step3_find_calendar_match(recording_dt: datetime, recording_duration_minutes: float = 0) -> Optional[CalendarMatch]:
-    """Sök kalenderhändelse i Lake.
+    """Sök kalenderhändelse.
+
+    Cloud-mode: hämtar kalenderdata via MCP (search_by_date_range +
+    read_document_content). Lokalt-mode: läser från Lake-mappen.
 
     Score-algoritm (lägre = bättre):
     - Starttids-diff: minuter från inspelningsstart
@@ -595,83 +602,87 @@ def step3_find_calendar_match(recording_dt: datetime, recording_duration_minutes
     - Inga deltagare: +100p straff
     - Accepterade deltagare: -2p per accepterad (bonus)
     """
-    lake_path = Path(LAKE_FOLDER)
+    return _step3_calendar_via_mcp(recording_dt, recording_duration_minutes)
+
+
+def _step3_calendar_via_mcp(recording_dt: datetime, recording_duration_minutes: float) -> Optional[CalendarMatch]:
+    """Cloud-mode kalendermatch via MCP (M2C).
+
+    Hämtar kalenderinnehåll via search_by_date_range + read_document_content,
+    sedan kör samma regex-scoring som lokala step3.
+    """
+    from services.utils.remote_services import get_remote_mcp
+    mcp = get_remote_mcp()
+
     date_str = recording_dt.strftime("%Y-%m-%d")
 
-    calendar_files = list(lake_path.glob(f"Calendar_{date_str}_*.md"))
+    # Hitta kalenderdokument för datumet
+    search_result = mcp.call_tool(
+        "search_by_date_range",
+        {"start_date": date_str, "end_date": date_str,
+         "source_type": "Calendar Event"},  # noqa: SD-PROFILE — MCP-tool filter, matchar Lake source_type
+    )
 
-    if not calendar_files:
-        LOGGER.debug(f"Ingen kalenderfil för {date_str}")
+    fname_match = re.search(r"(Calendar_\d{4}-\d{2}-\d{2}_[a-f0-9-]+\.md)", search_result)
+    if not fname_match:
+        LOGGER.debug(f"MCP: Ingen kalenderfil för {date_str}")
         return None
 
+    # Hämta innehållet
+    content = mcp.call_tool("read_document_content",
+                            {"doc_id": fname_match.group(1), "max_length": 100000})
+
+    # Samma scoring-logik som lokala step3
     target_minutes = recording_dt.hour * 60 + recording_dt.minute
+    pattern = r'## (\d{2}):(\d{2})-(\d{2}):(\d{2}): ([^\n]+)'
 
-    for cal_file in calendar_files:
-        try:
-            content = cal_file.read_text()
+    candidates = []
+    for m in re.finditer(pattern, content):
+        sh, sm, eh, em = (int(m.group(i)) for i in range(1, 5))
+        title = m.group(5).strip()
 
-            # Sök möten: ## HH:MM-HH:MM: Titel
-            pattern = r'## (\d{2}):(\d{2})-(\d{2}):(\d{2}): ([^\n]+)'
+        mstart = sh * 60 + sm
+        mdur = (eh * 60 + em) - mstart
+        start_diff = abs(mstart - target_minutes)
 
-            candidates = []
-            for match in re.finditer(pattern, content):
-                start_hour, start_minute = int(match.group(1)), int(match.group(2))
-                end_hour, end_minute = int(match.group(3)), int(match.group(4))
-                title = match.group(5).strip()
-
-                meeting_start_minutes = start_hour * 60 + start_minute
-                meeting_end_minutes = end_hour * 60 + end_minute
-                meeting_duration = meeting_end_minutes - meeting_start_minutes
-
-                start_diff = abs(meeting_start_minutes - target_minutes)
-
-                if start_diff <= CALENDAR_WINDOW_MINUTES:
-                    participants, accepted_count = _extract_participants_with_status(content, match.end())
-
-                    is_block = title.lower().startswith("block:")
-                    has_participants = len(participants) > 0
-
-                    # Duration-matchning: hur väl matchar möteslängd inspelningslängd?
-                    duration_diff = abs(meeting_duration - recording_duration_minutes) if recording_duration_minutes > 0 else 0
-                    duration_penalty = min(duration_diff, 60)  # Max 60p straff
-
-                    # Acceptans-bonus: fler som tackat ja = troligare rätt möte
-                    acceptance_bonus = -accepted_count * 2
-
-                    score = (
-                        start_diff +                              # Tidsdiff
-                        duration_penalty +                        # Längd-diff
-                        (50 if is_block else 0) +                 # Block-straff
-                        (100 if not has_participants else 0) +    # Inga deltagare-straff
-                        acceptance_bonus                          # Acceptans-bonus
-                    )
-
-                    candidates.append({
-                        'title': title,
-                        'participants': participants,
-                        'accepted_count': accepted_count,
-                        'meeting_duration': meeting_duration,
-                        'score': score,
-                        'source': str(cal_file)
-                    })
-
-            if candidates:
-                candidates.sort(key=lambda x: x['score'])
-                best = candidates[0]
-
-                LOGGER.info(f"Kalendermatch: {best['title']} (score={best['score']}, accepted={best['accepted_count']}, duration={best['meeting_duration']}min)")
-                return CalendarMatch(
-                    title=best['title'],
-                    event_datetime=recording_dt,
-                    participants=best['participants'],
-                    source_file=best['source']
-                )
-
-        except Exception as e:  # noqa: FALLBACK_DOCUMENTED - kalendermatch är optional berikning
-            LOGGER.warning(f"Kalenderfel: {e}")
+        if start_diff > CALENDAR_WINDOW_MINUTES:
             continue
 
-    return None
+        participants, accepted_count = _extract_participants_with_status(content, m.end())
+        is_block = title.lower().startswith("block:")
+        duration_diff = abs(mdur - recording_duration_minutes) if recording_duration_minutes > 0 else 0
+
+        score = (
+            start_diff
+            + min(duration_diff, 60)
+            + (50 if is_block else 0)
+            + (100 if not participants else 0)
+            - accepted_count * 2
+        )
+
+        candidates.append({
+            'title': title,
+            'participants': participants,
+            'accepted_count': accepted_count,
+            'meeting_duration': mdur,
+            'score': score,
+            'source': f"MCP:{fname_match.group(1)}",
+        })
+
+    if not candidates:
+        LOGGER.info(f"MCP: Ingen mötesmatch för {recording_dt}")
+        return None
+
+    candidates.sort(key=lambda c: c['score'])
+    best = candidates[0]
+    LOGGER.info(f"MCP kalendermatch: {best['title']} (score={best['score']})")
+
+    return CalendarMatch(
+        title=best['title'],
+        event_datetime=recording_dt,
+        participants=best['participants'],
+        source_file=best['source'],
+    )
 
 
 def _extract_participants_with_status(content: str, start_pos: int) -> tuple[List[str], int]:
@@ -765,6 +776,79 @@ KALENDERINFO:
 
 
 # =============================================================================
+# STEG 5: KONTEXT-BERIKNING — LOOKUP-HELPERS
+# =============================================================================
+
+
+def _step5_lookups_via_mcp(queries: 'EnrichmentQueries') -> tuple[dict, list]:
+    """Cloud-mode: graf + vektor via MCP (M2C).
+
+    Returnerar (graph_data, vector_results) i samma format som lokala lookups.
+    Använder MCP-tools search_graph_nodes, get_entity_summary, query_vector_memory.
+    """
+    from services.utils.remote_services import get_remote_mcp
+    mcp = get_remote_mcp()
+
+    graph_data: dict = {}
+
+    QUERY_ATTR_MAP = {
+        "Person": "person_queries",  # noqa: SD — koppling till EnrichmentQueries dataclass
+        "Organization": "org_queries",  # noqa: SD
+        "Project": "project_queries",  # noqa: SD
+    }
+
+    for node_type, query_attr in QUERY_ATTR_MAP.items():
+        names = getattr(queries, query_attr, [])[:MAX_ENTITY_QUERIES]
+        for name in names:
+            try:
+                search = mcp.call_tool("search_graph_nodes",
+                                       {"query": name, "node_type": node_type})
+                # Plocka node_id från MCP-output
+                id_match = re.search(r"ID:\s*([a-f0-9-]{36})", search)
+                if not id_match:
+                    continue
+
+                node_id = id_match.group(1)
+                summary = mcp.call_tool("get_entity_summary",
+                                        {"node_id": node_id, "max_context_entries": 3})
+
+                # Extrahera identitet-text
+                ident = re.search(
+                    r"---\s*IDENTITET\s*---\s*\n([^\n]+(?:\n(?!\s*\n)[^\n]+)*)",
+                    summary)
+                ctx = ident.group(1).strip()[:500] if ident else ""
+
+                node_data = {
+                    'node_id': node_id,
+                    'context_summary': ctx,
+                }
+                graph_data.setdefault(node_type, {})[name] = node_data
+
+            except Exception as e:  # noqa: FALLBACK_DOCUMENTED — MCP-lookup per entitet är optional berikning
+                LOGGER.warning(f"MCP graf-lookup {node_type}/{name}: {e}")
+                continue
+
+    LOGGER.info(f"Steg 5 MCP: graf-lookups klar ({sum(len(v) for v in graph_data.values())} entiteter)")
+
+    # Vektor-sökning via MCP
+    vector_results = []
+    for query in queries.semantic_queries[:MAX_SEMANTIC_QUERIES]:
+        try:
+            vresult = mcp.call_tool("query_vector_memory",
+                                    {"query_text": query, "n_results": RESULTS_PER_QUERY})
+            vector_results.append({
+                'query': query,
+                'distance': None,
+                'metadata': {'mcp_result': vresult[:500]},
+            })
+        except Exception as e:  # noqa: FALLBACK_DOCUMENTED — vektor-sökning är optional
+            LOGGER.warning(f"MCP vektor-sökning '{query}': {e}")
+
+    LOGGER.info(f"Steg 5 MCP: vektor-sökning klar ({len(vector_results)} queries)")
+    return graph_data, vector_results
+
+
+# =============================================================================
 # STEG 5: KONTEXT-BERIKNING
 # =============================================================================
 
@@ -786,94 +870,7 @@ def step5_enrich_context(
         "Project": "project_queries",  # noqa: SD
     }
 
-    # Graf-uppslagning — schema-driven. Lazy-importerad för att undvika
-    # psycopg2 i klient-imports (se #188).
-    if os.path.exists(GRAPH_PATH):
-        from services.utils.graph_service import graph_scope
-        try:
-            with graph_scope(exclusive=False, db_path=GRAPH_PATH) as graph:
-                validator = _get_schema_validator()
-                schema_nodes = validator.schema.get('nodes', {})
-                schema_edges = validator.schema.get('edges', {})
-                doc_type = validator.get_document_node_type()
-
-                for node_type, node_def in schema_nodes.items():
-                    if node_type == doc_type:
-                        continue
-
-                    query_attr = QUERY_ATTR_MAP.get(node_type)
-                    if not query_attr or not hasattr(queries, query_attr):
-                        continue
-
-                    type_props = set(node_def.get('properties', {}).keys()) - {'name'}
-
-                    for name in getattr(queries, query_attr)[:MAX_ENTITY_QUERIES]:
-                        node_id = graph.find_node_by_name(node_type, name)
-                        if not node_id:
-                            continue
-                        node = graph.get_node(node_id)
-                        if not node:
-                            continue
-
-                        props = node.get('properties', {})
-                        node_data = {
-                            'node_id': node_id,
-                            'context_summary': props.get('context_summary', ''),
-                        }
-                        for prop_name in type_props:
-                            node_data[prop_name] = props.get(prop_name, '')
-
-                        # Hämta edges — schema-driven
-                        edges = graph.get_edges_from(node_id)
-                        for edge in edges:
-                            edge_type = edge.get('type')
-                            edge_def = schema_edges.get(edge_type, {})
-                            target = graph.get_node(edge.get('target'))
-                            if not target:
-                                continue
-
-                            target_name = target.get('properties', {}).get('name', '')
-                            edge_props = edge.get('properties', {})
-
-                            edge_info = {'name': target_name, 'edge_type': edge_type}
-                            for ep_name in edge_def.get('properties', {}):
-                                if ep_name != 'confidence':
-                                    val = edge_props.get(ep_name, '')
-                                    if val:
-                                        edge_info[ep_name] = val
-
-                            node_data.setdefault('edges', []).append(edge_info)
-
-                        graph_data.setdefault(node_type, {})[name] = node_data
-
-        except Exception as e:  # noqa: FALLBACK_DOCUMENTED - graf-berikning är optional
-            LOGGER.warning(f"Graf-berikning misslyckades: {e}")
-
-    # Vektor-sökning. Lazy-import för att undvika psycopg2 i klient-
-    # imports när vektor inte används (se #188). I cloud-mode (tomt
-    # GRAPH_PATH) finns ingen klient-lokal vektordb — skippa istället
-    # för att krascha på DSN-lookup.
-    LOGGER.info("Steg 5: Startar vektor-sökning")
-    vector_results = []
-    if not GRAPH_PATH:
-        LOGGER.info("Steg 5: Vektor-sökning skipped (cloud-mode, no local vector)")
-    else:
-        try:
-            from services.utils.vector_service import vector_scope
-            with vector_scope(exclusive=False, timeout=10.0) as vector:
-                for query in queries.semantic_queries[:MAX_SEMANTIC_QUERIES]:
-                    results = vector.search(query, limit=RESULTS_PER_QUERY)
-                    for doc in results:
-                        vector_results.append({
-                            'query': query,
-                            'distance': doc.get('distance'),
-                            'metadata': doc.get('metadata') or {}
-                        })
-            LOGGER.info(f"Steg 5: Vektor-sökning klar, {len(vector_results)} träffar")
-        except TimeoutError:
-            LOGGER.warning("Steg 5: Vektor-sökning skipped (lock timeout 10s)")
-        except (OSError, RuntimeError, ValueError) as e:  # noqa: FALLBACK_DOCUMENTED - vektor-sökning är optional
-            LOGGER.warning(f"Vektor-sökning misslyckades: {e}")
+    graph_data, vector_results = _step5_lookups_via_mcp(queries)
 
     # Bygg rik rådata — schema-driven sammanfattning per nodtyp
     graph_sections = []

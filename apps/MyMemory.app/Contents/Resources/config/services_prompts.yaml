@@ -32,109 +32,146 @@ transcriber:
 
   # STEG 4: Berikningsfrågor (transkribering → söktermer)
   enrichment_queries: |
-    Analysera denna transkribering och extrahera sökbara termer.
+    <uppgift>
+    Extrahera sökbara entiteter och nyckelämnen ur transkriberingen nedan.
+    </uppgift>
+
+    <kalenderkontext>
     {calendar_info}
-    TRANSKRIBERING (första {context_limit} tecken):
+    </kalenderkontext>
+
+    <transkribering max_tecken="{context_limit}">
     {transcript_text}
+    </transkribering>
 
-    Extrahera:
-    1. person_queries: Namn på personer som nämns eller deltar
-    2. org_queries: Organisationer, företag som nämns
-    3. project_queries: Projekt, produkter, initiativ som nämns
-    4. semantic_queries: Nyckelämnen för semantisk sökning (2-3 ord per fråga)
+    <regler>
+    - Extrahera ENBART namn/termer som FAKTISKT NÄMNS i texten.
+    - Hitta INTE PÅ entiteter som inte förekommer.
+    - person_queries: fullständiga namn om möjligt, annars förnamn.
+    - org_queries: officiella organisationsnamn, inte förkortningar.
+    - project_queries: projekt, produkter, initiativ, system.
+    - semantic_queries: 2-3 ord per fråga, beskriver ämne (inte namn).
+    </regler>
 
-    Returnera JSON:
+    <format>
+    Returnera ENBART JSON, ingen annan text:
     {{
-      "person_queries": ["Marc Tersmantoll", "Joakim"],
-      "org_queries": ["Digitalist", "Sitevision"],
-      "project_queries": ["Industritorget"],
-      "semantic_queries": ["beläggningsgrad prognos", "kundprojekt status"]
+      "person_queries": ["Förnamn Efternamn", "Förnamn"],
+      "org_queries": ["Organisationsnamn"],
+      "project_queries": ["Projektnamn"],
+      "semantic_queries": ["ämne i 2-3 ord", "annat ämne"]
     }}
-
-    Svara ENDAST med JSON.
+    </format>
 
   # STEG 5: Kontext-destillering (rådata → ContextPackage)
   context_distill: |
-    Baserat på denna rådata, skapa en koncis kontextbeskrivning.
+    <uppgift>
+    Destillera nedanstående rådata till en strukturerad kontextbeskrivning.
+    </uppgift>
 
-    RÅDATA:
+    <rådata>
     {raw_data}
+    </rådata>
 
-    Besvara EXAKT dessa sex frågor:
-    1. NÄR? (datum, tid, duration)
-    2. VILKA? (lista med namn)
-    3. VAR JOBBAR DE? (organisation och roll för varje person)
-    4. VAD? (specifik kontext - vad mötet handlar om, 1 mening)
-    5. KRINGLIGGANDE? (generell kontext - bakgrund, projekt, 1-2 meningar)
-    6. RELATIONS_SUMMARY? (rik beskrivning av HUR personerna relaterar till varandra, 2-3 meningar)
+    <regler>
+    - Besvara EXAKT de sex fälten nedan. Inga extra fält.
+    - when: datum, tid, duration. Format: "YYYY-MM-DD HH:MM, duration N min".
+    - who: lista med FULLSTÄNDIGA namn. Inga titlar här.
+    - affiliations: "Namn: Organisation, Roll" per person.
+    - topic: EN mening. Vad mötet handlar om konkret.
+    - context: 1-2 meningar. Bakgrund, projekt, relation mellan parterna.
+    - relations_summary: 2-3 meningar. HUR personerna relaterar till varandra
+      — roller, hierarki, kund/leverantör. INTE att de "diskuterade" något.
+    - INGA värderande ord ("intressant", "givande", "viktig").
+    - INGA meta-fraser ("I detta möte diskuterades...", "Deltagarna tog upp...").
+    </regler>
 
-    Returnera JSON:
+    <format>
+    Returnera ENBART JSON, ingen annan text:
     {{
       "when": "2025-12-11 14:00, duration 28 min",
-      "who": ["Marc Tersmantoll", "Joakim Ekman"],
-      "affiliations": ["Marc: Digitalist, Affärsansvarig", "Joakim: Digitalist, VD"],
-      "topic": "Avstämning om beläggningsgrad och prognos för Q1",
-      "context": "Digitalist arbetar med Sitevision-partnership. Fokus på kundprojekt och resursplanering.",
-      "relations_summary": "Marc Tersmantoll är kundansvarig på Digitalist och rapporterar till Joakim Ekman (VD)."
+      "who": ["Förnamn Efternamn", "Förnamn Efternamn"],
+      "affiliations": ["Namn: Organisation, Roll"],
+      "topic": "Konkret ämne i en mening",
+      "context": "Bakgrund och projektkontext.",
+      "relations_summary": "Hur personerna relaterar professionellt."
     }}
-
-    Svara ENDAST med JSON.
+    </format>
 
   # STEG 6: Speaker-mapping (per chunk)
   speaker_mapping: |
-    Identifiera talarna i denna transkribering.
+    <uppgift>
+    Mappa generiska talar-etiketter ("Talare 1", "Talare 2" osv.) till
+    verkliga namn baserat på bevis i transkriberingen.
+    </uppgift>
 
-    FÖRESLAGNA DELTAGARE (från kalender):
+    <deltagare>
     {participants}
+    </deltagare>
 
-    DERAS ROLLER:
+    <roller>
     {affiliations}
+    </roller>
 
-    TRANSKRIBERING:
+    <transkribering>
     {transcript_text}
+    </transkribering>
 
-    REGLER:
-    1. SJÄLVPRESENTATION: Om någon säger "jag heter X" eller "X heter jag" - använd det namnet.
-    2. TILLTAL: Om någon tilltalas vid namn och svarar - notera vem som svarar.
-    3. VALIDERING: Om deltagarlistan INTE matchar innehållet (fel företag, fel kontext,
-       fel roller, fel ämne), returnera tom mapping {{}}.
-    4. ENDAST SÄKRA: Mappa endast om du har tydligt bevis. Gissningar är INTE OK.
+    <regler>
+    - SJÄLVPRESENTATION: "jag heter X", "X heter jag" → använd det namnet.
+    - TILLTAL: Någon säger "Hej Anna" och en talare svarar → talaren ÄR Anna.
+    - ROLLMATCHNING: Om talaren diskuterar ämnen som matchar en persons roll
+      i <roller>, det ÄR ett indicium men INTE tillräckligt ensamt.
+    - VALIDERING: Om <deltagare> INTE matchar innehållet (fel företag, fel
+      kontext, fel ämne), returnera tom mapping {{}}.
+    - SÄKERHETSKRAV: Mappa ENBART vid tydligt bevis. Gissning är FÖRBJUDET.
+    - Tom mapping {{}} är ALLTID bättre än felaktig mapping.
+    - Använd EXAKT namnformen från <deltagare>-listan.
+    </regler>
 
-    Returnera JSON:
+    <format>
+    Returnera ENBART JSON, ingen annan text:
     {{"Talare 1": "Förnamn Efternamn", "Talare 2": "Förnamn Efternamn"}}
-
-    VIKTIGT: Tom mapping {{}} är bättre än felaktig mapping.
-    Svara ENDAST med JSON.
+    Tom om osäker: {{}}
+    </format>
 
   # STEG 7: Delstrukturering (chunks → parts med metadata)
   part_structuring: |
-    Analysera dessa {num_parts} delar av ett möte och ge varje del en titel och ingress.
+    <uppgift>
+    Strukturera mötets {num_parts} delar med titel, ingress, talare och ämnen.
+    </uppgift>
 
-    KONTEXT:
-    - Deltagare: {participants}
-    - Ämne: {topic}
+    <kontext>
+    Deltagare: {participants}
+    Ämne: {topic}
+    </kontext>
 
-    DELAR:
+    <delar>
     {parts_json}
+    </delar>
 
-    För varje del (id 1-{num_parts}), returnera:
-    - title: Kort beskrivande titel
-    - ingress: Vilka beslut/fakta framkom? FÖRBJUDET: "I denna del diskuterar deltagarna...", "Här tar man upp...". Skriv VAD som sas/beslutades, inte ATT det diskuterades.
-    - speakers: Vilka som pratar i denna del
-    - topics: Nyckelord för ämnen
+    <regler>
+    - title: Kort, beskrivande. MAX 8 ord.
+    - ingress: Vilka BESLUT eller FAKTA framkom? Skriv VAD som sades.
+      FÖRBJUDET: "I denna del diskuterar deltagarna...", "Här tar man upp...",
+      "Deltagarna diskuterade...". Skriv konkret, inte meta.
+    - speakers: ENBART namn från <kontext>-deltagarlistan.
+    - topics: 1-4 nyckelord per del.
+    - Returnera EXAKT {num_parts} element.
+    </regler>
 
-    Returnera JSON-array med EXAKT {num_parts} element:
+    <format>
+    Returnera ENBART JSON-array, ingen annan text:
     [
       {{
         "id": 1,
-        "title": "Inledning och agenda",
-        "ingress": "Marc och Joakim inleder mötet...",
-        "speakers": ["Marc Tersmantoll"],
-        "topics": ["agenda"]
+        "title": "Kort titel",
+        "ingress": "Konkret sammanfattning av vad som framkom.",
+        "speakers": ["Förnamn Efternamn"],
+        "topics": ["ämne"]
       }}
     ]
-
-    Svara ENDAST med JSON-array.
+    </format>
     
 
   # PASS 2: Berikning & Analys (Text + Kontext -> Insikt)

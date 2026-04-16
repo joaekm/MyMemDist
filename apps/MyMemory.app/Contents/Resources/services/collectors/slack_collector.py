@@ -180,7 +180,9 @@ def archive_day(channel_id, target_date):
     unit_id = str(uuid.uuid4())
     filnamn = f"Slack_{ch_name}_{date_str}_{unit_id}.txt"
     ut_sokvag = os.path.join(SLACK_FOLDER, filnamn)
-    participants_list = "\n- ".join(sorted(list(participants)))
+    # Filtrera bort None — meddelanden utan user-fält (bot/system/integration)
+    # returnerar None från get_user_name och ska inte räknas som deltagare (#204).
+    participants_list = "\n- ".join(sorted(p for p in participants if p))
     content = "\n".join(full_transcript)
     
     archived_at = datetime.datetime.now(SYSTEM_TZ).isoformat()
