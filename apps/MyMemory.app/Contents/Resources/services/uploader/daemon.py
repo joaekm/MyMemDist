@@ -23,7 +23,6 @@ Environment variables:
     UPLOADER_LOG_FILE             Default ~/Library/Logs/MyMemory/uploader.log
 """
 
-import atexit
 import json
 import logging
 import os
@@ -100,13 +99,6 @@ POLL_INTERVAL = int(os.environ.get('UPLOADER_INTERVAL', '5'))
 # Default state-DB i macOS Application Support
 _STATE_DB_DEFAULT = os.path.expanduser(
     '~/Library/Application Support/MyMemory/uploader_state.db'
-)
-
-# Pid-fil — menubar-appen läser denna och skapar DispatchSource.makeProcessSource
-# för att få OS-nivå-event när daemonen avslutas (#213). Liggsi samma katalog
-# som state-DB:n så båda är portabla tillsammans.
-_PID_FILE_DEFAULT = os.path.expanduser(
-    '~/Library/Application Support/MyMemory/uploader.pid'
 )
 
 # Backoff-trappa (sekunder) per retry_count
@@ -763,41 +755,10 @@ def _signal_handler(signum, _frame):
     _running = False
 
 
-def _write_pid_file(pid_file: str) -> None:
-    """Skriv nuvarande PID till pid-fil + registrera atexit-cleanup.
-
-    Menubar-appen läser filen och skapar en DispatchSource.makeProcessSource
-    för att få event vid daemon-exit (#213). Cleanup sker via atexit (normal
-    exit) + signal-handler (SIGTERM/SIGINT). Hård krasch (SIGKILL/crash)
-    lämnar stale fil — menubar får då omedelbar .exit-event på den döda
-    PID:en vilket tolkas korrekt som 'stoppad'.
-    """
-    try:
-        os.makedirs(os.path.dirname(pid_file), exist_ok=True)
-        with open(pid_file, 'w') as f:
-            f.write(str(os.getpid()))
-        atexit.register(_remove_pid_file, pid_file)
-    except OSError as e:
-        LOGGER.warning(f"Kunde inte skriva pid-fil {pid_file}: {e}")
-
-
-def _remove_pid_file(pid_file: str) -> None:
-    """Ta bort pid-filen om den tillhör oss."""
-    try:
-        with open(pid_file, 'r') as f:
-            owner_pid = int(f.read().strip())
-        if owner_pid == os.getpid():
-            os.unlink(pid_file)
-    except (OSError, ValueError):
-        pass
-
-
 def run_daemon():
     """Huvudloop: bootstrap → watchdog + polling-loop."""
     cfg = _get_uploader_config()
     state = UploaderState(cfg['state_db'])
-
-    _write_pid_file(_PID_FILE_DEFAULT)
 
     LOGGER.info(
         f"Starting uploader: api={cfg['api_url']}, "

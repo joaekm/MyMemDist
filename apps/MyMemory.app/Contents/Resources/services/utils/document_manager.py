@@ -80,7 +80,10 @@ def _fetch_pg_document(doc_id: str) -> dict | None:
                 return None
             meta = row[4] or {}
             return {
-                "unit_id": row[0],
+                # str() eftersom psycopg2 returnerar uuid.UUID här och
+                # downstream-kod förväntar sig sträng (+ JSON-serialisering
+                # via service_api endpoints kräver det).
+                "unit_id": str(row[0]),
                 "original_filename": row[1] or "",
                 "source_type": row[2] or "",
                 "timestamp_ingestion": (
@@ -222,8 +225,11 @@ def list_documents(limit: int = 20) -> list[dict]:
                         [tenant_id, limit],
                     )
                     rows = cur.fetchall()
+                    # str(r[0]) eftersom psycopg2 returnerar uuid.UUID-objekt
+                    # för UUID-kolumner — dessa är inte JSON-serialiserbara
+                    # av starlette.JSONResponse.
                     return [{
-                        "unit_id": r[0],
+                        "unit_id": str(r[0]),
                         "filename": r[1] or "",
                         "original_filename": r[1] or "",
                         "source_type": r[2] or "",

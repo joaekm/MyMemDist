@@ -91,8 +91,8 @@ SERVICES = [
     {"module": "services.processors.transcriber", "name": "Transcriber"},
     {"module": "services.collectors.rode_collector", "name": "Røde Collector"},
 
-    # Cloud-uploader — bevakar Assets/ och pushar till server
-    {"module": "services.uploader.daemon", "name": "Uploader Daemon"},
+    # Uploader spawnas av menubar-appen via ProcessSupervisor (#220).
+    # Inte längre en del av start_services.py.
 
     # Server-side (kör på Hetzner, inte här):
     # {"module": "services.engines.ingestion", "name": "Ingestion Engine"},

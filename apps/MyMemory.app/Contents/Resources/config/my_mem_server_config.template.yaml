@@ -5,7 +5,7 @@
 # Deployas till /opt/mymemory/app/config/my_mem_config.yaml via
 # tools/cloud/deploy_*.sh-skripten.
 
-version: "0.1.0"
+version: "0.2.0"
 
 # --- SYSTEMINSTÄLLNINGAR ---
 system:
