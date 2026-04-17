@@ -457,7 +457,10 @@ def execute_deletion(doc_id: str) -> dict:
 
                 if not other_incoming and not other_outgoing:
                     graph.delete_node(entity_id)
-                    vs.delete(entity_id)
+                    # Entity-nodens vektor lagras via upsert_node med
+                    # doc_id = node_id → delete_by_parent(entity_id)
+                    # rensar den.
+                    vs.delete_by_parent(entity_id)
                     entities_deleted += 1
                 else:
                     # Purge relation_context entries referencing deleted document
@@ -478,11 +481,12 @@ def execute_deletion(doc_id: str) -> dict:
                 f"Document node: {'deleted' if doc_deleted else 'not found'}"
             )
 
-            # 3. Ta bort vector-entries
-            vs.delete(unit_id)
+            # 3. Ta bort vector-entries — dokumentets overview (chunk_index=0)
+            # och alla text-chunks delar doc_id = unit_id, så en enda
+            # delete_by_parent täcker båda.
             chunks_deleted = vs.delete_by_parent(unit_id)
             result["actions"].append(
-                f"Vector: document + {chunks_deleted} chunks deleted"
+                f"Vector: {chunks_deleted} rader (overview + chunks) deleted"
             )
 
     # 4. Storage-cleanup
