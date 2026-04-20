@@ -1,7 +1,7 @@
 {
-  "version": "0.17.2",
+  "version": "0.17.3",
   "date": "2026-04-20",
-  "description": "# Release Notes Patch — diagnostik-loggning för token-brokern. Spårar varför `access_token`-filen ibland saknas på disk trots att Inställningar visar \"Inloggad\". Lägger till `os_log` på varje steg i `TokenBrokerManager.mintNow()` så att Console.app visar om det är Keychain-miss, server-fel eller nätverksproblem. Ingen funktionsändring — bara observability. Felsök via: ``` log show --predicate 'subsystem == \"com.digitalist.mymemory\" AND category == \"token-broker\"' --last 10m --info ``` ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.17.2/MyMemory-Installer.dmg",
+  "description": "# Release Notes Patch — fixar access_token-filen som inte skrevs vid app-start. ## Problem (identifierat via 0.17.2-loggning) `mintNow()`-request:en till `/token` cancellerades ~96 ms efter start. Rotorsaken: TokenBrokerManager startades från `.task`-modifier på MenuBarView. `.task`-Tasks är bundna till viewens livstid — när MenuBarExtra-popoveren stängs cancelleras Task:en och all pågående URL-trafik med den. Om användaren klickade bort menyn innan broker hunnit byta refresh → access så fick klienten aldrig en access-token och uploader + transcription-dedup blev lamslagna. ## Fix `tokenBroker.start()` spawnas nu i en fristående `Task { }` som inte är bunden till viewens livstid. URL-request:en körs klart oavsett om användaren stänger menyn. Enkel patch — ingen datastruktur ändrad, bara Task-wrapping. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.17.3/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
