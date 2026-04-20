@@ -36,8 +36,6 @@ PLACEHOLDER_MAP = {
     "__OWNER_ROLE__": ("owner", "profile", "role"),
     "__OWNER_ORG__": ("owner", "profile", "organization"),
     "__OWNER_LOCATION__": ("owner", "profile", "location"),
-    "__ANTHROPIC_API_KEY__": ("ai_engine", "anthropic", "api_key"),
-    "__GEMINI_API_KEY__": ("ai_engine", "gemini", "api_key"),
     "__SLACK_BOT_TOKEN__": ("slack", "bot_token"),
     "__GMAIL_LABEL__": ("google", "gmail", "target_label"),
     # Cloud-anslutning (#180) — bevaras vid upgrade så användaren slipper

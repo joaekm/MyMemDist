@@ -15,6 +15,15 @@
 	</dict>
 	<key>files2</key>
 	<dict>
+		<key>Frameworks/whisper.framework</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			9DY4z53VMs08rjamJdz3xz5lHNs=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"f43638cf9dd532cd3cae36a625dcf7c73e651cdb" or cdhash H"613dc8f4e7c97e88ef3c822d3ac14984d80b4727"</string>
+		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>
 			<key>hash2</key>

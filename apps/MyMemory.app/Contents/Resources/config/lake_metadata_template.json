@@ -99,46 +99,6 @@
       }
     }
   },
-  "transcript_properties": {
-    "description": "Extra fält för transkript (source_type=Transcript). Används av Ingestion Engine vid import från Assets/Transcripts.",
-    "properties": {
-      "duration": {
-        "type": "string",
-        "required": false,
-        "include_in_vector": true,
-        "description": "Ljudfilens längd i format HH:MM:SS"
-      },
-      "meeting_title": {
-        "type": "string",
-        "required": false,
-        "include_in_vector": true,
-        "description": "Mötets titel (från kalender eller AI-genererad)"
-      },
-      "participants": {
-        "type": "list",
-        "required": false,
-        "include_in_vector": true,
-        "description": "Lista med identifierade mötesdeltagare"
-      },
-      "parts": {
-        "type": "list",
-        "required": false,
-        "include_in_vector": false,
-        "description": "Lista med delstruktur för transkriptet",
-        "items": {
-          "type": "object",
-          "properties": {
-            "id": {"type": "integer", "description": "Del-nummer (1-indexed)"},
-            "title": {"type": "string", "description": "Rubrik för delen"},
-            "timestamp_start": {"type": "string", "description": "Starttid HH:MM:SS"},
-            "timestamp_end": {"type": "string", "description": "Sluttid HH:MM:SS"},
-            "speakers": {"type": "list", "description": "Talare i denna del"},
-            "topics": {"type": "list", "description": "Nyckelämnen i denna del"}
-          }
-        }
-      }
-    }
-  },
   "deprecated_properties": {
     "description": "Fält som inte längre ska användas. Validatorn varnar om de hittas.",
     "properties": {
@@ -153,6 +113,22 @@
       "node_context": {
         "reason": "Flyttat till graf-noder, inte Lake-filer",
         "replacement": null
+      },
+      "duration": {
+        "reason": "Transcript-specifikt fält borttaget 2026-04-20. Längd finns i text-header + vector-chunk-metadata (part_timestamp_end).",
+        "replacement": null
+      },
+      "meeting_title": {
+        "reason": "Anti-mönster (LLM-gissad titel). Borttaget 2026-04-20 tillsammans med övrigt transcript_properties.",
+        "replacement": null
+      },
+      "participants": {
+        "reason": "Anti-mönster (LLM-gissad talaridentifiering). Borttaget 2026-04-20.",
+        "replacement": null
+      },
+      "parts": {
+        "reason": "Anti-mönster (LLM-gissade kapitel/ämnen). Ersatt 2026-04-20 av deterministisk chunk-attribution via part_timestamp_start/end i vector-metadata.",
+        "replacement": "vector.metadata.part_timestamp_start"
       }
     }
   },

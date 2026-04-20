@@ -37,7 +37,6 @@ def ensure_runtime_directories():
         os.path.expanduser('~/Library/Application Support/MyMemory/MemoryDrop'),
         # Caches (~/Library/Caches/MyMemory/)
         os.path.expanduser('~/Library/Caches/MyMemory'),
-        os.path.expanduser('~/Library/Caches/MyMemory/MeetingBuffer'),
     ]
 
     for dir_path in runtime_dirs:
@@ -204,43 +203,6 @@ def rensa_gammal_logg():
         print(f"❌ Fel vid loggrensning: {e}")
 
 
-def clean_old_meeting_chunks() -> int:
-    """Rensa MeetingBuffer-chunks äldre än 24h. Returnerar antal raderade.
-
-    Flyttad från prestart.py i #224 Steg 6 — alla klient-side startup-checks
-    bor nu på samma ställe.
-    """
-    meeting_config = CONFIG.get('meeting_transcriber', {})
-    buffer_dir_raw = meeting_config.get('buffer_dir')
-    if not buffer_dir_raw:
-        LOGGER.info("meeting_transcriber.buffer_dir saknas i config — skippar cleanup")
-        return 0
-    buffer_dir = os.path.expanduser(buffer_dir_raw)
-    chunks_dir = os.path.join(buffer_dir, 'chunks')
-
-    if not os.path.exists(chunks_dir):
-        return 0
-
-    now = time.time()
-    max_age_seconds = 24 * 60 * 60
-    cleaned = 0
-
-    for filename in os.listdir(chunks_dir):
-        if not filename.endswith('.txt'):
-            continue
-        filepath = os.path.join(chunks_dir, filename)
-        try:
-            if now - os.path.getmtime(filepath) > max_age_seconds:
-                os.remove(filepath)
-                cleaned += 1
-        except OSError as e:
-            LOGGER.warning(f"Kunde inte radera {filename}: {e}")
-
-    if cleaned > 0:
-        LOGGER.info(f"Cleaned {cleaned} old meeting chunks (>24h)")
-    return cleaned
-
-
 def check_filevault_status():
     """
     Kontrollerar om FileVault (diskkryptering) är aktiverat.
@@ -269,9 +231,6 @@ def run_startup_checks():
     Anropas av menubar-appen (ServiceManager.runPrestart) vid uppstart
     innan ProcessSupervisor spawnar bakgrundstjänsterna.
     """
-    # Rensa gamla MeetingBuffer-chunks (>24h) innan runtime-mappar säkras
-    clean_old_meeting_chunks()
-
     # Säkerställ att runtime-mappar finns
     ensure_runtime_directories()
 

@@ -1,5 +1,7 @@
 # MyMemory — Client dependencies (Mac .app)
-# Vad som körs klient-sida: uploader, collectors, transcriber, menubar-backend.
+# Vad som körs klient-sida: uploader, collectors, menubar-backend.
+# Transkribering körs nu i Swift-plugin (whisper.cpp-baserat) — inga
+# Python-LLM-anrop klient-side längre.
 # Uppdatera parallellt med requirements-server.txt vid ändringar.
 
 # Filbevakning
@@ -20,14 +22,3 @@ slack_sdk==3.39.0
 google-api-python-client==2.187.0
 google-auth-oauthlib==1.2.3
 google-auth-httplib2==0.2.1
-
-# LLM (transcriber, klient-side providers)
-anthropic==0.76.0
-google-genai==1.52.0
-
-# PostgreSQL driver — tyvärr importerad på modulnivå i
-# services.utils.vector_service och graph_service, som transcriber drar in.
-# Tills transcribern rensas från direkta graf/vektor-anrop (följdissue) måste
-# psycopg2 finnas i klienten, annars kraschar .app vid start.
-# sentence-transformers laddas lazy och behövs INTE klient-sidan.
-psycopg2-binary==2.9.11

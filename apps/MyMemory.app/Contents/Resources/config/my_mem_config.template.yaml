@@ -1,7 +1,7 @@
 # MyMemory Klient Configuration
 # Cloud-only sedan #132/#180. Lokala daemons (Ingestion/Enrichment/Dreamer)
-# körs på Hetzner-servern. Klienten kör bara collectors + transcriber +
-# uploader-daemon.
+# körs på Hetzner-servern. Klienten kör collectors + uploader-daemon +
+# Swift Transcription-plugin (whisper.cpp, on-demand nedladdad modell).
 #
 # Server-side config: config/my_mem_server_config.template.yaml
 
@@ -50,7 +50,7 @@ paths:
   drop_folder: "~/MyMemory/MemoryDrop"
   downloads_folder: "~/Downloads"
 
-  # Assets — collectors och transcriber skriver hit, uploader plockar
+  # Assets — collectors och transcription-plugin skriver hit, uploader plockar
   asset_store: "~/MyMemory/Assets"
   asset_documents: "~/MyMemory/Assets/Documents"
   asset_recordings: "~/MyMemory/Assets/Recordings"
@@ -68,20 +68,6 @@ paths:
 logging:
   system_log: "~/Library/Logs/MyMemory/system.log"
   log_level: "INFO"
-
-# --- AI ENGINE (klient-side: bara Gemini för transkribering) ---
-# LLM för entity extraction, enrichment, search etc. körs server-side
-# och konfigureras i my_mem_server_config.yaml.
-ai_engine:
-  transcription_provider: "gemini"
-
-  gemini:
-    api_key: "__GEMINI_API_KEY__"
-
-  models:
-    model_transcribe: "models/gemini-2.5-flash"
-
-  gemini_poll_interval_seconds: 1
 
 # --- VALIDATION ---
 validation:
@@ -142,23 +128,6 @@ google:
   calendar:
     enabled: true
     history_days: 30
-
-# --- MEETING TRANSCRIBER ---
-meeting_transcriber:
-  icecast_url: "http://localhost:8000/meeting"
-  buffer_seconds: 30
-  buffer_dir: "~/MyMemory/MeetingBuffer"
-
-# --- RICH TRANSCRIBER ---
-transcriber:
-  enabled: true
-  chunk_size_bytes: 10000000
-  chunk_overlap_seconds: 5
-  normalize_audio: false
-  calendar_window_minutes: 10
-  part_preview_limit: 500
-  max_file_workers: 2
-  max_chunk_workers: 10
 
 # --- FILE RETRIEVER (DropZone → Assets) ---
 file_retriever:
