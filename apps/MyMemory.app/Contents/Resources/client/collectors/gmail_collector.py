@@ -22,7 +22,7 @@ import html as html_module
 from email.utils import parsedate_to_datetime
 
 # --- CONFIG ---
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 
 CONFIG = get_config()
 

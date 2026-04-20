@@ -48,7 +48,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # --- LOGGING ---
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 _config = get_config()
 _default_log_dir = os.path.dirname(os.path.expanduser(
     _config.get('logging', {}).get('system_log', '~/Library/Logs/MyMemory/system.log')
@@ -89,7 +89,7 @@ except ImportError as _e:
 
 from client.processors.text_extractor import extract_text
 from client.utils.broker_auth import get_access_token, reload_access_token
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 
 
 # --- CONFIG ---
@@ -134,7 +134,7 @@ def _get_uploader_config() -> dict:
     # Detektera orörd template-placeholder så användaren får tydlig
     # vägledning istället för cryptic connection error (#188).
     if api_url.startswith('__') and api_url.endswith('__'):
-        from server.utils.config_loader import get_config_path
+        from client.utils.config_loader import get_config_path
         config_path = get_config_path()
         raise RuntimeError(
             f"HARDFAIL: cloud.api_url i config är en orörd template-"
@@ -329,7 +329,7 @@ class UploaderState:
 
 def _load_source_mappings():
     """Läs source_mappings + default från schema (SSOT)."""
-    from server.utils.schema_validator import SchemaValidator
+    from client.utils.schema_validator import SchemaValidator
     sv = SchemaValidator()
     return sv.get_source_type_mappings(), sv.get_default_source_type()
 

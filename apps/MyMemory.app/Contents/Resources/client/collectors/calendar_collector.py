@@ -20,7 +20,7 @@ import zoneinfo
 from pathlib import Path
 
 # --- CONFIG ---
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 
 CONFIG = get_config()
 

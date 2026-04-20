@@ -10,7 +10,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 # --- CONFIG ---
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 
 CONFIG = get_config()
 

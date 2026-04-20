@@ -11,7 +11,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # --- CONFIG ---
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 
 CONFIG = get_config()
 DROP_FOLDER = os.path.expanduser(CONFIG['paths']['drop_folder'])

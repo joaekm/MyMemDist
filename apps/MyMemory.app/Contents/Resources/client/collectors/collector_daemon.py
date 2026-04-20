@@ -35,7 +35,7 @@ signal.signal(signal.SIGTERM, _handle_sigterm)
 signal.signal(signal.SIGINT, _handle_sigterm)
 
 # --- CONFIG ---
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 try:
     CONFIG = get_config()
 except FileNotFoundError:

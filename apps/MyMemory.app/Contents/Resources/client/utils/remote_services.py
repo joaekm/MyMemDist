@@ -38,7 +38,7 @@ LOGGER = logging.getLogger("REMOTE_SERVICES")
 
 def _load_cloud_config() -> dict:
     """Hämta cloud-section från klient-config."""
-    from server.utils.config_loader import get_config
+    from client.utils.config_loader import get_config
     cfg = get_config()
     cloud = cfg.get("cloud", {})
     api_url = cloud.get("api_url", "").rstrip("/")
@@ -298,7 +298,7 @@ def get_remote_mcp() -> RemoteMCP:
 
 def is_cloud_mode() -> bool:
     """True om klienten är i cloud-mode (har cloud.api_url konfigurerat)."""
-    from server.utils.config_loader import get_config
+    from client.utils.config_loader import get_config
     cfg = get_config()
     api_url = cfg.get("cloud", {}).get("api_url", "")
     return bool(api_url) and not api_url.startswith("__")

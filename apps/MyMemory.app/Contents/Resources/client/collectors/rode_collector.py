@@ -28,7 +28,7 @@ import datetime
 import yaml
 
 # --- CONFIG ---
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 from client.utils.audio_service import _get_ffmpeg, _get_ffprobe
 
 CONFIG = get_config()

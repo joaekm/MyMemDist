@@ -8,7 +8,7 @@ import logging
 import json
 import subprocess
 
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 
 # Enkel loggning för CLI-verktyg
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')

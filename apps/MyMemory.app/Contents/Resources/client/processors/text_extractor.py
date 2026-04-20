@@ -21,7 +21,7 @@ except ImportError as e:
         f"Missing required libraries (pymupdf, python-docx, openpyxl): {e}"
     )
 
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 
 LOGGER = logging.getLogger('TextExtractor')
 

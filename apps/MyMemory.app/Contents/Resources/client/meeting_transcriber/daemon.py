@@ -28,7 +28,7 @@ from google.genai import types
 # Lägg till project root till path för imports
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from server.utils.config_loader import get_config
+from client.utils.config_loader import get_config
 
 CONFIG = get_config()
 MEETING_CONFIG = CONFIG.get('meeting_transcriber', {})
