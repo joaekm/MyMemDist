@@ -164,16 +164,6 @@ transcriber:
 file_retriever:
   enabled: true
 
-# --- SIGNAL FEED (peer-to-peer, valfritt) ---
-signal_feed:
-  enabled: false
-  port: 8100
-  broker_url: ""
-  intent_peer_secret: ""
-  heartbeat_interval_seconds: 300
-  smoketrail_clusters: 12
-  feed_cache_ttl_seconds: 3600
-
 # --- DESKTOP MENUBAR ---
 desktop:
   host: "localhost"

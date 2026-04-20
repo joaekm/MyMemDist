@@ -245,89 +245,33 @@ doc_converter:
       }}
 
   strict_entity_extraction: |
-    Du är en expert på Knowledge Graph Extraction. Din uppgift är att strukturera ostrukturerad text till en graf bestående av Noder och Relationer, strikt baserat på det bifogade schemat.
+    Strukturera given text till noder och relationer enligt aktivt taxonomi-schema.
 
-    === DINA INSTRUKTIONER ===
-    1. EXTRAHERA NODER:
-
-    TILLÅTNA NODTYPER (OCH EGENSKAPER):
-    Här är de enda nodtyper du får skapa. Observera särskilt vilka egenskaper och enum-värden som är tillåtna.
+    NODTYPER:
     {node_types_context}
 
-      - Identifiera entiteter som matchar schemat.
-      - Fyll i så många egenskaper som möjligt om informationen finns i texten.
-      - Om en egenskap har en lista med tillåtna värden [Val1, Val2...], MÅSTE du använda ett av dessa exakt. Hitta inte på egna.
-      - "confidence": Sätts baserat på "Schema-Fit" (0.0 - 1.0).
-        * 0.8-1.0 (Hög): Entiteten uppfyller definitionen tydligt och har unika attribut.
-        * <0.3 (Låg/Brus): Entiteten är generisk eller trivial.
-    NAME NORMALIZATION:
-      - Always output person names in given-name-first order: "Suzanne Winting", NOT "Winting Suzanne".
-      - Some source systems (Outlook/Teams/Adda) store names as "Lastname Firstname". Correct this.
-      - Use proper Swedish diacritics when inferable: "Ohlén" not "Ohlen", "Björkengren" not "Bjorkengren".
-      - For compound surnames, preserve the full name: "Mia Friari Söderholm", NOT "Friari Söderholm Mia".
-      
-    
-    2. ANKARE (Prioritet 1):
-      - Kontrollera alltid listan "KÄNDA ENTITETER" om sådan finns.
-      - Om texten nämner en entitet som matchar en känd entitet, MÅSTE du återanvända dess UUID exakt.
-    
-    3. SKAPA RELATIONER:
-      - Identifiera kopplingar mellan noderna.
-      - Skapa ENDAST relationstyper som existerar enligt TILLÅTNA RELATIONSTYPER nedan.
-      - Koppla relationer ENDAST på det sätt som explicit framgår som tillåtet (Källa -> Mål).
-      - Om en relationstyp har properties, inkludera dem som nycklar i edge-objektet.
-        Properties markerade med (*) är REQUIRED och MÅSTE inkluderas.
-        Valfria properties ska inkluderas om informationen finns i texten.
-      - Abstrakta roller (Kund, Leverantör, Partner) är INTE noder - de är edge properties (relation_type).
-    
-    TILLÅTNA RELATIONSTYPER (WHITELIST):
+    RELATIONSTYPER:
     {edge_types_context}
 
-    === KONTEXT FRÅN KÄLLAN ===
+    KÄLL-KONTEXT:
     {known_entities_context}
 
-    === EDGE PROPERTY RULES ===
-    EVERY edge MUST include all properties that can be inferred from the text.
-    EVERY edge MUST include "relation_context" — en mening som beskriver vad som framkommer om relationen i detta dokument. Fokusera på HÄNDELSE/BESLUT/FÖRÄNDRING, inte rollbeskrivning.
+    REGLER:
+    - Skapa endast nodtyper och relationstyper från listorna ovan.
+    - Property-värden: följ description + type + enum-constraint för respektive property.
+    - Properties markerade "*" är required.
+    - Skapa endast relationer enligt allowed source→target. Övriga kombinationer är förbjudna.
+    - confidence är float 0.0-1.0. Hög (0.8+) = tydlig schema-match. Låg (<0.3) = generisk/trivial.
+    - Där edge-schemat deklarerar relation_context som property: inkludera den — en mening om vad dokumentet säger om relationen (händelse/beslut/förändring). Om schemat inte deklarerar den: utelämna.
+    - Om en entitet matchar en anchor som bifogats separat, återanvänd dess uuid exakt.
 
-    BELONGS_TO (Person/Group -> Organization/Group):
-      - job_title: Extract if the person's title or position is mentioned (e.g. "Projektledare", "VD", "Utvecklare")
-      - job_function: Extract if the person's function/department is mentioned (e.g. "Försäljning", "IT")
-      - relation_context: Vad framkommer om personens relation till organisationen i detta dokument?
-
-    HAS_BUSINESS_RELATION (Organization -> Organization):
-      - relation_type (*REQUIRED*): MUST be one of [Kund, Leverantör, Partner, Prospekt, Lead]. NEVER omit this.
-      - relation_status: Set to "Aktiv" or "Inaktiv" if inferable.  # noqa: SD — enum values from schema
-      - relation_context: Vad framkommer om affärsrelationen i detta dokument? (avtal, förhandling, leverans, etc.)
-
-    HAS_ROLE (Person -> Roles):
-      - context: Describe in what context the person has this role (e.g. "Lead developer on Project X")
-      - relation_context: Vad framkommer om denna roll i detta dokument?
-
-    ATTENDED (Person -> Event):
-      - For Calendar Events: Do NOT create ATTENDED edges. They are handled by deterministic post-processing.
-      - For other source types: Create ATTENDED if the text indicates a person participated in an event.
-      - duration_minutes: Include if meeting duration is mentioned.
-      - relation_context: Vad framkommer om personens deltagande?
-
-    RETURNERA JSON (Exakt format):
+    OUTPUT-FORMAT (JSON):
     {{
-      "nodes": [
-        {{
-          "name": "Namn",
-          "type": "Nodtyp",
-          "org_type": "Bolag",  # noqa: SD — prompt example
-          "confidence": 0.85
-        }}
-      ],
-      "edges": [
-        {{ "source": "PersonNamn", "target": "OrgNamn", "type": "BELONGS_TO", "confidence": 0.9, "job_title": "Projektledare", "job_function": "IT", "relation_context": "Leder leveransgranskning av projekt X" }},  # noqa: SD — prompt example
-        {{ "source": "OrgA", "target": "OrgB", "type": "HAS_BUSINESS_RELATION", "confidence": 0.85, "relation_type": "Kund", "relation_status": "Aktiv", "relation_context": "Avtal förlängt med nytt timpris 600 kr/h" }},  # noqa: SD — prompt example
-        {{ "source": "PersonNamn", "target": "RollNamn", "type": "HAS_ROLE", "confidence": 0.8, "context": "Lead developer on Project X", "relation_context": "Identifierad som lead developer i statusrapport" }}  # noqa: SD — prompt example
-      ]
+      "nodes": [ {{ "name": "<name>", "type": "<nodtyp>", "confidence": <float>, "<prop>": "<värde>", ... }}, ... ],
+      "edges": [ {{ "source": "<name>", "target": "<name>", "type": "<reltyp>", "confidence": <float>, "relation_context": "<sats>", "<prop>": "<värde>", ... }}, ... ]
     }}
 
-    TEXT ATT ANALYSERA:
+    TEXT:
     "{text_chunk}"
 
   # --- Source type-specifika kontextinstruktioner ---

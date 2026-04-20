@@ -118,6 +118,18 @@
         "required": false,
         "include_in_vector": false,
         "description": "Alternativa namn/identifierare för noden. Används vid Entity Resolution för fuzzy matching."
+      },
+      "quality_flags": {
+        "type": "list",
+        "required": false,
+        "include_in_vector": false,
+        "description": "System-flaggor satta av Enrichment, konsumeras av Dreamer. Exempel: 'possible_split' (duplikat-kandidat), 'possible_recategorize' / 'wrong_type' (felklassificerad). Rensas när Dreamer agerat."
+      },
+      "quality_flag_reason": {
+        "type": "object",
+        "required": false,
+        "include_in_vector": false,
+        "description": "Mapping flagga → motivering. Skrivs av Enrichment tillsammans med quality_flags."
       }
     }
   },
@@ -142,10 +154,10 @@
           "regex": "^[\\w.]+@([\\w-]+\\.)+[\\w-]{2,4}$",
           "description": "Unik identifierare (används som ID)"
         },
-        "name": { "required": true, "type": "string" },
-        "person_type": { 
-          "required": false, 
-          "type": "enum", 
+        "name": { "required": true, "type": "string", "description": "Namn i given-name-first format. Exempel: 'Suzanne Winting' (inte 'Winting Suzanne'). Bevara diakritiska tecken (Ohlén, Björkengren). Vid sammansatta efternamn: behåll fullständigt (Mia Friari Söderholm)." },
+        "person_type": {
+          "required": false,
+          "type": "enum",
           "values": ["Intern", "Extern"],
           "description": "Intern om domän matchar ägarens organisation"
         },
@@ -307,10 +319,11 @@
     "ATTENDED": {
       "source_type": ["Person"],
       "target_type": ["Event"],
+      "description": "Person deltog i Event. OBS: För Calendar Event-källor skapas ATTENDED-edges deterministiskt av post-processing — extrahera inte själv.",
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
-        "duration_minutes": { "required": false, "type": "integer" },
+        "duration_minutes": { "required": false, "type": "integer", "description": "Mötestid i minuter. Inkludera om specificerat." },
         "relation_context": {
           "required": false,
           "type": "list",
@@ -327,13 +340,14 @@
     "BELONGS_TO": {
       "source_type": ["Person", "Group"],
       "target_type": ["Organization", "Group"],
+      "description": "Person/Group tillhör Organization/Group. Anställning, medlemskap.",
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
         "start_date": { "required": false, "type": "date" },
         "end_date": { "required": false, "type": "date" },
-        "job_title": { "required": false, "type": "string" },
-        "job_function": { "required": false, "type": "string" },
+        "job_title": { "required": false, "type": "string", "description": "Titel eller position. Exempel: Projektledare, VD, Utvecklare." },
+        "job_function": { "required": false, "type": "string", "description": "Avdelning eller funktion. Exempel: Försäljning, IT." },
         "relation_context": {
           "required": false,
           "type": "list",
@@ -350,11 +364,11 @@
     "HAS_BUSINESS_RELATION": {
       "source_type": ["Organization"],
       "target_type": ["Organization"],
-      "description": "Affärsrelation mellan två organisationer. Source är den som HAR rollen (t.ex. Digitalist är Leverantör), target är motparten.",
+      "description": "Affärsrelation mellan organisationer. Source = part som har rollen. Target = motpart.",
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
-        "relation_type": { "required": true, "type": "enum", "values": ["Kund", "Leverantör", "Partner", "Prospekt", "Lead"] },
+        "relation_type": { "required": true, "type": "enum", "values": ["Kund", "Leverantör", "Partner", "Prospekt", "Lead"], "description": "Relationstyp som edge-property. Dessa roller är INTE egna noder." },
         "relation_status": { "required": false, "type": "enum", "values": ["Aktiv", "Inaktiv"] },
         "contract_id": { "required": false, "type": "string" },
         "relation_context": {
@@ -393,10 +407,11 @@
     "HAS_ROLE": {
       "source_type": ["Person"],
       "target_type": ["Roles"],
+      "description": "Person har en funktionell roll. Rollen (target) är en Roles-nod.",
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
         "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
-        "context": { "required": false, "type": "string" },
+        "context": { "required": false, "type": "string", "description": "Kontext för rollen. Exempel: Lead developer på Projekt X." },
         "relation_context": {
           "required": false,
           "type": "list",
@@ -414,39 +429,34 @@
   "source_type_profiles": {
     "description": "Extraktionsprofil per source type. Styr vad pipelinen får göra i grafen för varje typ av källa.",
     "Email Thread": {
-      "description": "Formell källa — fullständiga namn, explicita relationer, organisationsdata.",
+      "description": "E-posttråd. Formell källa. Avsändare (Från) + mottagare (Till/CC) = Person-kandidater. E-postsignaturer innehåller ofta jobbtitlar, telefonnummer, organisationsnamn — extrahera som properties. E-postdomäner identifierar organisationer.",
       "allow_create": ["Person", "Organization", "Group", "Project", "Event", "Roles"],
       "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE", "WORKS_ON"],
-      "skip_critic": false,
-      "prompt_key": "source_context_email"
+      "skip_critic": false
     },
     "Document": {
-      "description": "Formell källa — avtal, offerter, rapporter. Rik strukturell data men tekniska dokument kan ge brus.",
+      "description": "Formellt dokument (avtal, rapport, offert, specifikation). Fokus: affärsentiteter (Person, Organization, Project) och relationer. Ignorera tekniska implementationsdetaljer: kodmoduler, ramverk, bibliotek, UI-komponenter, API-endpoints, databastabeller. Extrahera org_number, budget_value, contract_id när de finns.",
       "allow_create": ["Person", "Organization", "Group", "Project", "Event", "Roles"],
       "allow_edges": ["BELONGS_TO", "ATTENDED", "HAS_BUSINESS_RELATION", "HAS_ROLE", "WORKS_ON"],
-      "skip_critic": false,
-      "prompt_key": "source_context_document"
+      "skip_critic": false
     },
     "Calendar Event": {
-      "description": "Strukturerad källa — deltagare, tider, rum. Person-noder skapas inte (email-format), Events skapas deterministiskt.",
+      "description": "Kalenderexport. Events = primära entiteter. Skapa INTE Person-noder — deltagare matchas mot befintlig graf. Skapa INTE ATTENDED-edges — hanteras av deterministisk post-processing. Extrahera Event-properties (name, start_time, end_time, location) och ev. organisationer/projekt i titel/beskrivning.",
       "allow_create": ["Event", "Organization", "Group", "Project"],
       "allow_edges": ["ATTENDED", "BELONGS_TO", "HAS_BUSINESS_RELATION", "WORKS_ON"],
-      "skip_critic": false,
-      "prompt_key": "source_context_calendar"
+      "skip_critic": false
     },
     "Slack Log": {
-      "description": "Semistrukturerad källa — fullständiga Slack-profilnamn, konversationsspråk. Sällan formella relationer.",
+      "description": "Slack-konversation. Format ofta 'Namn: Meddelande'. Avsändare = starka Person-kandidater (Slack-profiler har fullständiga namn). Slack-kanaler (#kanalnamn) är INTE entiteter — ignorera. Konversationsspråk innehåller sällan formella relationer — var konservativ med edges.",
       "allow_create": ["Person", "Organization", "Group", "Project", "Event"],
       "allow_edges": ["BELONGS_TO", "HAS_BUSINESS_RELATION", "WORKS_ON"],
-      "skip_critic": false,
-      "prompt_key": "source_context_slack"
+      "skip_critic": false
     },
     "Transcript": {
-      "description": "Brusig källa — ovärderlig för kontext men opålitlig för strukturell grafdata. Bara LINK till befintliga noder, aldrig CREATE. Bidraget är relation_context på kanter, inte grafstruktur.",
+      "description": "Mötestranskript. Brusigt men värdefullt för kontext om kända entiteter. PRIMÄR uppgift: identifiera BEFINTLIGA entiteter (Person, Organization, Project) för LINK + berika med kontext. Skapa INGA nya entiteter (talare använder förnamn/förkortningar/informella referenser). Rik kontext — beslut, diskussioner, åsikter, åtgärdspunkter — in i relation_context på edges. Ignorera utfyllnadsord, småprat, teknisk jargong som inte rör affärsentiteter.",
       "allow_create": [],
       "allow_edges": [],
-      "skip_critic": true,
-      "prompt_key": "source_context_transcript"
+      "skip_critic": true
     }
   }
 }

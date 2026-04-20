@@ -5,7 +5,7 @@
 # Deployas till /opt/mymemory/app/config/my_mem_config.yaml via
 # tools/cloud/deploy_*.sh-skripten.
 
-version: "0.2.0"
+version: "0.3.6"
 
 # --- SYSTEMINSTÄLLNINGAR ---
 system:
@@ -39,9 +39,6 @@ paths:
   # HuggingFace model-cache (sentence-transformers)
   hf_cache_dir: "/opt/mymemory/.cache/huggingface"
 
-  # Fillås (shared_lock) — katalog för process-koordinering
-  lock_dir: "/opt/mymemory/state/locks"
-
 # --- POSTGRESQL ---
 database:
   postgresql:
@@ -50,7 +47,6 @@ database:
     dbname: "mymemory"
     user: "mymemory_app"
     password: "__PG_PASSWORD__"
-  tenant_id: "__TENANT_ID__"
 
 # --- LOGGNING ---
 logging:
@@ -115,9 +111,7 @@ dreamer:
   daemon:
     enabled: true
     node_threshold: 15
-    run_interval_hours: 12
     poll_interval_seconds: 300
-    state_file: "/opt/mymemory/state/dreamer_state.json"
 
 # --- ENRICHMENT (property-berikning batch-jobb) ---
 enrichment:
@@ -129,17 +123,13 @@ enrichment:
     enabled: true
     re_enrich_threshold: 10
     sleep_need_threshold: 0.10
-    state_file: "/opt/mymemory/state/enrichment_state.json"
+    poll_interval_seconds: 300
 
   thresholds:
     enrich: 0.6
 
   quality_flags:
     enabled: true
-
-# --- GRAPH HEALTH ---
-graph_health:
-  state_file: "/opt/mymemory/state/graph_health.json"
 
 # --- SEARCH (MCP-sökning) ---
 search:
