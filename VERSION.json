@@ -1,7 +1,7 @@
 {
-  "version": "0.17.1",
+  "version": "0.17.2",
   "date": "2026-04-20",
-  "description": "Patch — kontroller och robusthet för transkriberings-plugin:en: paus/rensa, UUID-baserad dedup mot servern, och riktig progress under modell-nedladdningen.",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.17.1/MyMemory-Installer.dmg",
+  "description": "# Release Notes Patch — diagnostik-loggning för token-brokern. Spårar varför `access_token`-filen ibland saknas på disk trots att Inställningar visar \"Inloggad\". Lägger till `os_log` på varje steg i `TokenBrokerManager.mintNow()` så att Console.app visar om det är Keychain-miss, server-fel eller nätverksproblem. Ingen funktionsändring — bara observability. Felsök via: ``` log show --predicate 'subsystem == \"com.digitalist.mymemory\" AND category == \"token-broker\"' --last 10m --info ``` ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.17.2/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
