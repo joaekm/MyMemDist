@@ -2,6 +2,6 @@
   "version": "0.17.1",
   "date": "2026-04-20",
   "description": "Patch — kontroller och robusthet för transkriberings-plugin:en: paus/rensa, UUID-baserad dedup mot servern, och riktig progress under modell-nedladdningen.",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/vtranscription-v1.1.1/MyMemory-Installer.dmg",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.17.1/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
