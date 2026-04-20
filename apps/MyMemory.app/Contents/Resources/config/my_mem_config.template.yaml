@@ -10,11 +10,10 @@ version: "__APP_VERSION__"
 # --- CLOUD-ANSLUTNING ---
 cloud:
   # Bas-URL till MyMemory-servern (utan trailing slash).
-  api_url: "__CLOUD_API_URL__"
+  api_url: "https://memory.digitalist.tools"
 
-  # TLS-verifiering. false så länge servern kör self-signed cert.
-  # Sätt till true när domän + Let's Encrypt är på plats.
-  verify_tls: false
+  # TLS-verifiering. Sätt false vid lokal utveckling mot self-signed cert.
+  verify_tls: true
 
   # PAT-källor (i prioritetsordning):
   #   1. MYMEMORY_PAT env var

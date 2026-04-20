@@ -38,9 +38,8 @@ PLACEHOLDER_MAP = {
     "__OWNER_LOCATION__": ("owner", "profile", "location"),
     "__SLACK_BOT_TOKEN__": ("slack", "bot_token"),
     "__GMAIL_LABEL__": ("google", "gmail", "target_label"),
-    # Cloud-anslutning (#180) — bevaras vid upgrade så användaren slipper
-    # konfigurera om api_url efter varje release.
-    "__CLOUD_API_URL__": ("cloud", "api_url"),
+    # Cloud-anslutning (#180) — api_url hårdkodad till domänen i templaten
+    # (memory.digitalist.tools). Ingen placeholder behövs längre.
     # PostgreSQL credentials (cloud-mode på server)
     "__PG_HOST__": ("database", "postgresql", "host"),
     "__PG_PASSWORD__": ("database", "postgresql", "password"),
