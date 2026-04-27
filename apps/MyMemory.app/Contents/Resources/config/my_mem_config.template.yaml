@@ -106,6 +106,15 @@ collectors:
     ffmpeg_bitrate: "128k"
     state_dir: "~/MyMemory/Assets/.rode_state"
 
+  # IMAP-baserad mail-watcher (observer-only via IMAP IDLE).
+  # App-lösenord ligger i Keychain — aldrig i config.
+  mail:
+    enabled: false
+    imap_host: "imap.gmail.com"
+    imap_port: 993
+    imap_username: ""
+    imap_mailbox: "INBOX"
+
 # --- SLACK INTEGRATION (valfritt) ---
 slack:
   enabled: true
@@ -114,16 +123,14 @@ slack:
   history_days: 7
 
 # --- GOOGLE INTEGRATION (valfritt) ---
+# OBS: Gmail-collectorn är borttagen efter commit 1 i observer-migrationen.
+# Mail samlas nu via IMAP (collectors.mail ovan). Calendar fortsätter via
+# Google API tills commit 2 ersätter det med secret iCal URL.
 google:
   credentials_path: "~/MyMemory/Settings/Credentials/client_secret.json"
   token_path: "~/MyMemory/Settings/Credentials/token.json"
   scopes:
-    - "https://www.googleapis.com/auth/gmail.readonly"
     - "https://www.googleapis.com/auth/calendar.readonly"
-  gmail:
-    enabled: true
-    history_days: 7
-    target_label: "__GMAIL_LABEL__"
   calendar:
     enabled: true
     history_days: 30

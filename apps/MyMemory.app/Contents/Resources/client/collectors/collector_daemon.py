@@ -2,12 +2,14 @@
 """
 Collector Daemon
 
-Kör periodiska collectors (Gmail, Calendar) i en loop.
-Pollar med konfigurerbart intervall.
+Kör periodiska collectors i en loop. Pollar med konfigurerbart intervall.
 
 Collectors som körs:
-- Gmail Collector: Hämtar mail med specifik label
 - Calendar Collector: Hämtar kalenderhändelser
+
+OBS: Gmail-collectorn är borttagen efter commit 1 i observer-migrationen
+(Mail samlas nu via Swift IMAP IDLE-watcher). Calendar tas bort i commit 2.
+När båda är borta raderas hela daemonen i commit 6.
 """
 
 import logging
@@ -110,16 +112,6 @@ def _run_collectors(show_heartbeat: bool = False):
     Args:
         show_heartbeat: Visa totaler vid uppstart (första körningen)
     """
-    # Gmail
-    try:
-        from client.collectors.gmail_collector import run_collector as run_gmail, get_existing_message_ids
-        run_gmail()
-        if show_heartbeat:
-            total_mail = len(get_existing_message_ids())
-            LOGGER.info(f"Gmail heartbeat: {total_mail} mail")
-    except Exception as e:
-        LOGGER.error(f"Gmail collector failed: {e}")
-
     # Calendar
     try:
         from client.collectors.calendar_collector import run_collector as run_calendar, CALENDAR_FOLDER

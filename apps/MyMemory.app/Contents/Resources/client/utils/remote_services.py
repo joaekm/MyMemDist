@@ -6,7 +6,7 @@ vector_scope) men routar via Hetzner-servern:
 - LLM-anrop → M2M Service API (/api/v1/llm/generate, port 8001)
 - Graf/vektor/kalender-lookups → M2C MCP (port 8000)
 
-Se documentation/client_architecture.md → "Kommunikationsprinciper".
+Se documentation/reference/client_architecture.md → "Kommunikationsprinciper".
 
 Transcribern (och andra klient-tjänster) importerar detta istället för
 lokala services vid cloud-mode.
