@@ -108,12 +108,16 @@ collectors:
 
   # IMAP-baserad mail-watcher (observer-only via IMAP IDLE).
   # App-lösenord ligger i Keychain — aldrig i config.
+  # imap_label: Gmail-label-filter via X-GM-LABELS-extension. Tom = hela
+  # mailboxen. Andra IMAP-servrar än Gmail/Google Workspace returnerar
+  # tomt SEARCH-resultat om filter sätts.
   mail:
     enabled: false
     imap_host: "imap.gmail.com"
     imap_port: 993
     imap_username: ""
     imap_mailbox: "INBOX"
+    imap_label: ""
 
 # --- SLACK INTEGRATION (valfritt) ---
 slack:
