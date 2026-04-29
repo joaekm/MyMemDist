@@ -58,6 +58,10 @@ PLACEHOLDER_MAP = {
     "__IMAP_USERNAME__": (("collectors", "mail", "imap_username"), ""),
     "__IMAP_MAILBOX__": (("collectors", "mail", "imap_mailbox"), "INBOX"),
     "__IMAP_LABEL__": (("collectors", "mail", "imap_label"), ""),
+    # Calendar-watcher (collectors.calendar.*) — selected_calendars är en
+    # lista och bevaras via _inject_protected_values, inte här.
+    "__CALENDAR_ENABLED__": (("collectors", "calendar", "enabled"), "false"),
+    "__CALENDAR_HISTORY_DAYS__": (("collectors", "calendar", "history_days"), "30"),
     # Cloud-anslutning (#180) — api_url hårdkodad till domänen i templaten
     # (memory.digitalist.tools). Ingen placeholder behövs längre.
     #
@@ -228,6 +232,14 @@ def _inject_protected_values(text: str, old_config: dict) -> tuple:
     old_channels = _get_nested(old_config, ("slack", "channels"))
     if old_channels and isinstance(old_channels, list):
         text = _inject_list(text, "channels", old_channels, "  ")
+        count += 1
+
+    # Calendar selected_calendars (collectors.calendar.selected_calendars).
+    # EKCalendar.calendarIdentifier-strängar — bevaras vid upgrade så
+    # användarens kalenderval inte nollställs.
+    old_selected = _get_nested(old_config, ("collectors", "calendar", "selected_calendars"))
+    if old_selected and isinstance(old_selected, list):
+        text = _inject_list(text, "selected_calendars", old_selected, "    ")
         count += 1
 
     # Gemini personal API key

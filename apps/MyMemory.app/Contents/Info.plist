@@ -15,7 +15,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.18.5</string>
+	<string>0.18.6</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>MacOSX</string>
@@ -34,7 +34,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>75</string>
+	<string>76</string>
 	<key>DTCompiler</key>
 	<string>com.apple.compilers.llvm.clang.1_0</string>
 	<key>DTPlatformBuild</key>
@@ -74,6 +74,8 @@
 			</dict>
 		</dict>
 	</dict>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>MyMemory läser dina kalenderhändelser från valda kalendrar för att indexera dem i ditt företagsminne. Inget skrivs eller ändras — endast läs-åtkomst används.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Digitalist. All rights reserved.</string>
 </dict>

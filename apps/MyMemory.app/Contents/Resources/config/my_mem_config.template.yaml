@@ -123,25 +123,28 @@ collectors:
     imap_mailbox: "__IMAP_MAILBOX__"
     imap_label: "__IMAP_LABEL__"
 
+  # EventKit-baserad calendar-watcher (observer-only via macOS EventKit
+  # + EKEventStoreChangedNotification). Läser kalendrar från Apple Calendar.app
+  # som redan synkar Google/iCloud/Exchange/lokala kalendrar.
+  #
+  # selected_calendars: lista över EKCalendar.calendarIdentifier för de
+  # kalendrar som ska samlas in. Tom lista = watchern startar inte
+  # (samma "obligatorisk filter"-mönster som imap_label i Mail).
+  # UI:n i Settings visar live-lista över tillgängliga kalendrar för val.
+  #
+  # Permission: TCC-prompt vid första körning ("MyMemory vill komma åt
+  # dina kalendrar"). Inga credentials i config eller Keychain.
+  calendar:
+    enabled: __CALENDAR_ENABLED__
+    selected_calendars: []
+    history_days: __CALENDAR_HISTORY_DAYS__
+
 # --- SLACK INTEGRATION (valfritt) ---
 slack:
   enabled: true
   bot_token: "__SLACK_BOT_TOKEN__"
   channels: []
   history_days: 7
-
-# --- GOOGLE INTEGRATION (valfritt) ---
-# OBS: Gmail-collectorn är borttagen efter commit 1 i observer-migrationen.
-# Mail samlas nu via IMAP (collectors.mail ovan). Calendar fortsätter via
-# Google API tills commit 2 ersätter det med secret iCal URL.
-google:
-  credentials_path: "~/MyMemory/Settings/Credentials/client_secret.json"
-  token_path: "~/MyMemory/Settings/Credentials/token.json"
-  scopes:
-    - "https://www.googleapis.com/auth/calendar.readonly"
-  calendar:
-    enabled: true
-    history_days: 30
 
 # --- FILE RETRIEVER (DropZone → Assets) ---
 file_retriever:
