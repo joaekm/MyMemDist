@@ -108,16 +108,20 @@ collectors:
 
   # IMAP-baserad mail-watcher (observer-only via IMAP IDLE).
   # App-lösenord ligger i Keychain — aldrig i config.
-  # imap_label: Gmail-label-filter via X-GM-LABELS-extension. Tom = hela
-  # mailboxen. Andra IMAP-servrar än Gmail/Google Workspace returnerar
-  # tomt SEARCH-resultat om filter sätts.
+  # imap_label: Gmail-label-filter via X-GM-LABELS-extension. Obligatorisk
+  # i 0.18.4+ — watchern startar inte utan satt label. Andra IMAP-servrar
+  # än Gmail/Google Workspace returnerar tomt SEARCH-resultat om filter sätts.
+  #
+  # Alla fält är placeholders så användarvärden bevaras vid app-uppgradering
+  # (se client/utils/config_upgrade.py PLACEHOLDER_MAP). Default-värden
+  # injiceras vid first-install av config_upgrade.
   mail:
-    enabled: false
-    imap_host: "imap.gmail.com"
-    imap_port: 993
-    imap_username: ""
-    imap_mailbox: "INBOX"
-    imap_label: ""
+    enabled: __MAIL_ENABLED__
+    imap_host: "__IMAP_HOST__"
+    imap_port: __IMAP_PORT__
+    imap_username: "__IMAP_USERNAME__"
+    imap_mailbox: "__IMAP_MAILBOX__"
+    imap_label: "__IMAP_LABEL__"
 
 # --- SLACK INTEGRATION (valfritt) ---
 slack:

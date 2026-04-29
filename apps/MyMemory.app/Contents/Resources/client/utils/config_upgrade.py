@@ -28,22 +28,42 @@ LOGGER = logging.getLogger("ConfigUpgrade")
 
 # --- Protected value extraction ---
 
-# Placeholder → key path in old config
+# Placeholder → (key_path_in_old_config, default_when_missing).
+#
+# Strukturen finns för att bevara user-mutable fält över app-uppgraderingar.
+# Vid första install (eller när fältet saknas i gammal config) används
+# default-värdet — viktigt för bool/int-fält där tom sträng skulle ge trasig
+# YAML.
+#
+# **Symmetrikrav:** Varje placeholder i config-template:en MÅSTE finnas här,
+# och vice versa. `tools/tests/contract/test_config_consistency.py` failer
+# annars. När du lägger till ett nytt user-mutable fält:
+#   1. Lägg in en placeholder i config/my_mem_config.template.yaml
+#   2. Lägg in motsvarande post här med rimlig default
+#   3. Uppdatera `tools/tests/client/test_config_upgrade.py` med fältet
+#      i `MUST_PRESERVE_FIELDS` så regression fångar framtida brott.
 PLACEHOLDER_MAP = {
-    "__APP_VERSION__": None,  # from --version arg
-    "__OWNER_ID__": ("owner", "id"),
-    "__OWNER_NAME__": ("owner", "profile", "full_name"),
-    "__OWNER_ROLE__": ("owner", "profile", "role"),
-    "__OWNER_ORG__": ("owner", "profile", "organization"),
-    "__OWNER_LOCATION__": ("owner", "profile", "location"),
-    "__SLACK_BOT_TOKEN__": ("slack", "bot_token"),
-    "__GMAIL_LABEL__": ("google", "gmail", "target_label"),
+    "__APP_VERSION__": None,  # specialfall — från --version-arg, ingen old-config-källa
+    "__OWNER_ID__": (("owner", "id"), ""),
+    "__OWNER_NAME__": (("owner", "profile", "full_name"), ""),
+    "__OWNER_ROLE__": (("owner", "profile", "role"), ""),
+    "__OWNER_ORG__": (("owner", "profile", "organization"), ""),
+    "__OWNER_LOCATION__": (("owner", "profile", "location"), ""),
+    "__SLACK_BOT_TOKEN__": (("slack", "bot_token"), ""),
+    # Mail-watcher (collectors.mail.*) — bevarade per fält. enabled/port är
+    # icke-strängar så defaults måste vara YAML-rena (false / 993, inte "").
+    "__MAIL_ENABLED__": (("collectors", "mail", "enabled"), "false"),
+    "__IMAP_HOST__": (("collectors", "mail", "imap_host"), "imap.gmail.com"),
+    "__IMAP_PORT__": (("collectors", "mail", "imap_port"), "993"),
+    "__IMAP_USERNAME__": (("collectors", "mail", "imap_username"), ""),
+    "__IMAP_MAILBOX__": (("collectors", "mail", "imap_mailbox"), "INBOX"),
+    "__IMAP_LABEL__": (("collectors", "mail", "imap_label"), ""),
     # Cloud-anslutning (#180) — api_url hårdkodad till domänen i templaten
     # (memory.digitalist.tools). Ingen placeholder behövs längre.
-    # PostgreSQL credentials (cloud-mode på server)
-    "__PG_HOST__": ("database", "postgresql", "host"),
-    "__PG_PASSWORD__": ("database", "postgresql", "password"),
-    "__TENANT_ID__": ("database", "tenant_id"),
+    #
+    # PG-credentials (__PG_HOST__, __PG_PASSWORD__, __TENANT_ID__) togs bort
+    # i 0.18.5 — de hör till server-config, inte klient-config. De låg kvar
+    # som orphan-poster sedan #180 cloud-mode-flytten.
 }
 
 # Non-placeholder protected values: key path in old config → (section_marker, key, indent)
@@ -63,23 +83,28 @@ def _get_nested(d: dict, path: tuple) -> Any:
 
 
 def _replace_placeholders(template_text: str, old_config: dict, version: str) -> str:
-    """Replace __PLACEHOLDER__ strings with values from old config."""
+    """Replace __PLACEHOLDER__ strings with values from old config.
+
+    Bevarade värden hämtas från old_config via key_path. Om värdet saknas
+    eller är tomt används default-värdet ur PLACEHOLDER_MAP-tuplen — viktigt
+    för bool/int-fält där tom sträng ger trasig YAML.
+    """
     result = template_text
     preserved = 0
 
-    for placeholder, key_path in PLACEHOLDER_MAP.items():
-        if key_path is None:
+    for placeholder, spec in PLACEHOLDER_MAP.items():
+        if spec is None:
             # Version comes from CLI arg
             result = result.replace(placeholder, version)
             continue
 
+        key_path, default = spec
         value = _get_nested(old_config, key_path)
         if value is not None and str(value).strip():
             result = result.replace(placeholder, str(value))
             preserved += 1
         else:
-            # Replace with empty string to avoid leftover placeholders
-            result = result.replace(placeholder, "")
+            result = result.replace(placeholder, default)
 
     return result, preserved
 
