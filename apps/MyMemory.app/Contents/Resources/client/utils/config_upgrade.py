@@ -62,6 +62,7 @@ PLACEHOLDER_MAP = {
     # lista och bevaras via _inject_protected_values, inte här.
     "__CALENDAR_ENABLED__": (("collectors", "calendar", "enabled"), "false"),
     "__CALENDAR_HISTORY_DAYS__": (("collectors", "calendar", "history_days"), "30"),
+    "__CALENDAR_FUTURE_DAYS__": (("collectors", "calendar", "future_days"), "14"),
     # Cloud-anslutning (#180) — api_url hårdkodad till domänen i templaten
     # (memory.digitalist.tools). Ingen placeholder behövs längre.
     #

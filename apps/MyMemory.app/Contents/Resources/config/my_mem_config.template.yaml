@@ -138,6 +138,7 @@ collectors:
     enabled: __CALENDAR_ENABLED__
     selected_calendars: []
     history_days: __CALENDAR_HISTORY_DAYS__
+    future_days: __CALENDAR_FUTURE_DAYS__
 
 # --- SLACK INTEGRATION (valfritt) ---
 slack:
