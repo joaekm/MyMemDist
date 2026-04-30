@@ -88,6 +88,7 @@ except ImportError as _e:
     _WATCHDOG_AVAILABLE = False
 
 from client.processors.text_extractor import extract_text
+from client.uploader.content_hash import compute_content_hash
 from client.utils.broker_auth import get_access_token, reload_access_token
 from client.utils.config_loader import get_config
 
@@ -235,6 +236,36 @@ class UploaderState:
             )
             conn.commit()
             return True
+
+    def mark_for_reupload(self, uuid: str) -> bool:
+        """Återställ en existerande rad till pending för re-upload (#249).
+
+        Används när watchdog detekterar att en asset-fil har modifierats
+        (samma UUID, nytt content). Skiljer sig från `upsert_pending` som
+        skip:ar existerande UUIDs.
+
+        Idempotent: om raden redan är 'pending' händer inget — WHERE-klausulen
+        filtrerar. Säkert att kalla vid varje on_modified-event.
+
+        Returns:
+            True om raden faktiskt återställdes (raden fanns och hade en
+            annan status än 'pending').
+        """
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE assets SET "
+                "    status = 'pending', "
+                "    uploaded_at = NULL, "
+                "    extracted_at = NULL, "
+                "    confirmed_at = NULL, "
+                "    last_error = NULL, "
+                "    retry_count = 0, "
+                "    next_retry_at = NULL "
+                "WHERE uuid = ? AND status != 'pending'",
+                (uuid,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def fetch_due_pending(self, limit: int = 5) -> list:
         """Hämta pending/failed-rader vars next_retry_at är nådd."""
@@ -471,9 +502,15 @@ def post_payload(api_url: str, payload: dict, verify_tls: bool = True) -> tuple:
 # --- PROCESSING ---
 
 def build_payload(*, uuid: str, source_type: str, original_filename: str,
-                  extracted_text: str, owner: str,
+                  extracted_text: str, owner: str, asset_path: str,
                   source_specific: Optional[dict] = None) -> dict:
-    """Bygg upload-payload enligt schema upload_api_v1.schema.json."""
+    """Bygg upload-payload enligt schema upload_api_v1.schema.json.
+
+    Beräknar content_hash + content_hash_algo över asset-filens body-bytes
+    (#249) för server-side upsert-routing. Hash-fel loggas som warning men
+    blockerar inte upload — payload skickas då utan hash och faller tillbaka
+    till 409-beteende på servern (bakåtkompat).
+    """
     payload = {
         'schema_version': 1,
         'uuid': uuid,
@@ -487,6 +524,19 @@ def build_payload(*, uuid: str, source_type: str, original_filename: str,
     }
     if source_specific:
         payload['metadata']['source_specific'] = source_specific
+
+    try:
+        content_hash, content_hash_algo = compute_content_hash(
+            asset_path, source_type
+        )
+        payload['content_hash'] = content_hash
+        payload['content_hash_algo'] = content_hash_algo
+    except OSError as e:  # noqa: FALLBACK_DOCUMENTED — hash-fel ska inte blockera upload; servern faller tillbaka till 409-beteende
+        LOGGER.warning(
+            f"{original_filename}: kunde inte beräkna content_hash ({e}); "
+            f"POSTar utan hash (bakåtkompat-flöde)"
+        )
+
     return payload
 
 
@@ -557,6 +607,7 @@ def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
         original_filename=filename,
         extracted_text=text,
         owner=cfg['owner'],
+        asset_path=asset_path,
     )
 
     try:
@@ -609,15 +660,34 @@ def process_asset(state: UploaderState, cfg: dict, row: dict) -> str:
         return 'failed'
 
     if status_code == 202:
-        LOGGER.info(f"{filename}: uploaded ({uuid_str})")
+        # 202 returneras både för nytt UUID (status=pending) och hash-driven
+        # re-ingest (status=updated). I båda fallen schemalägger servern
+        # ingestion → vi väntar på SSE-bekräftelse.
+        server_status = body.get("status") if isinstance(body, dict) else None
+        LOGGER.info(f"{filename}: uploaded ({uuid_str}, server={server_status})")
         state.update_status(
             uuid_str, 'uploaded',
             uploaded_at=datetime.now(timezone.utc).isoformat(),
         )
         return 'uploaded'
 
+    if status_code == 200:
+        # 200 returneras för no-op-grenarna i upsert-routern (#249):
+        # unchanged / hash_stored / algorithm_bumped. I alla tre fall är
+        # dokumentet redan ingestat på servern — markera done direkt utan
+        # att invänta SSE.
+        server_status = body.get("status") if isinstance(body, dict) else None
+        LOGGER.info(f"{filename}: server no-op (200, status={server_status})")
+        state.update_status(
+            uuid_str, 'done',
+            confirmed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return 'done'
+
     if status_code == 409:
-        # Idempotency — UUID fanns redan, markera done
+        # Idempotency — UUID fanns redan, markera done.
+        # Bakåtkompat-flödet: gammal klient utan hash, eller server som ännu
+        # inte har hash-stöd. Hash-grenen returnerar istället 200 unchanged.
         LOGGER.info(f"{filename}: already on server (409), marking done")
         state.update_status(
             uuid_str, 'done',
@@ -798,7 +868,15 @@ def discover_assets(state: UploaderState, asset_store: str) -> int:
 
 
 class AssetEventHandler(FileSystemEventHandler):
-    """Watchdog-handler: lägg in nya filer som pending."""
+    """Watchdog-handler: lägg in nya filer + återställ modifierade till pending.
+
+    on_created/on_moved → upsert_pending (skip:ar existerande UUIDs).
+    on_modified → mark_for_reupload (återställer till pending för re-POST).
+
+    Modified-grenen (#249) krävs för att watcher-uppdateringar ska nå servern.
+    Ex: CalendarWatcher skriver om dagens digest när ett event flyttas eller
+    raderas — servern måste få det nya innehållet.
+    """
 
     def __init__(self, state: UploaderState):
         self.state = state
@@ -813,6 +891,11 @@ class AssetEventHandler(FileSystemEventHandler):
             return
         self._enqueue(event.dest_path)
 
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        self._enqueue_modified(event.src_path)
+
     def _enqueue(self, path: str):
         fname = os.path.basename(path)
         uuid_str = extract_uuid(fname)
@@ -821,6 +904,14 @@ class AssetEventHandler(FileSystemEventHandler):
         source_type = detect_source_type(path)
         if self.state.upsert_pending(uuid_str, source_type, fname, path):
             LOGGER.info(f"Watchdog enqueued: {fname} ({source_type})")
+
+    def _enqueue_modified(self, path: str):
+        fname = os.path.basename(path)
+        uuid_str = extract_uuid(fname)
+        if not uuid_str:
+            return
+        if self.state.mark_for_reupload(uuid_str):
+            LOGGER.info(f"Watchdog re-enqueued (modified): {fname}")
 
 
 # --- MAIN LOOP ---
