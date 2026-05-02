@@ -141,6 +141,11 @@ collectors:
     future_days: __CALENDAR_FUTURE_DAYS__
 
 # --- SLACK INTEGRATION (valfritt) ---
+# Läses av Swift SlackWatcher (REST + triggers, observer-only). Tidigare
+# slack_collector.py är borttagen (observer-migration commit 3, 2026-05-01).
+# Token kan vara xoxp- (user OAuth) eller xoxb- (bot) — båda funkar för
+# conversations.history. Token-storage flyttas till Keychain i commit 7
+# (config-flytt yaml→JSON).
 slack:
   enabled: true
   bot_token: "__SLACK_BOT_TOKEN__"
