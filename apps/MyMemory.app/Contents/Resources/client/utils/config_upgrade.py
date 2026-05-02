@@ -1,366 +1,200 @@
 #!/usr/bin/env python3
 """
-Config Upgrade — populate template with protected values from existing config.
+Config Upgrade — merge user values into JSON template.
 
-Called by SetupManager.swift during app upgrade to migrate user config
-to new template structure while preserving API keys, owner info, etc.
+Princip 14 (Modellen är sanningen — serialisering är en projektion):
+config persisteras som JSON. Upgrade-flödet är ren dict-merge. Den
+gamla yaml-text-manipulationen (placeholder-replace, _inject_list,
+_inject_line_value) är riven — listor och nested-strukturer hanteras
+naturligt av deep-merge.
+
+Hanterar tre scenarier:
+  1. Bara JSON finns på target → dict-merge med template, skriv tillbaka
+  2. Bara legacy YAML finns → engångs-migration: läs yaml, merge med
+     template, skriv som JSON på target. YAML lämnas orörd för commit 8
+     (~/MyMemory-rensning).
+  3. Inget finns → första install? Skriv template som JSON. (Vanligtvis
+     hanterad av SetupManager.generateConfig istället.)
+
+HARDFAIL i alla felfall — princip 6.
 
 Usage:
-    python config_upgrade.py --template PATH --config PATH --version X.Y.Z
+    python config_upgrade.py \\
+        --template PATH/to/template.json \\
+        --config PATH/to/target.json \\
+        --legacy-yaml PATH/to/legacy.yaml \\
+        --version X.Y.Z
 """
 
 import argparse
+import json
 import logging
 import os
-import re
 import shutil
 import sys
-from pathlib import Path
 from typing import Any
-
-try:
-    import yaml
-except ImportError:
-    print("ERROR: PyYAML required")
-    sys.exit(1)
 
 LOGGER = logging.getLogger("ConfigUpgrade")
 
-# --- Protected value extraction ---
 
-# Placeholder → (key_path_in_old_config, default_when_missing).
-#
-# Strukturen finns för att bevara user-mutable fält över app-uppgraderingar.
-# Vid första install (eller när fältet saknas i gammal config) används
-# default-värdet — viktigt för bool/int-fält där tom sträng skulle ge trasig
-# YAML.
-#
-# **Symmetrikrav:** Varje placeholder i config-template:en MÅSTE finnas här,
-# och vice versa. `tools/tests/contract/test_config_consistency.py` failer
-# annars. När du lägger till ett nytt user-mutable fält:
-#   1. Lägg in en placeholder i config/my_mem_config.template.yaml
-#   2. Lägg in motsvarande post här med rimlig default
-#   3. Uppdatera `tools/tests/client/test_config_upgrade.py` med fältet
-#      i `MUST_PRESERVE_FIELDS` så regression fångar framtida brott.
-PLACEHOLDER_MAP = {
-    "__APP_VERSION__": None,  # specialfall — från --version-arg, ingen old-config-källa
-    "__OWNER_ID__": (("owner", "id"), ""),
-    "__OWNER_NAME__": (("owner", "profile", "full_name"), ""),
-    "__OWNER_ROLE__": (("owner", "profile", "role"), ""),
-    "__OWNER_ORG__": (("owner", "profile", "organization"), ""),
-    "__OWNER_LOCATION__": (("owner", "profile", "location"), ""),
-    "__SLACK_BOT_TOKEN__": (("slack", "bot_token"), ""),
-    # Mail-watcher (collectors.mail.*) — bevarade per fält. enabled/port är
-    # icke-strängar så defaults måste vara YAML-rena (false / 993, inte "").
-    "__MAIL_ENABLED__": (("collectors", "mail", "enabled"), "false"),
-    "__IMAP_HOST__": (("collectors", "mail", "imap_host"), "imap.gmail.com"),
-    "__IMAP_PORT__": (("collectors", "mail", "imap_port"), "993"),
-    "__IMAP_USERNAME__": (("collectors", "mail", "imap_username"), ""),
-    "__IMAP_MAILBOX__": (("collectors", "mail", "imap_mailbox"), "INBOX"),
-    "__IMAP_LABEL__": (("collectors", "mail", "imap_label"), ""),
-    # Calendar-watcher (collectors.calendar.*) — selected_calendars är en
-    # lista och bevaras via _inject_protected_values, inte här.
-    "__CALENDAR_ENABLED__": (("collectors", "calendar", "enabled"), "false"),
-    "__CALENDAR_HISTORY_DAYS__": (("collectors", "calendar", "history_days"), "30"),
-    "__CALENDAR_FUTURE_DAYS__": (("collectors", "calendar", "future_days"), "14"),
-    # Cloud-anslutning (#180) — api_url hårdkodad till domänen i templaten
-    # (memory.digitalist.tools). Ingen placeholder behövs längre.
-    #
-    # PG-credentials (__PG_HOST__, __PG_PASSWORD__, __TENANT_ID__) togs bort
-    # i 0.18.5 — de hör till server-config, inte klient-config. De låg kvar
-    # som orphan-poster sedan #180 cloud-mode-flytten.
-}
-
-# Non-placeholder protected values: key path in old config → (section_marker, key, indent)
-# Används av upgrade_config() för att bevara specifika värden under app-uppgradering.
-# Lägg till nya poster här om config-nycklar med user-provided secrets tillkommer.
-PROTECTED_LINE_VALUES = {}
-
-
-def _get_nested(d: dict, path: tuple) -> Any:
-    """Safely get a nested value from a dict."""
-    current = d
-    for key in path:
-        if not isinstance(current, dict) or key not in current:
-            return None
-        current = current[key]
-    return current
-
-
-def _replace_placeholders(template_text: str, old_config: dict, version: str) -> str:
-    """Replace __PLACEHOLDER__ strings with values from old config.
-
-    Bevarade värden hämtas från old_config via key_path. Om värdet saknas
-    eller är tomt används default-värdet ur PLACEHOLDER_MAP-tuplen — viktigt
-    för bool/int-fält där tom sträng ger trasig YAML.
+def _deep_merge(template: dict, user: dict) -> dict:
     """
-    result = template_text
-    preserved = 0
+    Deep-merge user-värden in i template.
 
-    for placeholder, spec in PLACEHOLDER_MAP.items():
-        if spec is None:
-            # Version comes from CLI arg
-            result = result.replace(placeholder, version)
+    Princip:
+    - Template definierar struktur + defaults
+    - User-värden överskrider template där de finns
+    - Listor från user bevaras (inte template-defaults), eftersom användaren
+      kan ha ändrat dem (t.ex. selected_calendars, slack.channels)
+    - Nya nycklar från template läggs in (det är poängen med upgrade)
+    - Nycklar som finns i user men inte i template ignoreras (de är borta
+      ur modellen)
+
+    Returnerar nytt dict, modifierar inget input.
+    """
+    result: dict[str, Any] = {}
+    for key, template_value in template.items():
+        if key not in user:
+            # Nyckel finns bara i template → använd template-värdet
+            result[key] = template_value
             continue
 
-        key_path, default = spec
-        value = _get_nested(old_config, key_path)
-        if value is not None and str(value).strip():
-            result = result.replace(placeholder, str(value))
-            preserved += 1
+        user_value = user[key]
+
+        if isinstance(template_value, dict) and isinstance(user_value, dict):
+            # Båda är dicts → rekursiv merge
+            result[key] = _deep_merge(template_value, user_value)
         else:
-            result = result.replace(placeholder, default)
+            # User-värdet vinner (inkl. listor, scalars, None)
+            result[key] = user_value
+    return result
 
-    return result, preserved
 
-
-def _inject_list(text: str, pattern: str, items: list, indent: str) -> str:
-    """Replace a YAML list placeholder with actual items.
-
-    Handles both empty list (key: []) and populated list formats.
+def _load_user_config(json_path: str, legacy_yaml_path: str | None) -> tuple[dict, str]:
     """
-    if not items:
-        return text
+    Hitta och läs användarens nuvarande config.
 
-    # Build YAML list
-    yaml_lines = []
-    for item in items:
-        # Quote strings that contain special YAML chars
-        if isinstance(item, str):
-            yaml_lines.append(f'{indent}  - "{item}"')
-        else:
-            yaml_lines.append(f'{indent}  - {item}')
-    yaml_block = "\n".join(yaml_lines)
+    Returnerar (dict, source) där source är "json" eller "yaml-legacy" eller
+    "none". HARDFAIL om en path finns men inte kan parsas.
+    """
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f), "json"
+            except json.JSONDecodeError as e:
+                raise SystemExit(
+                    f"FAIL: existerande config på {json_path} är inte giltig "
+                    f"JSON: {e}. Kör inte upgrade — användaren måste fixa "
+                    f"manuellt eller restaurera från .pre-upgrade-backup."
+                )
 
-    # Replace empty list: "key: []"
-    empty_pattern = f'{indent}{pattern}: []'
-    if empty_pattern in text:
-        text = text.replace(empty_pattern, f'{indent}{pattern}:\n{yaml_block}')
-        return text
+    if legacy_yaml_path and os.path.exists(legacy_yaml_path):
+        try:
+            import yaml  # type: ignore[import-untyped]
+        except ImportError:
+            raise SystemExit(
+                "FAIL: legacy yaml-migration kräver PyYAML. Installera via "
+                "venv eller migrera manuellt."
+            )
+        with open(legacy_yaml_path, "r", encoding="utf-8") as f:
+            try:
+                user_config = yaml.safe_load(f) or {}
+            except yaml.YAMLError as e:
+                raise SystemExit(
+                    f"FAIL: legacy yaml på {legacy_yaml_path} kan inte parsas: "
+                    f"{e}"
+                )
+        return user_config, "yaml-legacy"
 
-    # Replace populated default list (multi-line)
-    regex = re.compile(
-        rf'^({re.escape(indent)}{re.escape(pattern)}:\s*)\n'
-        rf'((?:{re.escape(indent)}  - .+\n?)+)',
-        re.MULTILINE
-    )
-    match = regex.search(text)
-    if match:
-        text = text[:match.start()] + f'{indent}{pattern}:\n{yaml_block}\n' + text[match.end():]
-
-    return text
-
-
-def _inject_line_value(text: str, section_marker: str, key: str, value: str, indent: str) -> str:
-    """Replace a specific key's value in a YAML section."""
-    if value is None or str(value).strip() == "":
-        return text
-
-    # Find the section, then find the key within it
-    lines = text.split('\n')
-    in_section = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped == section_marker or stripped.startswith(section_marker):
-            in_section = True
-            continue
-        if in_section:
-            # Detect section end (non-indented line that isn't empty/comment)
-            if stripped and not stripped.startswith('#') and not line.startswith(indent):
-                in_section = False
-                continue
-            # Match the key
-            key_pattern = f'{key}:'
-            if stripped.startswith(key_pattern):
-                # Preserve inline comment
-                comment = ""
-                if '#' in line:
-                    comment_idx = line.index('#')
-                    comment = "  " + line[comment_idx:]
-
-                # Determine actual indentation of this line
-                line_indent = line[:len(line) - len(line.lstrip())]
-                # Quote value if it contains special chars
-                if isinstance(value, str) and value:
-                    lines[i] = f'{line_indent}{key}: "{value}"{comment}'
-                else:
-                    lines[i] = f'{line_indent}{key}: ""{comment}'
-                return '\n'.join(lines)
-
-    return text
+    return {}, "none"
 
 
-def _inject_aliases(text: str, aliases: list) -> str:
-    """Insert owner aliases after the owner.id line."""
-    if not aliases:
-        return text
+def upgrade_config(
+    template_path: str,
+    config_path: str,
+    legacy_yaml_path: str | None,
+    version: str,
+) -> bool:
+    """
+    Merga template + användar-config, skriv resultat som JSON.
 
-    yaml_lines = [f'    - "{a}"' for a in aliases]
-    alias_block = "  aliases:\n" + "\n".join(yaml_lines)
+    Princip 14: ingen text-manipulation, ingen handskriven fält-mappning.
+    Bara dict-merge mellan två giltiga JSON-strukturer.
 
-    # Find owner.id line and insert after it
-    lines = text.split('\n')
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith('id:') and i > 0:
-            # Check we're in the owner section
-            for j in range(i - 1, max(0, i - 5), -1):
-                if lines[j].strip() == 'owner:' or lines[j].strip().startswith('owner:'):
-                    # Insert aliases after the id line
-                    lines.insert(i + 1, alias_block)
-                    return '\n'.join(lines)
-
-    return text
-
-
-def _inject_protected_values(text: str, old_config: dict) -> tuple:
-    """Inject non-placeholder protected values into template text."""
-    count = 0
-
-    # Owner skills
-    old_skills = _get_nested(old_config, ("owner", "profile", "skills"))
-    if old_skills and isinstance(old_skills, list):
-        text = _inject_list(text, "skills", old_skills, "    ")
-        count += 1
-
-    # Owner aliases
-    old_aliases = _get_nested(old_config, ("owner", "aliases"))
-    if old_aliases and isinstance(old_aliases, list):
-        text = _inject_aliases(text, old_aliases)
-        count += 1
-
-    # Slack channels
-    old_channels = _get_nested(old_config, ("slack", "channels"))
-    if old_channels and isinstance(old_channels, list):
-        text = _inject_list(text, "channels", old_channels, "  ")
-        count += 1
-
-    # Calendar selected_calendars (collectors.calendar.selected_calendars).
-    # EKCalendar.calendarIdentifier-strängar — bevaras vid upgrade så
-    # användarens kalenderval inte nollställs.
-    old_selected = _get_nested(old_config, ("collectors", "calendar", "selected_calendars"))
-    if old_selected and isinstance(old_selected, list):
-        text = _inject_list(text, "selected_calendars", old_selected, "    ")
-        count += 1
-
-    # Gemini personal API key
-    old_gemini_personal = _get_nested(old_config, ("ai_engine", "gemini", "api_key_personal"))
-    if old_gemini_personal:
-        text = _inject_line_value(text, "gemini:", "api_key_personal", old_gemini_personal, "    ")
-        count += 1
-
-    # OpenAI API key
-    old_openai = _get_nested(old_config, ("ai_engine", "openai", "api_key"))
-    if old_openai:
-        text = _inject_line_value(text, "openai:", "api_key", old_openai, "    ")
-        count += 1
-
-    # Generic protected line values (secrets, tokens)
-    for key_path, (section, key, indent) in PROTECTED_LINE_VALUES.items():
-        old_value = _get_nested(old_config, key_path)
-        if old_value:
-            text = _inject_line_value(text, section, key, old_value, indent)
-            count += 1
-
-    return text, count
-
-
-def upgrade_config(template_path: str, config_path: str, version: str) -> bool:
-    """Upgrade config by populating template with protected values from existing config.
-
-    1. Read template text (preserves comments)
-    2. Read old config as YAML dict
-    3. Replace placeholders with old values
-    4. Inject protected lists/complex values
-    5. Validate result
-    6. Backup old config
-    7. Write populated template as new config
-
-    Returns True on success, False on failure.
+    Returnerar True vid lyckad körning, raise SystemExit vid HARDFAIL.
     """
     # Read template
     if not os.path.exists(template_path):
-        LOGGER.error(f"Template not found: {template_path}")
-        return False
+        raise SystemExit(f"FAIL: template saknas på {template_path}")
 
-    with open(template_path, 'r', encoding='utf-8') as f:
-        template_text = f.read()
-
-    # Read old config
-    if not os.path.exists(config_path):
-        LOGGER.error(f"Config not found: {config_path}")
-        return False
-
-    with open(config_path, 'r', encoding='utf-8') as f:
-        old_text = f.read()
-
-    try:
-        old_config = yaml.safe_load(old_text) or {}
-    except yaml.YAMLError as e:
-        LOGGER.error(f"Failed to parse old config: {e}")
-        return False
-
-    old_version = old_config.get("version", "?")
-
-    # Phase 1: Replace placeholders
-    result_text, placeholder_count = _replace_placeholders(template_text, old_config, version)
-
-    # Phase 2: Inject protected values
-    result_text, inject_count = _inject_protected_values(result_text, old_config)
-
-    total_preserved = placeholder_count + inject_count
-
-    # Phase 3: Validate
-    try:
-        result_config = yaml.safe_load(result_text)
-        if not isinstance(result_config, dict):
-            LOGGER.error("Validation failed: result is not a dict")
-            return False
-    except yaml.YAMLError as e:
-        LOGGER.error(f"Validation failed: {e}")
-        return False
-
-    # Verify version was set
-    if result_config.get("version") != version:
-        LOGGER.error(f"Version mismatch: expected {version}, got {result_config.get('version')}")
-        return False
-
-    # Phase 4: Backup old config
-    backup_path = config_path + ".pre-upgrade"
-    try:
-        shutil.copy2(config_path, backup_path)
-    except OSError as e:
-        LOGGER.error(f"Failed to create backup: {e}")
-        return False
-
-    # Phase 5: Write new config
-    try:
-        with open(config_path, 'w', encoding='utf-8') as f:
-            f.write(result_text)
-    except OSError as e:
-        LOGGER.error(f"Failed to write config: {e}")
-        # Restore backup
+    with open(template_path, "r", encoding="utf-8") as f:
         try:
-            shutil.copy2(backup_path, config_path)
-        except OSError as restore_err:
-            LOGGER.error(f"Failed to restore backup: {restore_err}")
-        return False
+            template = json.load(f)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"FAIL: template är inte giltig JSON: {e}")
 
-    print(f"Upgraded config {old_version} -> {version} ({total_preserved} values preserved)")
+    user_config, source = _load_user_config(config_path, legacy_yaml_path)
+    old_version = user_config.get("version", "?") if user_config else "?"
+
+    # Merge: template definierar struktur, user-värden vinner
+    merged = _deep_merge(template, user_config)
+
+    # Sätt nya version-strängen
+    merged["version"] = version
+
+    # Backup existerande JSON om den finns (innan vi skriver över)
+    if os.path.exists(config_path):
+        backup_path = config_path + ".pre-upgrade"
+        try:
+            shutil.copy2(config_path, backup_path)
+        except OSError as e:
+            raise SystemExit(f"FAIL: kunde inte skapa backup: {e}")
+
+    # Säkerställ target-katalogen
+    config_dir = os.path.dirname(config_path)
+    if config_dir:
+        os.makedirs(config_dir, exist_ok=True)
+
+    # Skriv som pretty JSON (deterministisk ordning för diff-läsbarhet)
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2, sort_keys=True, ensure_ascii=False)
+            f.write("\n")
+    except OSError as e:
+        raise SystemExit(f"FAIL: kunde inte skriva config: {e}")
+
+    if source == "yaml-legacy":
+        print(
+            f"Migrated yaml→json + upgraded {old_version} → {version} "
+            f"(target={config_path}, source={legacy_yaml_path})"
+        )
+    elif source == "json":
+        print(f"Upgraded {old_version} → {version} (target={config_path})")
+    else:
+        print(f"Created fresh config from template ({version}) at {config_path}")
+
     return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Upgrade config from template")
-    parser.add_argument("--template", required=True, help="Path to template YAML")
-    parser.add_argument("--config", required=True, help="Path to existing config YAML")
+    parser = argparse.ArgumentParser(description="Merge template into user config (JSON)")
+    parser.add_argument("--template", required=True, help="Path to template JSON")
+    parser.add_argument(
+        "--config", required=True, help="Path to target config JSON"
+    )
+    parser.add_argument(
+        "--legacy-yaml",
+        required=False,
+        default=None,
+        help="Path to legacy yaml for one-time migration (optional)",
+    )
     parser.add_argument("--version", required=True, help="New version string")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    success = upgrade_config(args.template, args.config, args.version)
-    sys.exit(0 if success else 1)
+    upgrade_config(args.template, args.config, args.legacy_yaml, args.version)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
