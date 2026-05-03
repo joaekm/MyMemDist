@@ -357,14 +357,19 @@ class UploaderState:
 
 
 # --- SOURCE TYPE DETECTION ---
-
-def _load_source_mappings():
-    """Läs source_mappings + default från schema (SSOT)."""
-    from client.utils.schema_validator import SchemaValidator
-    sv = SchemaValidator()
-    return sv.get_source_type_mappings(), sv.get_default_source_type()
-
-_SOURCE_MAPPINGS, _DEFAULT_SOURCE_TYPE = _load_source_mappings()
+#
+# Princip 1 (klient/server är två separata system, inga delade datafiler):
+# graf-schema är server-domän. Klienten läser INTE schema-filen för
+# source_type-mappning — den är hårdkodad här. När server-side ontologin
+# ändras uppdateras denna konstant manuellt (sker sällan; mappningarna
+# är stabila).
+_SOURCE_MAPPINGS: dict[str, str] = {
+    "slack": "Slack Log",
+    "mail": "Email Thread",
+    "calendar": "Calendar Event",
+    "transcripts": "Transcript",
+}
+_DEFAULT_SOURCE_TYPE: str = "Document"
 
 
 def detect_source_type(asset_path: str) -> str:
