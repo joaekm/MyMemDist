@@ -19,10 +19,10 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			9DY4z53VMs08rjamJdz3xz5lHNs=
+			/jnGMP53FGGpg2wNVFOWmZtF1ww=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"f43638cf9dd532cd3cae36a625dcf7c73e651cdb" or cdhash H"613dc8f4e7c97e88ef3c822d3ac14984d80b4727"</string>
+			<string>anchor apple generic and identifier "org.ggml.whisper" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "87TBZVZ827")</string>
 		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>
