@@ -1,7 +1,7 @@
 {
-  "version": "0.20.2",
+  "version": "0.20.3",
   "date": "2026-05-05",
-  "description": "# Release Notes — 0.20.2 Pipeline-fix. `create_installer.sh` river inte längre notariseringen via tyst ad-hoc-resignering. 0.20.1 producerade en DMG som Gatekeeper avvisade pga korrumperad signatur — `cp -R` på signerad bundle bröt extended attributes, fallback-grenen ad-hoc-resignerade tyst, notariseringen revs. ## Vad fixas - **Pipeline:** `create_installer.sh` använder nu `ditto` istället för `cp -R` för att kopiera den notariserade .app:en till DMG-content. Källans signatur- status avgör flödet, inte destinationens. Princip 6 (HARDFAIL > silent fallback): pipelinen avbryter med tydligt felmeddelande om Developer ID- signaturen bryts vid kopiering, istället för att tyst nedgradera till ad-hoc. - **Två compile-warnings:** `case let .working(_, _)` → `case .working` i UploaderStatus.swift. Dead `let extLower` i MemoryDropWatcher.swift. ## Inga kod-ändringar i klienten Funktionellt identisk med 0.20.1. Source_format-rygg (#263), uttömmande HTTP-klassificering (#264), Slack-reset-migration (#265) och uploader-status (princip 13 punkt 6) är samma som i 0.20.1. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.20.2/MyMemory-Installer.dmg",
+  "description": "# Release Notes Skriv versionsbeskrivningen för nästa release här. Exempel: - Ny funktion X - Buggfix Y - Förbättring Z ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.20.3/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
