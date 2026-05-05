@@ -1,7 +1,7 @@
 {
-  "version": "0.20.5",
+  "version": "0.20.6",
   "date": "2026-05-05",
   "description": "# Release Notes Skriv versionsbeskrivningen för nästa release här. Exempel: - Ny funktion X - Buggfix Y - Förbättring Z ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.20.5/MyMemory-Installer.dmg",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.20.6/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
