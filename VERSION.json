@@ -1,7 +1,7 @@
 {
-  "version": "0.20.6",
-  "date": "2026-05-05",
-  "description": "# Release Notes Skriv versionsbeskrivningen för nästa release här. Exempel: - Ny funktion X - Buggfix Y - Förbättring Z ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.20.6/MyMemory-Installer.dmg",
+  "version": "0.20.7",
+  "date": "2026-05-06",
+  "description": "# Release Notes Två permission-fixar som båda hade samma rotorsak: saknade entitlements under Hardened Runtime. **Buggfixar:** - **Kalender-åtkomst frågas nu om vid första körning.** Tidigare nekades kalender-watchern tyst utan att macOS visade dialogrutan, eftersom `com.apple.security.personal-information.calendars`-entitlementet saknades. Fix landad till main 2026-05-06. - **Inga fler lösenordsprompts vid app-uppgradering.** Keychain-items skrivs nu i en team-baserad access group istället för att bindas till varje binärs exakta code identity. Re-signering bryter inte längre ACL:n. **Engångskostnad vid uppgradering till 0.20.7:** Befintliga OAuth-tokens och IMAP-app-password raderas tyst vid första boot (deras gamla ACL går inte att överföra utan systemprompt). Du behöver: 1. Logga in i Google på nytt via Settings (öppnar webfönster, inte systemprompt) 2. Klistra in IMAP-app-password på nytt i Settings Från och med 0.20.8 är alla framtida releaser helt tysta — inga permission-prompts från macOS vid uppgradering. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.20.7/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
