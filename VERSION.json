@@ -1,7 +1,7 @@
 {
-  "version": "0.22.6",
+  "version": "0.22.7",
   "date": "2026-05-15",
-  "description": "# Release Notes ## Ny app-ikon och menubar-ikon MyMemory har fått ny visuell identitet — prism-emblem som app-ikon (Dock, Finder, About-fönstret) och en monokrom variant som menubar-ikon. Menubar-ikonen är template-renderad, så macOS tintar den automatiskt baserat på dark/light mode. ## Status-feedback i menubar Menubar visar brand-ikonen i normalläge (lyssnar / aktiv) och behåller SF Symbol vid fel-tillstånd så att collector-problem syns utan att behöva öppna popovern. Tidigare visades en SF Symbol oavsett status. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.6/MyMemory-Installer.dmg",
+  "description": "# Release Notes ## Menubar-ikonen renderas i rätt storlek I 0.22.6 fyllde brand-ikonen hela menubarens höjd och bredd — custom asset-images renderas i sin naturliga viewBox-storlek till skillnad från SF Symbols som auto-anpassar. Patchen wirear `.resizable().scaledToFit().frame(width: 18, height: 18)` på brand-ikonen och expanderar SVG:ns viewBox med padding så glyfen sitter inom ~75% av ikon-ramen. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.7/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
