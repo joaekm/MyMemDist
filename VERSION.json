@@ -1,7 +1,7 @@
 {
-  "version": "0.22.10",
+  "version": "0.22.11",
   "date": "2026-05-16",
-  "description": "# Release Notes ## Update-knappen hittar nya releaser igen \"Leta efter uppdateringar\" hämtade VERSION.json via default URLSession-cache. `raw.githubusercontent.com` sätter `cache-control: max-age=300`, vilket innebar att en check inom 5 minuter efter en tidigare check serverade gammal JSON — har du klickat när din installerade version var senaste tillgängliga, fick du fortsatt \"samma version, ingen update\" även efter att en nyare release publicerats. Fixad med `URLRequest.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData` — varje klick hämtar nu färska bytes. Nätverks-/server-fel surface:ar dessutom som synligt fel-meddelande under knappen istället för att tysta i NSLog. ## Brand-emblem i popover-headern `Image(systemName: \"m.square.fill\")` ersatt med riktiga memphis-emblemet (transparent variant utan mörk bg) i popover-headern. 28pt — 25% större än SF Symbol vid `.title2` så den matchar visuellt med \"MyMemory\"-rubriken och versionsraden. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.10/MyMemory-Installer.dmg",
+  "description": "# Release Notes ## App-ikon med padding mellan emblem och bg-rundning Memphis-SVG:n hade tidigare clip-cirkel + bg-rect i exakt samma 360×360-storlek — den färgade emblemet tryckte direkt mot de rundade hörnen som macOS applicerar, utan andningsrum. Nu expanderas viewBox till 440×440 medan emblem-cirkeln stannar vid r=180, vilket ger ~40-unit padding på alla sidor. Emblem-andelen blir ~82% av kanvas — i nivå med t.ex. Chrome-ikonen. Menubar-ikonen och brand-emblemet i popover-headern är oförändrade. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.11/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
