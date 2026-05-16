@@ -1,7 +1,7 @@
 {
-  "version": "0.22.9",
+  "version": "0.22.10",
   "date": "2026-05-16",
-  "description": "# Release Notes ## Omarbetad brand-emblem Prism-emblemet har fått en sista designomgång: **App-ikonen (memphis)** — ny mörk ink-bakgrund (gradient `#4A4439` → `#0D0F18`) bakom emblemet. Gradienterna i de tre fälten bytta från \"färg → mörkare variant\" till mer levande \"färg → komplementär färg\": - Vänster: magenta `#E91E63` → rosa `#FF1DA5` - Mitten (mandelformen): violet `#AD87ED` → mörk-lila `#6D1A76` - Höger: cyan `#02B8D4` → mint `#6BFCB8` **Menubar-ikonen (mono)** — kil i toppen öppnad så stroke-bredden inte \"äter\" av mandelformens visuella vikt. Brytpunkterna flyttade från `(278.44, 70.86)` / `(401.56, 70.86)` till `(248.63, 84.91)` / `(431.37, 84.91)`, mandelformens spets till `(340, 134.95)`. `stroke-linecap=\"round\"` lagt till för mjukare ändar på de tre kurvorna. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.9/MyMemory-Installer.dmg",
+  "description": "# Release Notes ## Update-knappen hittar nya releaser igen \"Leta efter uppdateringar\" hämtade VERSION.json via default URLSession-cache. `raw.githubusercontent.com` sätter `cache-control: max-age=300`, vilket innebar att en check inom 5 minuter efter en tidigare check serverade gammal JSON — har du klickat när din installerade version var senaste tillgängliga, fick du fortsatt \"samma version, ingen update\" även efter att en nyare release publicerats. Fixad med `URLRequest.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData` — varje klick hämtar nu färska bytes. Nätverks-/server-fel surface:ar dessutom som synligt fel-meddelande under knappen istället för att tysta i NSLog. ## Brand-emblem i popover-headern `Image(systemName: \"m.square.fill\")` ersatt med riktiga memphis-emblemet (transparent variant utan mörk bg) i popover-headern. 28pt — 25% större än SF Symbol vid `.title2` så den matchar visuellt med \"MyMemory\"-rubriken och versionsraden. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.10/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
