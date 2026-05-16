@@ -1,7 +1,7 @@
 {
-  "version": "0.22.7",
-  "date": "2026-05-15",
-  "description": "# Release Notes ## Menubar-ikonen renderas i rätt storlek I 0.22.6 fyllde brand-ikonen hela menubarens höjd och bredd — custom asset-images renderas i sin naturliga viewBox-storlek till skillnad från SF Symbols som auto-anpassar. Patchen wirear `.resizable().scaledToFit().frame(width: 18, height: 18)` på brand-ikonen och expanderar SVG:ns viewBox med padding så glyfen sitter inom ~75% av ikon-ramen. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.7/MyMemory-Installer.dmg",
+  "version": "0.22.8",
+  "date": "2026-05-16",
+  "description": "# Release Notes ## Menubar-ikonen renderas i rätt storlek (på riktigt den här gången) 0.22.7 försökte fixa den oversized brand-ikonen med `.resizable().frame()`-modifiers i SwiftUI, men `MenuBarExtra`-labelens layout-context respekterar inte de modifiers. Rotorsaken låg i SVG-asseten själv: utan explicita `width`/`height`-attribut tolkar Xcode SVG:ns `viewBox`-dimensioner som intrinsic-storlek — i vårt fall 480pt, vilket fyllde menubaren. Rätt fix per [bjango: Designing macOS menu bar extras](https://bjango.com/articles/designingmenubarextras/): SVG-root får `width=\"22\" height=\"22\"` så intrinsic-storleken matchar menubar-höjden (22pt max). `viewBox` behåller path-koordinaterna oförändrade. Inga SwiftUI-modifiers behövs. ## Tjockare outline på menubar-ikonen Stroke-vikten höjd från `3` till `33` i SVG-units (480-viewBox), vilket renderar till ~1,5pt visible stroke vid 22pt menubar-höjd — i nivå med SF Symbols regular-vikt. Tidigare var outlinen praktiskt taget osynlig (~0,14pt visible). ## Ny färgpalett på app-ikonen Prism-emblemets tre fält har bytt färg från cyan/gul/grön till magenta/violet/cyan: - Vänster fält: magenta `#E91E63` (mörk-stop `#80123A`) - Mitten (mandelformen): violet `#AD87ED` (mörk-stop `#4920A1`) - Höger fält: cyan `#02B8D4` (mörk-stop `#015F6F`) Gradient-struktur (100% opacity i toppen, 50% mörk-stop i botten) oförändrad. Påverkar endast färgade emblemet — menubar-ikonen är monokrom template-renderad oavsett palett. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.8/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
