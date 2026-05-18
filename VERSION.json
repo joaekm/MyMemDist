@@ -1,7 +1,7 @@
 {
-  "version": "0.22.11",
-  "date": "2026-05-16",
-  "description": "# Release Notes ## App-ikon med padding mellan emblem och bg-rundning Memphis-SVG:n hade tidigare clip-cirkel + bg-rect i exakt samma 360×360-storlek — den färgade emblemet tryckte direkt mot de rundade hörnen som macOS applicerar, utan andningsrum. Nu expanderas viewBox till 440×440 medan emblem-cirkeln stannar vid r=180, vilket ger ~40-unit padding på alla sidor. Emblem-andelen blir ~82% av kanvas — i nivå med t.ex. Chrome-ikonen. Menubar-ikonen och brand-emblemet i popover-headern är oförändrade. ",
-  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.11/MyMemory-Installer.dmg",
+  "version": "0.22.12",
+  "date": "2026-05-18",
+  "description": "# Release Notes ## Tider visas nu i din lokala tidszon Klienten producerar tidsstämplar med lokal offset istället för UTC `Z`-suffix. En Stockholm-klient skriver `2026-05-18T14:30:00+02:00` istället för `2026-05-18T12:30:00Z`. Dina minnen behåller nu kontexten \"var var jag när det här hände\" — Tokyo-resor får `+09:00`-tider direkt i klartext. Server-sidan har samtidigt fått per-tenant-tidszon för retro-konvertering av historisk data, så MCP-output (Claude Desktop m.fl.) ser konsekvent lokal-offset på allt — både gammalt och nytt. Bakgrund: princip 15-rensning av parallella timestamp-former (`Z` + `±HH:MM`-offset levde sida vid sida i kontraktet). Lokal-offset är nu enda kanoniska formen i `timestamp_v1`. ## Korrekt inspelnings-tid vid retro-import av ljud `Inspelning_YYYYMMDD_HHMM.m4a`-namngivna filer som droppas via MemoryDrop får nu sin tidsstämpel från **filnamnet**, inte från filens mtime. Tidigare: kopiera en historisk inspelning från extern disk → `timestamp_content` blev kopierings-tiden istället för inspelningens faktiska start. Nu hämtas datumet ur filnamnet om det finns där. Live-vägen (Rode-USB-import + TranscriptionWatcher som skriver vid inspelningens slut) är oförändrad — där fortsätter `mtime - duration` ge korrekt start-tid. Filename-extractorn används bara när den finns. ",
+  "download_url": "https://github.com/joaekm/MyMemDist/releases/download/v0.22.12/MyMemory-Installer.dmg",
   "min_macos": "14.0"
 }
